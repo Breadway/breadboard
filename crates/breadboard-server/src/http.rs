@@ -1,5 +1,4 @@
-//! HTTP surface. Milestone 1 only wires health + the SSE stream; route modules
-//! for issues/projects/epics/cycles/auth/webhooks are added per milestone.
+//! HTTP surface: health, SSE, auth, and the `/api` REST routes.
 
 use std::convert::Infallible;
 use std::time::Duration;
@@ -7,7 +6,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use futures::stream::Stream;
 use serde_json::json;
@@ -16,12 +15,37 @@ use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
-use crate::AppState;
+use crate::{api, auth, AppState};
 
 pub fn router(state: AppState) -> Router {
+    let api_routes = Router::new()
+        .route("/me", get(auth::me))
+        .route("/projects", get(api::list_projects).post(api::create_project))
+        .route("/projects/{id}", get(api::get_project))
+        .route("/epics", get(api::list_epics).post(api::create_epic))
+        .route("/epics/{id}", get(api::get_epic))
+        .route("/cycles", get(api::list_cycles).post(api::create_cycle))
+        .route("/cycles/{id}/start", post(api::start_cycle))
+        .route("/cycles/{id}/end", post(api::end_cycle))
+        .route("/issues", get(api::list_issues).post(api::create_issue))
+        .route(
+            "/issues/{key}",
+            patch(api::patch_issue)
+                .get(api::get_issue)
+                .delete(api::delete_issue),
+        );
+
+    let auth_routes = Router::new()
+        .route("/login", get(auth::login))
+        .route("/callback", get(auth::callback))
+        .route("/logout", post(auth::logout))
+        .route("/dev-login", post(auth::dev_login));
+
     Router::new()
         .route("/healthz", get(healthz))
         .route("/events", get(events))
+        .nest("/api", api_routes)
+        .nest("/auth", auth_routes)
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -47,13 +71,12 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
-/// Server-sent events: every [`BoardEvent`] published on the bus, as it happens.
+/// Server-sent events: every [`breadboard_core::BoardEvent`] as it is published.
 async fn events(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(state.bus.subscribe()).filter_map(|msg| match msg {
         Ok(event) => Some(Ok(Event::default().json_data(&event).unwrap_or_default())),
-        // Lagged receiver — drop the notice, the client will refetch on reconnect.
         Err(_) => None,
     });
 

@@ -47,6 +47,10 @@ impl Status {
             Status::Done => "done",
         }
     }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -60,6 +64,30 @@ pub enum Priority {
     Urgent,
 }
 
+impl Priority {
+    pub const ALL: [Priority; 5] = [
+        Priority::None,
+        Priority::Low,
+        Priority::Medium,
+        Priority::High,
+        Priority::Urgent,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Priority::None => "none",
+            Priority::Low => "low",
+            Priority::Medium => "medium",
+            Priority::High => "high",
+            Priority::Urgent => "urgent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IssueType {
@@ -68,12 +96,48 @@ pub enum IssueType {
     Pr,
 }
 
+impl IssueType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            IssueType::Issue => "issue",
+            IssueType::Pr => "pr",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "issue" => Some(IssueType::Issue),
+            "pr" => Some(IssueType::Pr),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinkKind {
     Blocks,
     BlockedBy,
     RelatesTo,
+}
+
+impl LinkKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LinkKind::Blocks => "blocks",
+            LinkKind::BlockedBy => "blocked-by",
+            LinkKind::RelatesTo => "relates-to",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "blocks" => Some(LinkKind::Blocks),
+            "blocked-by" => Some(LinkKind::BlockedBy),
+            "relates-to" => Some(LinkKind::RelatesTo),
+            _ => None,
+        }
+    }
 }
 
 /// Where a mutation originated — used for sync-loop prevention.
@@ -86,6 +150,25 @@ pub enum SyncSource {
     ForgejoWebhook,
     /// The periodic reconcile pass.
     ForgejoReconcile,
+}
+
+impl SyncSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncSource::Breadboard => "breadboard",
+            SyncSource::ForgejoWebhook => "forgejo_webhook",
+            SyncSource::ForgejoReconcile => "forgejo_reconcile",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "breadboard" => Some(SyncSource::Breadboard),
+            "forgejo_webhook" => Some(SyncSource::ForgejoWebhook),
+            "forgejo_reconcile" => Some(SyncSource::ForgejoReconcile),
+            _ => None,
+        }
+    }
 }
 
 /// A breadboard user. Identity is delegated to Forgejo (OAuth2 SSO): a
@@ -215,6 +298,27 @@ pub enum NotificationKind {
     Mention,
     CycleStarted,
     CycleEnded,
+}
+
+impl NotificationKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NotificationKind::Assigned => "assigned",
+            NotificationKind::Mention => "mention",
+            NotificationKind::CycleStarted => "cycle_started",
+            NotificationKind::CycleEnded => "cycle_ended",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "assigned" => Some(NotificationKind::Assigned),
+            "mention" => Some(NotificationKind::Mention),
+            "cycle_started" => Some(NotificationKind::CycleStarted),
+            "cycle_ended" => Some(NotificationKind::CycleEnded),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,0 +1,24 @@
+# Litestream continuous-replication config for the breadboard SQLite database.
+#
+# Run alongside breadboard-server (sidecar container, or
+# `litestream replicate` as a second systemd unit). Restore with
+# `litestream restore -o /path/to/breadboard.db <replica-url>`.
+#
+# Point `path` at the same file as `database_path` in breadboard.toml
+# (default: $XDG_DATA_HOME/breadboard/breadboard.db).
+
+dbs:
+  - path: /var/lib/breadboard/breadboard.db
+    replicas:
+      # Local filesystem replica (e.g. a mounted backup volume).
+      - type: file
+        path: /var/backups/breadboard/litestream
+
+      # Optional off-box replica. Fill in and uncomment for an
+      # S3-compatible target (MinIO / Backblaze B2 / etc).
+      # - type: s3
+      #   bucket: breadboard-backups
+      #   path: breadboard.db
+      #   endpoint: https://s3.example.com
+      #   access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+      #   secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}

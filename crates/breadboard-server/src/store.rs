@@ -1,0 +1,762 @@
+//! Database access + row→domain mapping.
+//!
+//! Runtime-checked `sqlx` queries (no compile-time macro, so the workspace
+//! builds without a live database). Enums are stored as the snake/kebab-case
+//! strings from `breadboard-core`; timestamps as RFC3339 UTC text.
+
+use anyhow::Context;
+use breadboard_core::{
+    Comment, Cycle, Epic, Issue, IssueLink, IssueType, LinkKind, Priority, Project, Status,
+    SyncSource, User,
+};
+use chrono::{DateTime, Utc};
+use sqlx::{FromRow, SqlitePool};
+
+use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject};
+use crate::error::{AppError, AppResult};
+
+fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn parse_ts(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+// ---------------------------------------------------------------------------
+// users
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct UserRow {
+    id: i64,
+    forgejo_id: i64,
+    login: String,
+    display_name: String,
+    avatar_url: Option<String>,
+}
+
+impl From<UserRow> for User {
+    fn from(r: UserRow) -> Self {
+        User {
+            id: r.id,
+            forgejo_id: r.forgejo_id,
+            login: r.login,
+            display_name: r.display_name,
+            avatar_url: r.avatar_url,
+        }
+    }
+}
+
+pub async fn upsert_user(
+    db: &SqlitePool,
+    forgejo_id: i64,
+    login: &str,
+    display_name: &str,
+    avatar_url: Option<&str>,
+) -> AppResult<User> {
+    let row: UserRow = sqlx::query_as(
+        r#"
+        INSERT INTO users (forgejo_id, login, display_name, avatar_url)
+        VALUES (?1, ?2, ?3, ?4)
+        ON CONFLICT(forgejo_id) DO UPDATE SET
+            login = excluded.login,
+            display_name = excluded.display_name,
+            avatar_url = excluded.avatar_url
+        RETURNING id, forgejo_id, login, display_name, avatar_url
+        "#,
+    )
+    .bind(forgejo_id)
+    .bind(login)
+    .bind(display_name)
+    .bind(avatar_url)
+    .fetch_one(db)
+    .await?;
+    Ok(row.into())
+}
+
+pub async fn get_user(db: &SqlitePool, id: i64) -> AppResult<User> {
+    let row: UserRow = sqlx::query_as(
+        "SELECT id, forgejo_id, login, display_name, avatar_url FROM users WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+// ---------------------------------------------------------------------------
+// projects
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct ProjectRow {
+    id: i64,
+    key: String,
+    name: String,
+    forgejo_repo: Option<String>,
+    next_number: i64,
+    archived: i64,
+}
+
+impl From<ProjectRow> for Project {
+    fn from(r: ProjectRow) -> Self {
+        Project {
+            id: r.id,
+            key: r.key,
+            name: r.name,
+            forgejo_repo: r.forgejo_repo,
+            next_number: r.next_number,
+            archived: r.archived != 0,
+        }
+    }
+}
+
+const PROJECT_COLS: &str = "id, key, name, forgejo_repo, next_number, archived";
+
+pub async fn list_projects(db: &SqlitePool) -> AppResult<Vec<Project>> {
+    let rows: Vec<ProjectRow> =
+        sqlx::query_as(&format!("SELECT {PROJECT_COLS} FROM projects ORDER BY key"))
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn get_project(db: &SqlitePool, id: i64) -> AppResult<Project> {
+    let row: ProjectRow =
+        sqlx::query_as(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"))
+            .bind(id)
+            .fetch_optional(db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+pub async fn get_project_by_key(db: &SqlitePool, key: &str) -> AppResult<Project> {
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM projects WHERE key = ?1"
+    ))
+    .bind(key)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+pub async fn create_project(db: &SqlitePool, new: &NewProject) -> AppResult<Project> {
+    new.validate().map_err(AppError::BadRequest)?;
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "INSERT INTO projects (key, name, forgejo_repo) VALUES (?1, ?2, ?3) RETURNING {PROJECT_COLS}"
+    ))
+    .bind(&new.key)
+    .bind(&new.name)
+    .bind(&new.forgejo_repo)
+    .fetch_one(db)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+            AppError::Conflict(format!("project key `{}` or repo already exists", new.key))
+        }
+        other => AppError::Db(other),
+    })?;
+    Ok(row.into())
+}
+
+// ---------------------------------------------------------------------------
+// epics
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct EpicRow {
+    id: i64,
+    key: String,
+    title: String,
+    description: Option<String>,
+    project_id: Option<i64>,
+    archived: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+impl From<EpicRow> for Epic {
+    fn from(r: EpicRow) -> Self {
+        Epic {
+            id: r.id,
+            key: r.key,
+            title: r.title,
+            description: r.description,
+            project_id: r.project_id,
+            archived: r.archived != 0,
+            created_at: parse_ts(&r.created_at),
+            updated_at: parse_ts(&r.updated_at),
+        }
+    }
+}
+
+const EPIC_COLS: &str =
+    "id, key, title, description, project_id, archived, created_at, updated_at";
+
+pub async fn list_epics(db: &SqlitePool) -> AppResult<Vec<Epic>> {
+    let rows: Vec<EpicRow> =
+        sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn get_epic(db: &SqlitePool, id: i64) -> AppResult<Epic> {
+    let row: EpicRow = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE id = ?1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+pub async fn create_epic(db: &SqlitePool, new: &NewEpic) -> AppResult<Epic> {
+    if new.key.trim().is_empty() || new.title.trim().is_empty() {
+        return Err(AppError::bad_request("key and title are required"));
+    }
+    let ts = now_rfc3339();
+    let row: EpicRow = sqlx::query_as(&format!(
+        "INSERT INTO epics (key, title, description, project_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5) RETURNING {EPIC_COLS}"
+    ))
+    .bind(&new.key)
+    .bind(&new.title)
+    .bind(&new.description)
+    .bind(new.project_id)
+    .bind(&ts)
+    .fetch_one(db)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+            AppError::Conflict(format!("epic key `{}` already exists", new.key))
+        }
+        other => AppError::Db(other),
+    })?;
+    Ok(row.into())
+}
+
+// ---------------------------------------------------------------------------
+// cycles
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct CycleRow {
+    id: i64,
+    name: String,
+    starts_on: String,
+    ends_on: String,
+    closed: i64,
+}
+
+impl From<CycleRow> for Cycle {
+    fn from(r: CycleRow) -> Self {
+        Cycle {
+            id: r.id,
+            name: r.name,
+            starts_on: r.starts_on.parse().unwrap_or_default(),
+            ends_on: r.ends_on.parse().unwrap_or_default(),
+            closed: r.closed != 0,
+        }
+    }
+}
+
+const CYCLE_COLS: &str = "id, name, starts_on, ends_on, closed";
+
+pub async fn list_cycles(db: &SqlitePool) -> AppResult<Vec<Cycle>> {
+    let rows: Vec<CycleRow> =
+        sqlx::query_as(&format!("SELECT {CYCLE_COLS} FROM cycles ORDER BY starts_on DESC"))
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn get_cycle(db: &SqlitePool, id: i64) -> AppResult<Cycle> {
+    let row: CycleRow = sqlx::query_as(&format!("SELECT {CYCLE_COLS} FROM cycles WHERE id = ?1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
+    if new.name.trim().is_empty() {
+        return Err(AppError::bad_request("name is required"));
+    }
+    if new.ends_on < new.starts_on {
+        return Err(AppError::bad_request("ends_on must be on or after starts_on"));
+    }
+    let row: CycleRow = sqlx::query_as(&format!(
+        "INSERT INTO cycles (name, starts_on, ends_on) VALUES (?1, ?2, ?3) RETURNING {CYCLE_COLS}"
+    ))
+    .bind(&new.name)
+    .bind(new.starts_on.to_string())
+    .bind(new.ends_on.to_string())
+    .fetch_one(db)
+    .await?;
+    Ok(row.into())
+}
+
+pub async fn set_cycle_closed(db: &SqlitePool, id: i64, closed: bool) -> AppResult<Cycle> {
+    let affected = sqlx::query("UPDATE cycles SET closed = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind(closed as i64)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    get_cycle(db, id).await
+}
+
+pub async fn count_cycle_issues(db: &SqlitePool, id: i64) -> AppResult<i64> {
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issues WHERE cycle_id = ?1")
+        .bind(id)
+        .fetch_one(db)
+        .await?;
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// issues
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct IssueRow {
+    id: i64,
+    key: String,
+    project_id: i64,
+    title: String,
+    body: String,
+    status: String,
+    priority: String,
+    #[sqlx(rename = "type")]
+    issue_type: String,
+    estimate: Option<i64>,
+    assignee_id: Option<i64>,
+    reporter_id: Option<i64>,
+    epic_id: Option<i64>,
+    cycle_id: Option<i64>,
+    forgejo_repo: Option<String>,
+    forgejo_number: Option<i64>,
+    created_at: String,
+    updated_at: String,
+}
+
+const ISSUE_COLS: &str = "id, key, project_id, title, body, status, priority, type, estimate, \
+    assignee_id, reporter_id, epic_id, cycle_id, forgejo_repo, forgejo_number, created_at, updated_at";
+
+/// Fields whose changes must be written to `sync_log` (and, once sync lands,
+/// pushed to Forgejo).
+pub const SYNCED_FIELDS: &[&str] = &["title", "body", "status", "assignee_id", "labels"];
+
+async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
+    let labels: Vec<String> =
+        sqlx::query_scalar("SELECT label FROM issue_labels WHERE issue_id = ?1 ORDER BY label")
+            .bind(r.id)
+            .fetch_all(db)
+            .await?;
+
+    let link_rows: Vec<(i64, String)> =
+        sqlx::query_as("SELECT target_id, kind FROM issue_links WHERE issue_id = ?1")
+            .bind(r.id)
+            .fetch_all(db)
+            .await?;
+    let links = link_rows
+        .into_iter()
+        .filter_map(|(target_id, kind)| {
+            LinkKind::parse(&kind).map(|kind| IssueLink { kind, target_id })
+        })
+        .collect();
+
+    Ok(Issue {
+        id: r.id,
+        key: r.key,
+        project_id: r.project_id,
+        title: r.title,
+        body: r.body,
+        status: Status::parse(&r.status).unwrap_or(Status::Backlog),
+        priority: Priority::parse(&r.priority).unwrap_or(Priority::None),
+        issue_type: IssueType::parse(&r.issue_type).unwrap_or(IssueType::Issue),
+        estimate: r.estimate,
+        assignee_id: r.assignee_id,
+        reporter_id: r.reporter_id,
+        epic_id: r.epic_id,
+        cycle_id: r.cycle_id,
+        labels,
+        links,
+        forgejo_ref: match (r.forgejo_repo, r.forgejo_number) {
+            (Some(repo), Some(number)) => Some(breadboard_core::ForgejoRef { repo, number }),
+            _ => None,
+        },
+        created_at: parse_ts(&r.created_at),
+        updated_at: parse_ts(&r.updated_at),
+    })
+}
+
+pub async fn get_issue_by_key(db: &SqlitePool, key: &str) -> AppResult<Issue> {
+    let row: IssueRow =
+        sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
+            .bind(key)
+            .fetch_optional(db)
+            .await?
+            .ok_or(AppError::NotFound)?;
+    hydrate(db, row).await
+}
+
+pub async fn list_issues(db: &SqlitePool, filter: &IssueFilter) -> AppResult<Vec<Issue>> {
+    let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
+        sqlx::QueryBuilder::new(format!("SELECT {ISSUE_COLS} FROM issues WHERE 1=1"));
+
+    if let Some(project) = &filter.project {
+        // Accept a key or a numeric id.
+        if let Ok(id) = project.parse::<i64>() {
+            qb.push(" AND project_id = ").push_bind(id);
+        } else {
+            let pid = get_project_by_key(db, project).await?.id;
+            qb.push(" AND project_id = ").push_bind(pid);
+        }
+    }
+    if let Some(status) = filter.status {
+        qb.push(" AND status = ").push_bind(status.as_str());
+    }
+    if let Some(cycle_id) = filter.cycle_id {
+        qb.push(" AND cycle_id = ").push_bind(cycle_id);
+    }
+    if let Some(epic_id) = filter.epic_id {
+        qb.push(" AND epic_id = ").push_bind(epic_id);
+    }
+    if let Some(assignee_id) = filter.assignee_id {
+        qb.push(" AND assignee_id = ").push_bind(assignee_id);
+    }
+    qb.push(" ORDER BY updated_at DESC");
+
+    let rows: Vec<IssueRow> = qb.build_query_as().fetch_all(db).await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(hydrate(db, r).await?);
+    }
+    Ok(out)
+}
+
+/// Create an issue. Only `title` is guaranteed; the key is allocated from the
+/// project's counter inside a transaction.
+pub async fn create_issue(
+    db: &SqlitePool,
+    new: &NewIssue,
+    reporter_id: Option<i64>,
+) -> AppResult<Issue> {
+    new.validate().map_err(AppError::BadRequest)?;
+
+    let mut tx = db.begin().await?;
+
+    let project: ProjectRow = match &new.project {
+        Some(p) if p.parse::<i64>().is_ok() => sqlx::query_as(&format!(
+            "SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"
+        ))
+        .bind(p.parse::<i64>().unwrap())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::bad_request("unknown project"))?,
+        Some(p) => sqlx::query_as(&format!(
+            "SELECT {PROJECT_COLS} FROM projects WHERE key = ?1"
+        ))
+        .bind(p)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::bad_request("unknown project"))?,
+        None => sqlx::query_as(&format!(
+            "SELECT {PROJECT_COLS} FROM projects WHERE archived = 0 ORDER BY id LIMIT 1"
+        ))
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::bad_request(
+            "no project exists yet — create one first",
+        ))?,
+    };
+
+    let number: i64 = project.next_number;
+    sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
+        .bind(project.id)
+        .execute(&mut *tx)
+        .await?;
+    let key = format!("{}-{}", project.key, number);
+    let ts = now_rfc3339();
+
+    let row: IssueRow = sqlx::query_as(&format!(
+        "INSERT INTO issues
+            (key, project_id, title, body, status, priority, type, estimate,
+             assignee_id, reporter_id, epic_id, cycle_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'issue', ?7, ?8, ?9, ?10, ?11, ?12, ?12)
+         RETURNING {ISSUE_COLS}"
+    ))
+    .bind(&key)
+    .bind(project.id)
+    .bind(new.title.trim())
+    .bind(&new.body)
+    .bind(new.status.unwrap_or(Status::Backlog).as_str())
+    .bind(new.priority.unwrap_or(Priority::None).as_str())
+    .bind(new.estimate)
+    .bind(new.assignee_id)
+    .bind(reporter_id)
+    .bind(new.epic_id)
+    .bind(new.cycle_id)
+    .bind(&ts)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for label in dedup(&new.labels) {
+        sqlx::query("INSERT OR IGNORE INTO issue_labels (issue_id, label) VALUES (?1, ?2)")
+            .bind(row.id)
+            .bind(&label)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+    hydrate(db, row).await
+}
+
+/// Apply a partial update. Writes a `sync_log` row per changed synced field.
+pub async fn update_issue(
+    db: &SqlitePool,
+    key: &str,
+    patch: &IssuePatch,
+    actor_id: Option<i64>,
+    source: SyncSource,
+) -> AppResult<Issue> {
+    let before = get_issue_by_key(db, key).await?;
+    let mut tx = db.begin().await?;
+    let mut changed: Vec<(&str, Option<String>, Option<String>)> = Vec::new();
+
+    macro_rules! set_col {
+        ($col:literal, $val:expr, $old:expr, $new:expr) => {{
+            sqlx::query(concat!("UPDATE issues SET ", $col, " = ?2 WHERE id = ?1"))
+                .bind(before.id)
+                .bind($val)
+                .execute(&mut *tx)
+                .await?;
+            changed.push(($col, $old, $new));
+        }};
+    }
+
+    if let Some(title) = &patch.title {
+        if title.trim().is_empty() {
+            return Err(AppError::bad_request("title must not be empty"));
+        }
+        if *title != before.title {
+            set_col!("title", title.trim(), Some(before.title.clone()), Some(title.clone()));
+        }
+    }
+    if let Some(body) = &patch.body {
+        if *body != before.body {
+            set_col!("body", body.as_str(), Some(before.body.clone()), Some(body.clone()));
+        }
+    }
+    if let Some(status) = patch.status {
+        if status != before.status {
+            set_col!(
+                "status",
+                status.as_str(),
+                Some(before.status.as_str().to_string()),
+                Some(status.as_str().to_string())
+            );
+        }
+    }
+    if let Some(priority) = patch.priority {
+        if priority != before.priority {
+            set_col!(
+                "priority",
+                priority.as_str(),
+                Some(before.priority.as_str().to_string()),
+                Some(priority.as_str().to_string())
+            );
+        }
+    }
+    if let Some(estimate) = patch.estimate {
+        if estimate != before.estimate {
+            set_col!(
+                "estimate",
+                estimate,
+                before.estimate.map(|v| v.to_string()),
+                estimate.map(|v| v.to_string())
+            );
+        }
+    }
+    if let Some(assignee_id) = patch.assignee_id {
+        if assignee_id != before.assignee_id {
+            set_col!(
+                "assignee_id",
+                assignee_id,
+                before.assignee_id.map(|v| v.to_string()),
+                assignee_id.map(|v| v.to_string())
+            );
+        }
+    }
+    if let Some(epic_id) = patch.epic_id {
+        if epic_id != before.epic_id {
+            set_col!(
+                "epic_id",
+                epic_id,
+                before.epic_id.map(|v| v.to_string()),
+                epic_id.map(|v| v.to_string())
+            );
+        }
+    }
+    if let Some(cycle_id) = patch.cycle_id {
+        if cycle_id != before.cycle_id {
+            set_col!(
+                "cycle_id",
+                cycle_id,
+                before.cycle_id.map(|v| v.to_string()),
+                cycle_id.map(|v| v.to_string())
+            );
+        }
+    }
+
+    if let Some(labels) = &patch.labels {
+        let next = dedup(labels);
+        if next != before.labels {
+            sqlx::query("DELETE FROM issue_labels WHERE issue_id = ?1")
+                .bind(before.id)
+                .execute(&mut *tx)
+                .await?;
+            for label in &next {
+                sqlx::query("INSERT INTO issue_labels (issue_id, label) VALUES (?1, ?2)")
+                    .bind(before.id)
+                    .bind(label)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            changed.push((
+                "labels",
+                Some(before.labels.join(",")),
+                Some(next.join(",")),
+            ));
+        }
+    }
+
+    if let Some(links) = &patch.links {
+        sqlx::query("DELETE FROM issue_links WHERE issue_id = ?1")
+            .bind(before.id)
+            .execute(&mut *tx)
+            .await?;
+        for link in links {
+            sqlx::query(
+                "INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)",
+            )
+            .bind(before.id)
+            .bind(link.target_id)
+            .bind(link.kind.as_str())
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    if changed.is_empty() && patch.links.is_none() {
+        return Ok(before);
+    }
+
+    let ts = now_rfc3339();
+    sqlx::query("UPDATE issues SET updated_at = ?2 WHERE id = ?1")
+        .bind(before.id)
+        .bind(&ts)
+        .execute(&mut *tx)
+        .await?;
+
+    for (field, old, new) in &changed {
+        if SYNCED_FIELDS.contains(field) {
+            sqlx::query(
+                "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .bind(before.id)
+            .bind(field)
+            .bind(old)
+            .bind(new)
+            .bind(source.as_str())
+            .bind(actor_id)
+            .bind(&ts)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+    get_issue_by_key(db, key).await
+}
+
+pub async fn delete_issue(db: &SqlitePool, key: &str) -> AppResult<()> {
+    let affected = sqlx::query("DELETE FROM issues WHERE key = ?1")
+        .bind(key)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if affected == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+pub async fn list_comments(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<Comment>> {
+    #[derive(FromRow)]
+    struct Row {
+        id: i64,
+        issue_id: i64,
+        author_id: Option<i64>,
+        body: String,
+        external_id: Option<i64>,
+        created_at: String,
+        updated_at: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, issue_id, author_id, body, external_id, created_at, updated_at
+         FROM comments WHERE issue_id = ?1 ORDER BY created_at",
+    )
+    .bind(issue_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Comment {
+            id: r.id,
+            issue_id: r.issue_id,
+            author_id: r.author_id,
+            body: r.body,
+            external_id: r.external_id,
+            created_at: parse_ts(&r.created_at),
+            updated_at: parse_ts(&r.updated_at),
+        })
+        .collect())
+}
+
+fn dedup(labels: &[String]) -> Vec<String> {
+    let mut seen = std::collections::BTreeSet::new();
+    labels
+        .iter()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && seen.insert(l.clone()))
+        .collect()
+}
+
+/// Seed a default project on an empty database so the API is usable immediately.
+pub async fn ensure_seed(db: &SqlitePool) -> anyhow::Result<()> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
+        .fetch_one(db)
+        .await
+        .context("counting projects")?;
+    if count == 0 {
+        sqlx::query("INSERT INTO projects (key, name) VALUES ('ROAD', 'Roadmap')")
+            .execute(db)
+            .await?;
+        tracing::info!("seeded default project ROAD (Roadmap)");
+    }
+    Ok(())
+}

@@ -5,8 +5,9 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 1** — only `/healthz` and `/events` are implemented. Routes
-marked _(planned)_ describe the intended contract.
+Status: **milestone 2** — health, SSE, REST CRUD (projects / epics / cycles /
+issues), and Forgejo OAuth2 login are implemented. Routes marked _(planned)_
+describe the intended contract for later milestones (sync, notifications).
 
 ---
 
@@ -29,8 +30,9 @@ Link kinds: `blocks` · `blocked-by` · `relates-to`.
 
 ## HTTP
 
-Base URL: the server's `public_url`. JSON in/out. Auth is a session cookie (web,
-via Forgejo OAuth2) or a bearer token (CLI/TUI).
+Base URL: the server's `public_url`. JSON in/out. `/healthz` and `/events` are
+public; everything under `/api` requires auth — a session cookie (`bb_session`,
+web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 
 ### Implemented
 
@@ -38,27 +40,40 @@ via Forgejo OAuth2) or a bearer token (CLI/TUI).
 | --- | --- | --- |
 | `GET` | `/healthz` | `{ status, version, db }`; `503` if the DB is unreachable |
 | `GET` | `/events` | SSE stream of `BoardEvent` (see below) |
+| `GET` | `/auth/login` | redirect to Forgejo OAuth2 authorize (sets a state cookie) |
+| `GET` | `/auth/callback` | exchange code, upsert user, set session, redirect to `/` |
+| `POST` | `/auth/logout` | clear the session; `204` |
+| `POST` | `/auth/dev-login` | `{ login, name? }` → session; **only when `BREADBOARD_DEV_LOGIN=1`**, else `403` |
+| `GET` | `/api/me` | current user |
+| `GET` | `/api/projects` | list |
+| `POST` | `/api/projects` | `{ key, name, forgejo_repo? }`; `key` = uppercase letters/digits; `201` |
+| `GET` | `/api/projects/{id}` | one project |
+| `GET` | `/api/epics` | list |
+| `POST` | `/api/epics` | `{ key, title, description?, project_id? }`; `201` |
+| `GET` | `/api/epics/{id}` | one epic |
+| `GET` | `/api/cycles` | list |
+| `POST` | `/api/cycles` | `{ name, starts_on, ends_on }` (ISO dates); `201` |
+| `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
+| `POST` | `/api/cycles/{id}/end` | sets `closed`, emits `cycle.ended` |
+| `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
+| `POST` | `/api/issues` | create; only `title` required. `project` defaults to the first non-archived project; key allocated from that project's counter. `201` |
+| `GET` | `/api/issues/{key}` | issue + `comments[]` |
+| `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
+| `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
+
+**IssuePatch** — every field optional; absent = unchanged. `title`, `body`,
+`status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
+`cycle_id` accept `null` to clear. `labels` and `links` replace the whole set.
 
 ### Planned
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/issues` | filter by `project`, `status`, `cycle`, `epic`, `assignee`, `mine` |
-| `POST` | `/api/issues` | create; only `title` is required |
-| `GET` | `/api/issues/:key` | one issue with labels, links, comments |
-| `PATCH` | `/api/issues/:key` | partial update; synced fields trigger writeback |
-| `DELETE` | `/api/issues/:key` | |
-| `GET`/`POST` | `/api/projects` | |
-| `GET`/`POST` | `/api/epics` | |
-| `GET`/`POST` | `/api/cycles` | |
-| `POST` | `/api/cycles/:id/start` · `/end` | emits `cycle.started` / `cycle.ended` |
-| `GET` | `/api/notifications` | current user's notifications |
-| `GET` | `/api/me` | current user |
-| `POST` | `/webhooks/forgejo` | HMAC-verified inbound sync |
-| `GET` | `/auth/login` · `/auth/callback` | Forgejo OAuth2 |
-| `POST` | `/auth/device` · `/auth/device/token` | CLI device flow |
-| `GET`/`POST`/`DELETE` | `/api/repos` | which `owner/repo` are synced |
-| `POST` | `/api/sync/reconcile` | force a full reconcile (`breadboard sync --full`) |
+| `GET` | `/api/notifications` | current user's notifications (milestone 7) |
+| `POST` | `/webhooks/forgejo` | HMAC-verified inbound sync (milestone 4) |
+| `POST` | `/auth/device` · `/auth/device/token` | CLI device flow (milestone 5) |
+| `GET`/`POST`/`DELETE` | `/api/repos` | which `owner/repo` are synced (milestone 4) |
+| `POST` | `/api/sync/reconcile` | force a full reconcile (milestone 4) |
 
 ---
 
