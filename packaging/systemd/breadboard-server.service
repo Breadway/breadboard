@@ -1,0 +1,18 @@
+[Unit]
+Description=breadboard API server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/breadboard-server
+Restart=on-failure
+RestartSec=2
+UMask=0077
+Environment=RUST_LOG=info
+# Config: ~/.config/breadboard/breadboard.toml or BREADBOARD_* env.
+# In the Hestia container this typically runs as a plain process with the
+# database on a mounted volume and Litestream as a sidecar.
+
+[Install]
+WantedBy=default.target

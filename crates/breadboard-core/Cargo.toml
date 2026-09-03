@@ -1,0 +1,12 @@
+[package]
+name = "breadboard-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Shared domain types for breadboard"
+
+[dependencies]
+serde.workspace = true
+chrono.workspace = true

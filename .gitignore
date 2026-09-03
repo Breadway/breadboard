@@ -1,0 +1,46 @@
+# Rust build artifacts
+/target/
+**/*.pdb
+
+# Node / frontend
+node_modules/
+apps/web/dist/
+apps/desktop/gen/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.direnv/
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / secrets
+.env
+.env.*
+*.env
+secrets/
+*.pem
+*.key
+*.p12
+
+# Runtime / logs / local data
+*.log
+logs/
+*.pid
+*.sock
+*.db
+*.db-wal
+*.db-shm
+/data/
+
+# Claude Code local agent state
+.claude/
+
+# graphify knowledge-graph output (local tool cache, not for commit)
+graphify-out/

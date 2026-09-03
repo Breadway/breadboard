@@ -1,0 +1,14 @@
+{
+  "name": "breadboard-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "description": "npm workspace root for breadboard's TypeScript packages",
+  "workspaces": [
+    "packages/*",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w breadboard-web",
+    "build": "npm run build -w @breadboard/api-client && npm run build -w breadboard-web"
+  }
+}

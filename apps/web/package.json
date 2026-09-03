@@ -1,0 +1,25 @@
+{
+  "name": "breadboard-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "breadboard web client — Svelte 5 SPA",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.json"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@breadboard/api-client": "*"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@tsconfig/svelte": "^5.0.4",
+    "svelte": "^5.19.0",
+    "svelte-check": "^4.1.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.7"
+  }
+}
