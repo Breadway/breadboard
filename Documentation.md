@@ -5,10 +5,10 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 4** — server (health, SSE, REST CRUD, Forgejo OAuth2), the
-Svelte web client, and the **Forgejo sync engine** (inbound webhook + reconcile
-loop + writeback, per-field LWW, `sync_log`). Routes marked _(planned)_ are for
-later milestones (notifications; PR mirroring; comment writeback).
+Status: **milestone 5** — server (REST CRUD, OAuth2, SSE, Forgejo sync engine),
+the Svelte web client, and the **`breadboard` CLI + `ratatui` TUI** with
+device-flow auth. Routes marked _(planned)_ are for later milestones
+(notifications; PR mirroring; comment writeback).
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -74,12 +74,20 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
 `cycle_id` accept `null` to clear. `labels` and `links` replace the whole set.
 
+### Device auth (CLI/TUI)
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/auth/device` | start: `{ device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval }` |
+| `GET` | `/auth/device?user_code=…` | approval page (bounces through Forgejo OAuth if not signed in) |
+| `POST` | `/auth/device/approve` | **session-authed** — `{ user_code }`; mints a `cli` token and attaches it to the pending code |
+| `POST` | `/auth/device/token` | poll — `{ device_code }` → `200 { access_token }` (one-time), `202 { status: "authorization_pending" }`, `410` expired, `404` unknown |
+
 ### Planned
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/notifications` | current user's notifications (milestone 7) |
-| `POST` | `/auth/device` · `/auth/device/token` | CLI device flow (milestone 5) |
 
 ---
 
@@ -147,17 +155,20 @@ repo with no mapped project are skipped with a warning.
 
 ## CLI
 
-`breadboard [--server URL] <command>`
+`breadboard [--server URL] <command>`. Config at
+`$XDG_CONFIG_HOME/breadboard/cli.toml` (`server`, `token`).
 
-| Command | Status |
+| Command | Notes |
 | --- | --- |
-| `ping` | implemented |
-| `auth login` · `logout` · `status` | planned (device flow) |
-| `add <title> [--project] [--epic] [--cycle]` | planned |
-| `mv <key> <status>` | planned |
-| `board [--cycle] [--project]` | planned |
-| `ls [--mine] [--status]` | planned |
-| `cycle list` · `start <name>` · `end <name>` | planned |
-| `repos list` · `add <repo> <key>` · `remove <repo>` | planned (server: implemented) |
-| `sync` | planned (server: `POST /api/sync/reconcile`) |
-| `tui` | planned (milestone 5) |
+| `ping` | connectivity check |
+| `auth login` | device flow — prints a code + URL, opens the browser, polls until approved |
+| `auth logout` · `auth status` | |
+| `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name |
+| `mv <key> <status>` | |
+| `board [--cycle NAME] [--project K] [--mine]` | columns |
+| `ls [--mine] [--status S] [--project K]` | |
+| `show <key>` | issue + comments |
+| `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
+| `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
+| `sync` | `POST /api/sync/reconcile` |
+| `tui` | full-screen board — `hjkl`/arrows move, `[` `]` move a card between statuses, `enter` detail, `r` refresh, `q` quit |

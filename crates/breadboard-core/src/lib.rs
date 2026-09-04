@@ -7,6 +7,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod dto;
 pub mod event;
 
 pub use event::BoardEvent;

@@ -136,7 +136,7 @@ pub async fn apply_issue(
         });
     }
 
-    if patch_is_empty(&patch) {
+    if patch.is_empty() {
         return Ok(());
     }
 
@@ -296,19 +296,6 @@ fn same_set(a: &[String], b: &[String]) -> bool {
     a.sort();
     b.sort();
     a == b
-}
-
-fn patch_is_empty(p: &IssuePatch) -> bool {
-    p.title.is_none()
-        && p.body.is_none()
-        && p.status.is_none()
-        && p.priority.is_none()
-        && p.estimate.is_none()
-        && p.assignee_id.is_none()
-        && p.epic_id.is_none()
-        && p.cycle_id.is_none()
-        && p.labels.is_none()
-        && p.links.is_none()
 }
 
 fn emit_change_events(state: &AppState, before: &Issue, after: &Issue) {

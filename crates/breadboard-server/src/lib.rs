@@ -6,6 +6,7 @@ pub mod auth;
 pub mod bus;
 pub mod config;
 pub mod db;
+pub mod device;
 pub mod dto;
 pub mod error;
 pub mod forgejo;

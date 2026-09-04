@@ -25,7 +25,14 @@ use crate::{store, AppState};
 
 pub const SESSION_COOKIE: &str = "bb_session";
 const STATE_COOKIE: &str = "bb_oauth_state";
+const NEXT_COOKIE: &str = "bb_oauth_next";
 const SESSION_TTL_DAYS: i64 = 30;
+
+/// Only accept a same-origin path as a post-login redirect target.
+fn safe_next(next: Option<&str>) -> Option<String> {
+    let n = next?;
+    (n.starts_with('/') && !n.starts_with("//")).then(|| n.to_string())
+}
 
 pub fn sha256_hex(input: &str) -> String {
     let mut h = Sha256::new();
@@ -41,7 +48,7 @@ fn hex(bytes: &[u8]) -> String {
     s
 }
 
-fn random_token() -> String {
+pub fn random_token() -> String {
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     hex(&buf)
@@ -154,7 +161,17 @@ fn clear_cookie(name: &'static str) -> Cookie<'static> {
 // Routes
 // ---------------------------------------------------------------------------
 
-pub async fn login(State(app): State<AppState>, jar: CookieJar) -> AppResult<Response> {
+#[derive(Debug, Deserialize)]
+pub struct LoginQuery {
+    #[serde(default)]
+    next: Option<String>,
+}
+
+pub async fn login(
+    State(app): State<AppState>,
+    jar: CookieJar,
+    Query(q): Query<LoginQuery>,
+) -> AppResult<Response> {
     let fg = &app.config.forgejo;
     if fg.oauth_client_id.is_empty() {
         return Err(AppError::bad_request(
@@ -178,7 +195,19 @@ pub async fn login(State(app): State<AppState>, jar: CookieJar) -> AppResult<Res
         .max_age(CookieDuration::minutes(10))
         .build();
 
-    Ok((jar.add(state_cookie), Redirect::to(&url)).into_response())
+    let mut jar = jar.add(state_cookie);
+    if let Some(next) = safe_next(q.next.as_deref()) {
+        jar = jar.add(
+            Cookie::build((NEXT_COOKIE, next))
+                .http_only(true)
+                .same_site(SameSite::Lax)
+                .path("/")
+                .max_age(CookieDuration::minutes(10))
+                .build(),
+        );
+    }
+
+    Ok((jar, Redirect::to(&url)).into_response())
 }
 
 #[derive(Debug, Deserialize)]
@@ -264,8 +293,15 @@ pub async fn callback(
     .await?;
 
     let cookie = create_session(&app, user.id).await?;
-    let jar = jar.remove(clear_cookie(STATE_COOKIE)).add(cookie);
-    Ok((jar, Redirect::to("/")).into_response())
+    let next = jar
+        .get(NEXT_COOKIE)
+        .and_then(|c| safe_next(Some(c.value())))
+        .unwrap_or_else(|| "/".to_string());
+    let jar = jar
+        .remove(clear_cookie(STATE_COOKIE))
+        .remove(clear_cookie(NEXT_COOKIE))
+        .add(cookie);
+    Ok((jar, Redirect::to(&next)).into_response())
 }
 
 pub async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {

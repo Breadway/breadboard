@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, auth, webhook, AppState};
+use crate::{api, auth, device, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -43,7 +43,10 @@ pub fn router(state: AppState) -> Router {
         .route("/login", get(auth::login))
         .route("/callback", get(auth::callback))
         .route("/logout", post(auth::logout))
-        .route("/dev-login", post(auth::dev_login));
+        .route("/dev-login", post(auth::dev_login))
+        .route("/device", get(device::page).post(device::start))
+        .route("/device/token", post(device::poll))
+        .route("/device/approve", post(device::approve));
 
     let mut router = Router::new()
         .route("/healthz", get(healthz))
