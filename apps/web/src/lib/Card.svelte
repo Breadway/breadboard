@@ -68,9 +68,10 @@
     transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
   }
   .card:hover {
+    /* inset only — same reason as .kb below: an outward drop shadow bleeds
+       past the card's box and .cards' overflow-y:auto clips it there. */
     border-color: var(--accent);
-    transform: translateY(-1px);
-    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+    box-shadow: 0 0 0 1px var(--accent) inset;
   }
   .card.selected {
     border-color: var(--accent);
