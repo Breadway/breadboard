@@ -205,22 +205,29 @@ export class ApiError extends Error {
 
 export class BreadboardClient {
   readonly baseUrl: string;
+  #token?: string;
 
-  constructor(baseUrl = "") {
+  /** In a browser, `token` is omitted and the session cookie is used. Outside
+   *  a browser (MCP server, scripts), pass a bearer token. */
+  constructor(baseUrl = "", token?: string) {
     this.baseUrl = baseUrl.replace(/\/$/, "");
+    this.#token = token;
   }
 
   private async req<T>(method: string, path: string, body?: unknown): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["content-type"] = "application/json";
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
     const res = await fetch(`${this.baseUrl}${path}`, {
       method,
       credentials: "include",
-      headers: body !== undefined ? { "content-type": "application/json" } : undefined,
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
       let msg = res.statusText;
       try {
-        const j = await res.json();
+        const j = (await res.json()) as { error?: string };
         if (j?.error) msg = j.error;
       } catch {
         /* keep statusText */

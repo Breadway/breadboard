@@ -40,6 +40,14 @@ The build compiles Rust in a `rust:1-bookworm` stage — no host toolchain neede
 By default the container binds `127.0.0.1:7280`; set `BREADBOARD_BIND` in `.env`
 to change that (e.g. `0.0.0.0:7280` for another host to reach it).
 
+**If the target host is small / busy**, build the image elsewhere and load it:
+
+```sh
+podman build -t breadboard:local -f packaging/Containerfile .   # on a dev box
+podman save breadboard:local | ssh host 'docker load'
+ssh host 'cd ~/breadboard && docker compose -f packaging/compose.yaml --project-directory . up -d'
+```
+
 ## 4. Reverse proxy
 
 Point a proxy at `127.0.0.1:7280` (see `packaging/caddy/breadboard.caddy`). It

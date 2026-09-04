@@ -210,3 +210,13 @@ repo with no mapped project are skipped with a warning.
 work unchanged). Global shortcuts: `Ctrl+Shift+B` toggle window, `Ctrl+Shift+N`
 show + open the new-issue palette (the SPA acts on a `#new` URL hash). Built on
 demand, not in CI. See `apps/desktop/README.md`.
+
+## MCP server
+
+`apps/mcp/` — a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
+`@breadboard/api-client`, so an MCP client (Claude, …) can read and drive the
+board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
+`BREADBOARD_TOKEN`. Tools: `whoami`, `list_issues` / `get_issue` / `board`,
+`create_issue` / `update_issue` / `move_issue` / `comment`, `activity`,
+`list_{projects,epics,cycles,repos}`, `create_project`, `add_repo`, `reconcile`,
+`import_markdown`. See `apps/mcp/README.md`.

@@ -5,10 +5,11 @@
   "description": "npm workspace root for breadboard's TypeScript packages",
   "workspaces": [
     "packages/*",
-    "apps/web"
+    "apps/web",
+    "apps/mcp"
   ],
   "scripts": {
     "dev": "npm run dev -w breadboard-web",
-    "build": "npm run build -w @breadboard/api-client && npm run build -w breadboard-web"
+    "build": "npm run build -w @breadboard/api-client && npm run build -w breadboard-web && npm run build -w breadboard-mcp"
   }
 }
