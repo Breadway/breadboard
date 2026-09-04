@@ -13,6 +13,13 @@ fn non_empty(s: &str) -> Result<(), String> {
     }
 }
 
+/// Move an issue to a different project — `project` is a key or numeric id,
+/// same resolution as `NewIssue::project`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MoveProject {
+    pub project: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewProject {
     pub key: String,

@@ -229,6 +229,18 @@ class Store {
     }
   }
 
+  async moveProject(key: string, project: string) {
+    try {
+      const updated = await api.moveIssueProject(key, project);
+      this.#upsert(updated);
+      if (this.selectedKey === key) this.selectedKey = updated.key;
+      return updated;
+    } catch (e) {
+      this.flash(`move failed: ${errMsg(e)}`);
+      throw e;
+    }
+  }
+
   async create(input: NewIssue): Promise<Issue | null> {
     try {
       const issue = await api.createIssue(input);

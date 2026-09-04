@@ -291,6 +291,8 @@ export class BreadboardClient {
   patchIssue = (key: string, patch: IssuePatch) =>
     this.req<Issue>("PATCH", `/api/issues/${key}`, patch);
   deleteIssue = (key: string) => this.req<void>("DELETE", `/api/issues/${key}`);
+  moveIssueProject = (key: string, project: string) =>
+    this.req<Issue>("PUT", `/api/issues/${key}/project`, { project });
   addComment = (key: string, body: string) =>
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
   getActivity = (key: string) =>

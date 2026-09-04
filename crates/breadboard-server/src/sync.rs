@@ -8,10 +8,11 @@
 //! a `sync.drift` event is emitted.
 
 use anyhow::Context;
-use breadboard_core::{BoardEvent, Issue, Status, SyncSource};
+use breadboard_core::{BoardEvent, Issue, Project, Status, SyncSource};
 use chrono::{DateTime, Utc};
 
 use crate::dto::IssuePatch;
+use crate::error::AppResult;
 use crate::forgejo::{split_repo, FgComment, FgIssue, FgIssuePatch, FgUser};
 use crate::{store, AppState};
 
@@ -316,6 +317,51 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
             issue
         }
     }
+}
+
+/// Move an issue to a different project. Best-effort closes the old Forgejo
+/// issue (it belongs to the old project's repo, if any) with a note pointing
+/// at the new key, then re-creates it fresh on the new project's repo via
+/// `writeback_new_issue` if one is mapped.
+pub async fn move_project(
+    state: &AppState,
+    key: &str,
+    new_project: &Project,
+) -> AppResult<Issue> {
+    let (issue, old_ref) = store::move_issue_project(&state.db, key, new_project).await?;
+
+    if let Some(old) = old_ref {
+        if state.forgejo.is_configured() {
+            if let Ok((owner, repo)) = split_repo(&old.repo) {
+                let _ = state
+                    .forgejo
+                    .create_comment(
+                        owner,
+                        repo,
+                        old.number,
+                        &format!("Moved to {} — closing here.", issue.key),
+                    )
+                    .await;
+                if let Err(e) = state
+                    .forgejo
+                    .patch_issue(
+                        owner,
+                        repo,
+                        old.number,
+                        FgIssuePatch {
+                            state: Some("closed"),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(key = %issue.key, error = %e, "closing old forgejo issue after project move failed");
+                }
+            }
+        }
+    }
+
+    Ok(writeback_new_issue(state, issue).await)
 }
 
 /// Push a breadboard-authored comment to Forgejo, recording the returned id so
