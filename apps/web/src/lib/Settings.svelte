@@ -79,7 +79,7 @@
   {#if loading}
     <p class="dim">loading…</p>
   {:else}
-    <section>
+    <section class="card">
       <h2>Projects</h2>
       <table>
         <thead>
@@ -87,7 +87,7 @@
         </thead>
         <tbody>
           {#each store.projects as p (p.id)}
-            <tr class:archived={p.archived}>
+            <tr>
               <td class="mono">{p.key}</td>
               <td>
                 <input
@@ -97,6 +97,9 @@
               </td>
               <td class="dim mono">{p.forgejo_repo ?? "—"}</td>
               <td class="right">
+                <span class="badge" class:on={!p.archived} class:off={p.archived}>
+                  {p.archived ? "archived" : "active"}
+                </span>
                 <button disabled={busy} onclick={() => toggleArchive(p.id, !p.archived)}>
                   {p.archived ? "Unarchive" : "Archive"}
                 </button>
@@ -105,17 +108,20 @@
           {/each}
         </tbody>
       </table>
-      <div class="form">
-        <input placeholder="KEY" bind:value={npKey} maxlength="8" style="width:80px" />
-        <input placeholder="Name" bind:value={npName} />
-        <button disabled={busy || !npKey.trim() || !npName.trim()} onclick={createProject}>
-          Add project
-        </button>
+      <div class="add-form">
+        <span class="add-label">Add project</span>
+        <div class="add-row">
+          <input placeholder="KEY" bind:value={npKey} maxlength="8" style="width:80px" />
+          <input placeholder="Name" bind:value={npName} />
+          <button class="primary" disabled={busy || !npKey.trim() || !npName.trim()} onclick={createProject}>
+            Add project
+          </button>
+        </div>
+        <p class="hint">Repo-less projects are for planning / roadmap items. To sync a Forgejo repo, add it below.</p>
       </div>
-      <p class="hint">Repo-less projects are for planning / roadmap items. To sync a Forgejo repo, add it below.</p>
     </section>
 
-    <section>
+    <section class="card">
       <h2>
         Synced repos
         <button class="ghost" disabled={busy} onclick={syncNow}>Sync now</button>
@@ -126,10 +132,10 @@
         </thead>
         <tbody>
           {#each store.repos as r (r.repo)}
-            <tr class:off={!r.enabled}>
+            <tr>
               <td class="mono">{r.repo}</td>
               <td class="mono">{r.project_key ?? "—"}</td>
-              <td>{r.enabled ? "enabled" : "disabled"}</td>
+              <td><span class="badge" class:on={r.enabled} class:off={!r.enabled}>{r.enabled ? "enabled" : "disabled"}</span></td>
               <td class="dim">{r.last_synced_at ? new Date(r.last_synced_at).toLocaleString() : "never"}</td>
               <td class="right">
                 {#if r.enabled}
@@ -142,35 +148,41 @@
           {/each}
         </tbody>
       </table>
-      <div class="form">
-        <input placeholder="owner/name" bind:value={arRepo} style="width:180px" />
-        <input placeholder="KEY" bind:value={arKey} maxlength="8" style="width:80px" />
-        <input placeholder="display name (optional)" bind:value={arName} />
-        <button disabled={busy || !arRepo.includes('/') || !arKey.trim()} onclick={addRepo}>
-          Add &amp; sync
-        </button>
+      <div class="add-form">
+        <span class="add-label">Add &amp; sync a repo</span>
+        <div class="add-row">
+          <input placeholder="owner/name" bind:value={arRepo} style="width:180px" />
+          <input placeholder="KEY" bind:value={arKey} maxlength="8" style="width:80px" />
+          <input placeholder="display name (optional)" bind:value={arName} />
+          <button class="primary" disabled={busy || !arRepo.includes('/') || !arKey.trim()} onclick={addRepo}>
+            Add &amp; sync
+          </button>
+        </div>
+        <p class="hint">
+          Creates the project if the key is free, enables sync, and imports the repo's issues.
+          Register a webhook at <code>{store.serverBase}/webhooks/forgejo</code> for real-time updates
+          (the reconcile pass is the fallback).
+        </p>
       </div>
-      <p class="hint">
-        Creates the project if the key is free, enables sync, and imports the repo's issues.
-        Register a webhook at <code>{store.serverBase}/webhooks/forgejo</code> for real-time updates
-        (the reconcile pass is the fallback).
-      </p>
     </section>
 
     {#if prefs}
-      <section>
+      <section class="card">
         <h2>Notifications</h2>
-        <label class="check">
+        <label class="toggle">
           <input type="checkbox" bind:checked={prefs.assigned} onchange={savePrefs} />
-          When an issue is assigned to me
+          <span class="track"><span class="thumb"></span></span>
+          <span>When an issue is assigned to me</span>
         </label>
-        <label class="check">
+        <label class="toggle">
           <input type="checkbox" bind:checked={prefs.mention} onchange={savePrefs} />
-          When I'm @mentioned in a comment or description
+          <span class="track"><span class="thumb"></span></span>
+          <span>When I'm @mentioned in a comment or description</span>
         </label>
-        <label class="check">
+        <label class="toggle">
           <input type="checkbox" bind:checked={prefs.cycle} onchange={savePrefs} />
-          When a cycle I have issues in starts or ends
+          <span class="track"><span class="thumb"></span></span>
+          <span>When a cycle I have issues in starts or ends</span>
         </label>
         <p class="hint">
           Desktop pop-ups use your browser's notification permission. For pop-ups on the bread
@@ -188,17 +200,23 @@
     padding: 20px 24px;
     max-width: 900px;
   }
-  section {
-    margin-bottom: 32px;
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 20px;
   }
   h2 {
+    margin: 0 0 4px;
     font-size: 13px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--ink-dim);
     border-bottom: 1px solid var(--border);
-    padding-bottom: 6px;
+    padding-bottom: 10px;
+    margin-bottom: 8px;
     display: flex;
     align-items: center;
     gap: 10px;
@@ -207,7 +225,7 @@
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
-    margin: 8px 0;
+    margin: 4px 0;
   }
   th {
     text-align: left;
@@ -218,12 +236,11 @@
     padding: 6px 8px;
   }
   td {
-    padding: 5px 8px;
-    border-top: 1px solid var(--surface);
+    padding: 8px;
+    border-top: 1px solid var(--bg);
   }
-  tr.archived td,
-  tr.off td {
-    opacity: 0.5;
+  tbody tr:hover td {
+    background: color-mix(in srgb, var(--bg) 50%, transparent);
   }
   .mono {
     font-family: ui-monospace, monospace;
@@ -234,6 +251,26 @@
   }
   .right {
     text-align: right;
+    white-space: nowrap;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--ink-dim);
+    margin-right: 8px;
+  }
+  .badge.on {
+    color: var(--status-done);
+    border-color: var(--status-done);
+  }
+  .badge.off {
+    color: var(--ink-dim);
+    border-color: var(--border);
   }
   input {
     background: var(--bg);
@@ -243,12 +280,26 @@
     color: var(--ink);
     font: inherit;
   }
-  .form {
+  .add-form {
+    margin-top: 14px;
+    padding: 12px 14px;
+    background: var(--bg);
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+  }
+  .add-label {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--ink-dim);
+    margin-bottom: 8px;
+  }
+  .add-row {
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
     align-items: center;
-    margin-top: 8px;
   }
   button {
     background: var(--surface);
@@ -270,24 +321,70 @@
   button.ghost {
     margin-left: auto;
   }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) {
+    filter: brightness(1.08);
+  }
+  button.primary:disabled {
+    background: var(--surface);
+    border-color: var(--border);
+    color: var(--ink-dim);
+  }
   .hint {
     font-size: 12px;
     color: var(--ink-dim);
-    margin-top: 4px;
+    margin-top: 8px;
   }
   code {
     background: var(--surface);
     padding: 1px 4px;
     border-radius: 3px;
   }
-  .check {
+  .toggle {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
     font-size: 13px;
-    padding: 4px 0;
+    padding: 8px 0;
+    cursor: pointer;
   }
-  .check input {
-    width: auto;
+  .toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .toggle .track {
+    position: relative;
+    width: 34px;
+    height: 20px;
+    flex-shrink: 0;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .toggle .thumb {
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--ink-dim);
+    transition: transform 0.15s, background 0.15s;
+  }
+  .toggle input:checked + .track {
+    background: color-mix(in srgb, var(--accent) 30%, var(--bg));
+    border-color: var(--accent);
+  }
+  .toggle input:checked + .track .thumb {
+    transform: translateX(14px);
+    background: var(--accent);
   }
 </style>

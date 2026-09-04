@@ -68,7 +68,7 @@
   </div>
 {:else}
   <header>
-    <div class="brand"><span class="mark">🍞</span><strong>breadboard</strong></div>
+    <strong class="brand">breadboard</strong>
 
     <div class="seg">
       <button class:on={store.view === "board"} onclick={() => (store.view = "board")}>Board</button>
@@ -143,13 +143,7 @@
     cursor: pointer;
   }
   .brand {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .mark {
-    font-size: 16px;
-    line-height: 1;
+    letter-spacing: -0.01em;
   }
   .seg {
     display: flex;
