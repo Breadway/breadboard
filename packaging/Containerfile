@@ -10,7 +10,7 @@ COPY package.json package-lock.json* ./
 COPY packages/api-client/package.json packages/api-client/
 COPY apps/web/package.json apps/web/
 COPY apps/mcp/package.json apps/mcp/
-RUN npm ci --ignore-scripts
+RUN npm ci
 COPY packages/api-client packages/api-client
 COPY apps/web apps/web
 RUN npm run build -w @breadboard/api-client && npm run build -w breadboard-web

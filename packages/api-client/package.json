@@ -14,8 +14,7 @@
   "files": ["dist", "src"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "check": "tsc -p tsconfig.json --noEmit",
-    "prepare": "tsc -p tsconfig.json"
+    "check": "tsc -p tsconfig.json --noEmit"
   },
   "license": "MIT",
   "devDependencies": {
