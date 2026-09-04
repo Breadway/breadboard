@@ -6,6 +6,27 @@
   let loading = $state(true);
   let busy = $state(false);
   let prefs = $state<NotificationPrefs | null>(null);
+  let projectFilter = $state("");
+  let repoFilter = $state("");
+
+  const filteredProjects = $derived.by(() => {
+    const q = projectFilter.trim().toLowerCase();
+    if (!q) return store.projects;
+    return store.projects.filter(
+      (p) =>
+        p.key.toLowerCase().includes(q) ||
+        p.name.toLowerCase().includes(q) ||
+        (p.forgejo_repo ?? "").toLowerCase().includes(q),
+    );
+  });
+
+  const filteredRepos = $derived.by(() => {
+    const q = repoFilter.trim().toLowerCase();
+    if (!q) return store.repos;
+    return store.repos.filter(
+      (r) => r.repo.toLowerCase().includes(q) || (r.project_key ?? "").toLowerCase().includes(q),
+    );
+  });
 
   // new project form
   let npKey = $state("");
@@ -80,13 +101,22 @@
     <p class="dim">loading…</p>
   {:else}
     <section class="card">
-      <h2>Projects</h2>
+      <h2>
+        Projects
+        <span class="count">{filteredProjects.length}/{store.projects.length}</span>
+        <input
+          class="search"
+          type="search"
+          placeholder="Filter…"
+          bind:value={projectFilter}
+        />
+      </h2>
       <table>
         <thead>
           <tr><th>Key</th><th>Name</th><th>Repo</th><th></th></tr>
         </thead>
         <tbody>
-          {#each store.projects as p (p.id)}
+          {#each filteredProjects as p (p.id)}
             <tr>
               <td class="mono">{p.key}</td>
               <td>
@@ -105,6 +135,8 @@
                 </button>
               </td>
             </tr>
+          {:else}
+            <tr><td colspan="4" class="dim">No projects match "{projectFilter}".</td></tr>
           {/each}
         </tbody>
       </table>
@@ -124,6 +156,13 @@
     <section class="card">
       <h2>
         Synced repos
+        <span class="count">{filteredRepos.length}/{store.repos.length}</span>
+        <input
+          class="search"
+          type="search"
+          placeholder="Filter…"
+          bind:value={repoFilter}
+        />
         <button class="ghost" disabled={busy} onclick={syncNow}>Sync now</button>
       </h2>
       <table>
@@ -131,7 +170,7 @@
           <tr><th>Repo</th><th>Project</th><th>Status</th><th>Last synced</th><th></th></tr>
         </thead>
         <tbody>
-          {#each store.repos as r (r.repo)}
+          {#each filteredRepos as r (r.repo)}
             <tr>
               <td class="mono">{r.repo}</td>
               <td class="mono">{r.project_key ?? "—"}</td>
@@ -144,7 +183,7 @@
               </td>
             </tr>
           {:else}
-            <tr><td colspan="5" class="dim">No repos synced yet.</td></tr>
+            <tr><td colspan="5" class="dim">{store.repos.length ? `No repos match "${repoFilter}".` : "No repos synced yet."}</td></tr>
           {/each}
         </tbody>
       </table>
@@ -199,6 +238,7 @@
     overflow-y: auto;
     padding: 20px 24px;
     max-width: 900px;
+    margin: 0 auto;
   }
   .card {
     background: var(--surface);
@@ -320,6 +360,20 @@
   }
   button.ghost {
     margin-left: auto;
+  }
+  .count {
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: normal;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-dim);
+  }
+  .search {
+    margin-left: auto;
+    width: 160px;
+    font-size: 12px;
+    text-transform: none;
+    letter-spacing: normal;
   }
   button.primary {
     background: var(--accent);

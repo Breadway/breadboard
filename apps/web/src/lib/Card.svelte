@@ -78,8 +78,10 @@
   }
   .card.kb {
     border-color: var(--accent);
-    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
-    outline-offset: 1px;
+    /* inset, not outline+offset — the parent .cards has overflow-y:auto, which
+       per spec forces overflow-x to compute as auto too, clipping anything
+       that bleeds outside the card's own border box. */
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent) inset;
   }
   .card:active {
     cursor: grabbing;
