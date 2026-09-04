@@ -13,6 +13,17 @@
 
   onMount(() => {
     void store.init();
+
+    // The desktop shell navigates to #new for its quick-add hotkey.
+    const onHash = () => {
+      if (location.hash === "#new") {
+        store.paletteOpen = true;
+        history.replaceState(null, "", location.pathname + location.search);
+      }
+    };
+    onHash();
+    window.addEventListener("hashchange", onHash);
+
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
@@ -25,7 +36,10 @@
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("hashchange", onHash);
+    };
   });
 
   function isTyping(e: KeyboardEvent) {

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "breadboard",
+  "version": "0.1.0",
+  "identifier": "dev.breadway.breadboard",
+  "build": {
+    "beforeBuildCommand": "npm --prefix ../web run build",
+    "frontendDist": "../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "breadboard",
+        "url": "https://breadboard.breadway.dev",
+        "width": 1200,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 560
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage"],
+    "icon": ["icons/icon.png"],
+    "category": "DeveloperTool",
+    "shortDescription": "Issue tracker for the bread ecosystem"
+  },
+  "plugins": {
+    "global-shortcut": {}
+  }
+}

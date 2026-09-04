@@ -297,6 +297,15 @@ pub async fn get_epic(db: &SqlitePool, id: i64) -> AppResult<Epic> {
     Ok(row.into())
 }
 
+pub async fn get_epic_by_key(db: &SqlitePool, key: &str) -> AppResult<Epic> {
+    let row: EpicRow = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics WHERE key = ?1"))
+        .bind(key)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
 pub async fn create_epic(db: &SqlitePool, new: &NewEpic) -> AppResult<Epic> {
     if new.key.trim().is_empty() || new.title.trim().is_empty() {
         return Err(AppError::bad_request("key and title are required"));

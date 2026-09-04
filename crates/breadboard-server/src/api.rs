@@ -471,6 +471,14 @@ pub async fn mark_all_notifications_read(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn import_markdown(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(req): Json<crate::import::ImportRequest>,
+) -> AppResult<Json<crate::import::ImportResult>> {
+    Ok(Json(crate::import::run(&app, &req).await?))
+}
+
 pub async fn get_notification_prefs(
     State(app): State<AppState>,
     user: AuthUser,

@@ -79,6 +79,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }` — maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
 | `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202` |
+| `POST` | `/api/import` | `{ project, markdown, dry_run? }` — `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
 | `POST` | `/webhooks/forgejo` | inbound sync — **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 
 **IssuePatch** — every field optional; absent = unchanged. `title`, `body`,
@@ -200,4 +201,12 @@ repo with no mapped project are skipped with a warning.
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
 | `sync` | `POST /api/sync/reconcile` |
+| `import <file.md> --project <KEY> [--dry-run]` | markdown outline → epics + issues |
 | `tui` | full-screen board — `hjkl`/arrows move, `[` `]` move a card between statuses, `enter` detail, `r` refresh, `q` quit |
+
+## Desktop shell
+
+`apps/desktop/` — a Tauri 2 window that loads the live site (so cookies + OAuth
+work unchanged). Global shortcuts: `Ctrl+Shift+B` toggle window, `Ctrl+Shift+N`
+show + open the new-issue palette (the SPA acts on a `#new` URL hash). Built on
+demand, not in CI. See `apps/desktop/README.md`.

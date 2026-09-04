@@ -1,0 +1,13 @@
+{
+  "name": "breadboard-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tauri CLI wrapper for the breadboard desktop shell",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

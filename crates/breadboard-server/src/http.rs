@@ -48,6 +48,7 @@ pub fn router(state: AppState) -> Router {
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
         .route("/sync/reconcile", post(api::reconcile_now))
+        .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))
         .route("/notifications/read-all", post(api::mark_all_notifications_read))
         .route("/notifications/{id}/read", post(api::mark_notification_read))

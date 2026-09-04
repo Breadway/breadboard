@@ -113,6 +113,14 @@ enum Command {
     },
     /// Run a Forgejo reconcile pass now.
     Sync,
+    /// Import a markdown outline (## headings → epics, `- [ ]` items → issues).
+    Import {
+        file: std::path::PathBuf,
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Open the full-screen terminal board.
     Tui,
 }
@@ -314,6 +322,19 @@ async fn main() -> Result<()> {
         Command::Sync => {
             client.reconcile().await?;
             println!("reconcile pass queued");
+        }
+        Command::Import { file, project, dry_run } => {
+            let md = std::fs::read_to_string(&file)
+                .with_context(|| format!("reading {}", file.display()))?;
+            let r = client.import(&project, &md, dry_run).await?;
+            if dry_run {
+                println!("(dry run)");
+            }
+            println!("epics:   {}", r.epics_created.join(", "));
+            println!("issues:  {} created", r.issues_created.len());
+            if !r.skipped.is_empty() {
+                println!("skipped: {} (already present)", r.skipped.len());
+            }
         }
         Command::Tui => tui::run(client).await?,
     }

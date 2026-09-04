@@ -62,6 +62,13 @@ pub struct Inbox {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct ImportResult {
+    pub epics_created: Vec<String>,
+    pub issues_created: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RepoView {
     pub repo: String,
     pub project_key: Option<String>,
@@ -258,6 +265,22 @@ impl Client {
     pub async fn mark_all_read(&self) -> Result<()> {
         self.send_empty(self.build(reqwest::Method::POST, "/api/notifications/read-all"))
             .await
+    }
+
+    pub async fn import(
+        &self,
+        project: &str,
+        markdown: &str,
+        dry_run: bool,
+    ) -> Result<ImportResult> {
+        self.send(
+            self.build(reqwest::Method::POST, "/api/import").json(&serde_json::json!({
+                "project": project,
+                "markdown": markdown,
+                "dry_run": dry_run,
+            })),
+        )
+        .await
     }
 
     pub async fn list_cycles(&self) -> Result<Vec<Cycle>> {

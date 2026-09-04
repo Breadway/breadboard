@@ -1,21 +1,26 @@
-# breadboard desktop (Tauri 2)
+# breadboard desktop
 
-Milestone 6. A thin Tauri 2 shell that wraps `apps/web`'s static build — the
-same stack as `bos-settings` (Tauri 2 + Svelte, Rust backend dir at `src/`,
-frontend built to `../web/dist` and referenced as `frontendDist` in
-`tauri.conf.json`).
+A thin Tauri 2 shell around <https://breadboard.breadway.dev>. The window loads
+the live site directly, so session cookies and the Forgejo OAuth redirect work
+with no extra auth plumbing.
 
-Adds over the web app:
+Global shortcuts:
 
-- a global quick-add hotkey → create an issue from anywhere
-- offline is **not** in scope for v1 (online-required, optimistic UI)
+| | |
+|---|---|
+| `Ctrl+Shift+B` | show / hide the window |
+| `Ctrl+Shift+N` | show + open the "new issue" palette (`#new` hash) |
 
-To scaffold when the milestone starts:
+## Build
+
+Needs the Tauri Linux deps (`webkit2gtk-4.1`, `libsoup3`, …) and an icon at
+`icons/icon.png` (`npx tauri icon <src.png>` generates the set). Not in the
+Cargo workspace or CI — build it on demand:
 
 ```sh
 cd apps/desktop
-npm create tauri-app@latest -- --template vanilla-ts   # then rewire to ../web
+npm install
+npm run dev      # or: npm run build  → AppImage
 ```
 
-Distributed through bakery as part of the `breadboard` package (see
-`bakery.toml` / `.forgejo/workflows/`).
+Distribute via bakery alongside `breadboard-cli` once release secrets are set up.
