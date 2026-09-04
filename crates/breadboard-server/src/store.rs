@@ -205,6 +205,47 @@ pub async fn create_project(db: &SqlitePool, new: &NewProject) -> AppResult<Proj
     Ok(row.into())
 }
 
+pub async fn update_project(
+    db: &SqlitePool,
+    id: i64,
+    patch: &crate::dto::ProjectPatch,
+) -> AppResult<Project> {
+    if patch.is_empty() {
+        return get_project(db, id).await;
+    }
+    if let Some(name) = &patch.name {
+        if name.trim().is_empty() {
+            return Err(AppError::bad_request("name must not be empty"));
+        }
+        sqlx::query("UPDATE projects SET name = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(name.trim())
+            .execute(db)
+            .await?;
+    }
+    if let Some(archived) = patch.archived {
+        sqlx::query("UPDATE projects SET archived = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(archived as i64)
+            .execute(db)
+            .await?;
+    }
+    if let Some(repo) = &patch.forgejo_repo {
+        sqlx::query("UPDATE projects SET forgejo_repo = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(repo.as_deref())
+            .execute(db)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(d) if d.is_unique_violation() => {
+                    AppError::Conflict("that repo is already mapped to another project".into())
+                }
+                other => AppError::Db(other),
+            })?;
+    }
+    get_project(db, id).await
+}
+
 // ---------------------------------------------------------------------------
 // epics
 // ---------------------------------------------------------------------------

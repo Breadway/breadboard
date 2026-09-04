@@ -11,7 +11,7 @@ use breadboard_core::{BoardEvent, Comment, Cycle, Epic, Issue, Project, SyncSour
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject};
+use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch};
 use crate::error::{AppError, AppResult};
 use crate::{store, sync, AppState};
 
@@ -39,6 +39,15 @@ pub async fn create_project(
 ) -> AppResult<(StatusCode, Json<Project>)> {
     let project = store::create_project(&app.db, &body).await?;
     Ok((StatusCode::CREATED, Json(project)))
+}
+
+pub async fn update_project(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+    Json(patch): Json<ProjectPatch>,
+) -> AppResult<Json<Project>> {
+    Ok(Json(store::update_project(&app.db, id, &patch).await?))
 }
 
 // --- epics ----------------------------------------------------------------

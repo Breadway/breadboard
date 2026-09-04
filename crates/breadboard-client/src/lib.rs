@@ -1,6 +1,6 @@
 //! Async client for `breadboard-server`. Shared by `breadboard-cli` (CLI + TUI).
 
-use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue};
+use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue, NewProject, ProjectPatch};
 use breadboard_core::{Comment, Cycle, Epic, Issue, Project, User};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -182,6 +182,19 @@ impl Client {
     pub async fn list_projects(&self) -> Result<Vec<Project>> {
         self.send(self.build(reqwest::Method::GET, "/api/projects"))
             .await
+    }
+
+    pub async fn create_project(&self, new: &NewProject) -> Result<Project> {
+        self.send(self.build(reqwest::Method::POST, "/api/projects").json(new))
+            .await
+    }
+
+    pub async fn update_project(&self, id: i64, patch: &ProjectPatch) -> Result<Project> {
+        self.send(
+            self.build(reqwest::Method::PATCH, &format!("/api/projects/{id}"))
+                .json(patch),
+        )
+        .await
     }
 
     pub async fn list_epics(&self) -> Result<Vec<Epic>> {

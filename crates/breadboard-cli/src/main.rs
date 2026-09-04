@@ -5,7 +5,7 @@ mod tui;
 
 use anyhow::{anyhow, bail, Context, Result};
 use breadboard_client::{Client, DevicePoll};
-use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue};
+use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue, NewProject, ProjectPatch};
 use breadboard_core::{Priority, Status};
 use clap::{Parser, Subcommand};
 
@@ -81,6 +81,11 @@ enum Command {
     Show { key: String },
     /// Add a comment to an issue (also pushed to Forgejo if linked).
     Comment { key: String, body: String },
+    /// Manage projects.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
+    },
     /// Manage cycles.
     Cycle {
         #[command(subcommand)]
@@ -102,6 +107,26 @@ enum AuthAction {
     Login,
     Logout,
     Status,
+}
+
+#[derive(Subcommand)]
+enum ProjectAction {
+    List,
+    /// Create a repo-less project (for planning / roadmap items).
+    New {
+        key: String,
+        name: String,
+    },
+    Rename {
+        key: String,
+        name: String,
+    },
+    Archive {
+        key: String,
+    },
+    Unarchive {
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -227,6 +252,7 @@ async fn main() -> Result<()> {
             client.add_comment(&key, &body).await?;
             println!("comment added to {key}");
         }
+        Command::Project { action } => projects(&client, action).await?,
         Command::Cycle { action } => cycles(&client, action).await?,
         Command::Repos { action } => repos(&client, action).await?,
         Command::Sync => {
@@ -280,6 +306,77 @@ async fn auth(client: &Client, cfg: &mut CliConfig, action: AuthAction) -> Resul
         }
     }
     Ok(())
+}
+
+async fn projects(client: &Client, action: ProjectAction) -> Result<()> {
+    match action {
+        ProjectAction::List => {
+            for p in client.list_projects().await? {
+                println!(
+                    "{:>3}  {:<8}  {:<24}  {}{}",
+                    p.id,
+                    p.key,
+                    p.name,
+                    p.forgejo_repo.as_deref().unwrap_or("(no repo)"),
+                    if p.archived { "  [archived]" } else { "" }
+                );
+            }
+        }
+        ProjectAction::New { key, name } => {
+            let p = client
+                .create_project(&NewProject {
+                    key,
+                    name,
+                    forgejo_repo: None,
+                })
+                .await?;
+            println!("created project {} ({})", p.key, p.name);
+        }
+        ProjectAction::Rename { key, name } => {
+            let id = resolve_project(client, &key).await?;
+            let p = client
+                .update_project(
+                    id,
+                    &ProjectPatch {
+                        name: Some(name),
+                        ..Default::default()
+                    },
+                )
+                .await?;
+            println!("renamed {} → {}", p.key, p.name);
+        }
+        ProjectAction::Archive { key } => set_archived(client, &key, true).await?,
+        ProjectAction::Unarchive { key } => set_archived(client, &key, false).await?,
+    }
+    Ok(())
+}
+
+async fn set_archived(client: &Client, key: &str, archived: bool) -> Result<()> {
+    let id = resolve_project(client, key).await?;
+    let p = client
+        .update_project(
+            id,
+            &ProjectPatch {
+                archived: Some(archived),
+                ..Default::default()
+            },
+        )
+        .await?;
+    println!("{} {}", if p.archived { "archived" } else { "unarchived" }, p.key);
+    Ok(())
+}
+
+async fn resolve_project(client: &Client, key_or_id: &str) -> Result<i64> {
+    if let Ok(id) = key_or_id.parse::<i64>() {
+        return Ok(id);
+    }
+    client
+        .list_projects()
+        .await?
+        .into_iter()
+        .find(|p| p.key.eq_ignore_ascii_case(key_or_id))
+        .map(|p| p.id)
+        .ok_or_else(|| anyhow!("no project with key {key_or_id:?}"))
 }
 
 async fn cycles(client: &Client, action: CycleAction) -> Result<()> {

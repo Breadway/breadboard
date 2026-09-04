@@ -97,6 +97,13 @@ export interface Comment {
 
 export type IssueDetail = Issue & { comments: Comment[] };
 
+export interface RepoView {
+  repo: string;
+  project_key: string | null;
+  enabled: boolean;
+  last_synced_at: string | null;
+}
+
 export interface NewIssue {
   title: string;
   body?: string;
@@ -187,6 +194,16 @@ export class BreadboardClient {
   listProjects = () => this.req<Project[]>("GET", "/api/projects");
   createProject = (p: { key: string; name: string; forgejo_repo?: string }) =>
     this.req<Project>("POST", "/api/projects", p);
+  updateProject = (
+    id: number,
+    patch: { name?: string; archived?: boolean; forgejo_repo?: string | null },
+  ) => this.req<Project>("PATCH", `/api/projects/${id}`, patch);
+
+  listRepos = () => this.req<RepoView[]>("GET", "/api/repos");
+  addRepo = (repo: string, key: string, name?: string) =>
+    this.req<RepoView>("POST", "/api/repos", { repo, key, name });
+  removeRepo = (repo: string) => this.req<void>("DELETE", `/api/repos/${repo}`);
+  reconcile = () => this.req<void>("POST", "/api/sync/reconcile");
 
   listEpics = () => this.req<Epic[]>("GET", "/api/epics");
   createEpic = (e: { key: string; title: string; description?: string; project_id?: number }) =>

@@ -22,7 +22,10 @@ pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
         .route("/me", get(auth::me))
         .route("/projects", get(api::list_projects).post(api::create_project))
-        .route("/projects/{id}", get(api::get_project))
+        .route(
+            "/projects/{id}",
+            get(api::get_project).patch(api::update_project),
+        )
         .route("/epics", get(api::list_epics).post(api::create_epic))
         .route("/epics/{id}", get(api::get_epic))
         .route("/cycles", get(api::list_cycles).post(api::create_cycle))

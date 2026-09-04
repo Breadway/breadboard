@@ -3,6 +3,7 @@
   import { store } from "./lib/store.svelte";
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
+  import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
 
@@ -55,23 +56,23 @@
     <div class="seg">
       <button class:on={store.view === "board"} onclick={() => (store.view = "board")}>Board</button>
       <button class:on={store.view === "backlog"} onclick={() => (store.view = "backlog")}>Backlog</button>
+      <button class:on={store.view === "settings"} onclick={() => (store.view = "settings")}>Settings</button>
     </div>
 
-    <select bind:value={store.filterProject} title="Filter by project">
-      <option value="">All projects</option>
-      {#each store.projects as p (p.id)}<option value={p.key}>{p.key}</option>{/each}
-    </select>
+    {#if store.view !== "settings"}
+      <select bind:value={store.filterProject} title="Filter by project">
+        <option value="">All projects</option>
+        {#each store.projects as p (p.id)}<option value={p.key}>{p.key}</option>{/each}
+      </select>
 
-    <select bind:value={store.filterCycle} title="Filter by cycle">
-      <option value={0}>All cycles</option>
-      {#each store.cycles as c (c.id)}<option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>{/each}
-    </select>
+      <select bind:value={store.filterCycle} title="Filter by cycle">
+        <option value={0}>All cycles</option>
+        {#each store.cycles as c (c.id)}<option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>{/each}
+      </select>
 
-    <button class:on={store.filterMine} onclick={() => (store.filterMine = !store.filterMine)}>
-      Mine
-    </button>
-
-    <button class="new" onclick={() => (store.paletteOpen = true)}>+ New <kbd>C</kbd></button>
+      <button class:on={store.filterMine} onclick={() => (store.filterMine = !store.filterMine)}>Mine</button>
+      <button class="new" onclick={() => (store.paletteOpen = true)}>+ New <kbd>C</kbd></button>
+    {/if}
 
     <div class="right">
       <span class="dot" class:ok={store.connected} title={store.connected ? "live" : "reconnecting"}></span>
@@ -82,8 +83,10 @@
 
   {#if store.view === "board"}
     <Board />
-  {:else}
+  {:else if store.view === "backlog"}
     <Backlog />
+  {:else}
+    <Settings />
   {/if}
 
   <IssueDrawer />

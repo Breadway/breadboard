@@ -5,10 +5,11 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 5 + 4b** — server (REST CRUD, OAuth2, SSE), the Svelte web
-client, the `breadboard` CLI + `ratatui` TUI (device-flow auth), and the Forgejo
-sync engine now with **bidirectional comments, PR mirroring, and milestone
-sync**. Routes marked _(planned)_ are for later milestones (notifications).
+Status: **deployed** at `breadboard.breadway.dev`. Server (REST CRUD, OAuth2,
+SSE), the Svelte web client (board · backlog · issue drawer · settings ·
+`cmd-k`), the `breadboard` CLI + `ratatui` TUI (device-flow auth), and the
+Forgejo sync engine (bidirectional issues / comments / PR mirroring / milestone).
+Routes marked _(planned)_ are for later milestones (notifications).
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -52,6 +53,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/projects` | list |
 | `POST` | `/api/projects` | `{ key, name, forgejo_repo? }`; `key` = uppercase letters/digits; `201` |
 | `GET` | `/api/projects/{id}` | one project |
+| `PATCH` | `/api/projects/{id}` | `{ name?, archived?, forgejo_repo? }` (`forgejo_repo: null` detaches) |
 | `GET` | `/api/epics` | list |
 | `POST` | `/api/epics` | `{ key, title, description?, project_id? }`; `201` |
 | `GET` | `/api/epics/{id}` | one epic |
@@ -174,6 +176,7 @@ repo with no mapped project are skipped with a warning.
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
 | `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
+| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project |
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
 | `sync` | `POST /api/sync/reconcile` |

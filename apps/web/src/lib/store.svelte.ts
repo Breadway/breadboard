@@ -11,6 +11,7 @@ import {
   type IssuePatch,
   type NewIssue,
   type Project,
+  type RepoView,
   type Status,
   type User,
 } from "@breadboard/api-client";
@@ -29,8 +30,10 @@ class Store {
   connected = $state(false);
   toast = $state<string | null>(null);
 
+  repos = $state<RepoView[]>([]);
+
   // UI state
-  view = $state<"board" | "backlog">("board");
+  view = $state<"board" | "backlog" | "settings">("board");
   selectedKey = $state<string | null>(null);
   paletteOpen = $state(false);
   filterProject = $state<string>("");
@@ -41,6 +44,10 @@ class Store {
 
   get isDev() {
     return import.meta.env.DEV;
+  }
+
+  get serverBase() {
+    return api.baseUrl || location.origin;
   }
 
   get filtered(): Issue[] {
@@ -91,6 +98,12 @@ class Store {
     this.projects = projects;
     this.cycles = cycles;
     this.epics = epics;
+  }
+
+  async loadSettings() {
+    const [projects, repos] = await Promise.all([api.listProjects(), api.listRepos()]);
+    this.projects = projects;
+    this.repos = repos;
   }
 
   #connect() {

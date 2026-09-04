@@ -26,6 +26,7 @@
       out.push(
         { kind: "view", label: "Go to board", go: () => (store.view = "board") },
         { kind: "view", label: "Go to backlog", go: () => (store.view = "backlog") },
+        { kind: "view", label: "Go to settings", go: () => (store.view = "settings") },
         { kind: "view", label: store.filterMine ? "Show all issues" : "Show only my issues", go: () => (store.filterMine = !store.filterMine) },
       );
     }

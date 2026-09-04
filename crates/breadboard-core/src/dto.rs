@@ -36,6 +36,23 @@ impl NewProject {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProjectPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    /// `Some(None)` detaches the repo mapping.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub forgejo_repo: Option<Option<String>>,
+}
+
+impl ProjectPatch {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.archived.is_none() && self.forgejo_repo.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NewEpic {
     pub key: String,
