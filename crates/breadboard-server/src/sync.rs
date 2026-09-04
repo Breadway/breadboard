@@ -58,7 +58,10 @@ pub async fn apply_issue(
     let labels = fg.label_names();
 
     let Some(before) = existing else {
-        // New to breadboard — import it.
+        // New to breadboard — but first check whether this is the echo of an
+        // issue breadboard itself just created (writeback_new_issue's own
+        // link_issue call can lose this race to the webhook). If so, claim
+        // that pending local issue instead of importing a duplicate.
         let project = match store::get_project_by_repo(&state.db, repo).await {
             Ok(p) => p,
             Err(_) => {
@@ -66,6 +69,13 @@ pub async fn apply_issue(
                 return Ok(());
             }
         };
+        if let Some(claimed) =
+            store::claim_unlinked_issue(&state.db, project.id, fg.title.trim(), repo, fg.number)
+                .await?
+        {
+            tracing::info!(key = %claimed.key, number = fg.number, %repo, "claimed pending local issue instead of duplicating");
+            return Ok(());
+        }
         let status = map_status(fg.is_closed(), Status::Backlog);
         let issue = store::import_issue(
             &state.db,
