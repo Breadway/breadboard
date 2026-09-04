@@ -15,7 +15,7 @@ use crate::dto::{
     EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
 };
 use crate::error::{AppError, AppResult};
-use crate::{store, sync, AppState};
+use crate::{notify, store, sync, AppState};
 
 // --- projects --------------------------------------------------------------
 
@@ -149,6 +149,8 @@ pub async fn start_cycle(
         name: cycle.name.clone(),
         issues,
     });
+    notify::emit_bread(&app, &BoardEvent::CycleStarted { id: cycle.id, name: cycle.name.clone(), issues });
+    notify::cycle(&app, cycle.id, &cycle.name, true).await;
     Ok(Json(cycle))
 }
 
@@ -162,6 +164,8 @@ pub async fn end_cycle(
         id: cycle.id,
         name: cycle.name.clone(),
     });
+    notify::emit_bread(&app, &BoardEvent::CycleEnded { id: cycle.id, name: cycle.name.clone() });
+    notify::cycle(&app, cycle.id, &cycle.name, false).await;
     Ok(Json(cycle))
 }
 
@@ -203,6 +207,11 @@ pub async fn create_issue(
             key: issue.key.clone(),
             assignee_id: Some(assignee_id),
         });
+        notify::assigned(&app, &issue, assignee_id, Some(user.0.id)).await;
+    }
+    notify::emit_bread(&app, &BoardEvent::CardCreated { id: issue.id, key: issue.key.clone() });
+    if !issue.body.is_empty() {
+        notify::mentions(&app, &issue, &issue.body, Some(user.0.id), "the description").await;
     }
     Ok((StatusCode::CREATED, Json(issue)))
 }
@@ -237,6 +246,7 @@ pub async fn add_comment(
         id: issue.id,
         key: issue.key.clone(),
     });
+    notify::mentions(&app, &issue, &comment.body, Some(user.0.id), "a comment").await;
     sync::writeback_comment(&app, &issue, comment.id, &comment.body).await;
     // Re-read so the response carries the external_id if writeback set one.
     let stored = store::list_comments(&app.db, issue.id)
@@ -292,6 +302,18 @@ pub async fn patch_issue(
             key: issue.key.clone(),
             assignee_id: issue.assignee_id,
         });
+        if let Some(a) = issue.assignee_id {
+            notify::assigned(&app, &issue, a, Some(user.0.id)).await;
+        }
+    }
+    if issue.updated_at != before.updated_at {
+        notify::emit_bread(
+            &app,
+            &BoardEvent::CardUpdated { id: issue.id, key: issue.key.clone() },
+        );
+    }
+    if patch.body.is_some() && issue.body != before.body {
+        notify::mentions(&app, &issue, &issue.body, Some(user.0.id), "the description").await;
     }
 
     // Push synced-field changes back to Forgejo (no-op if not linked/enabled).
@@ -405,4 +427,61 @@ pub async fn reconcile_now(
         }
     });
     Ok(StatusCode::ACCEPTED)
+}
+
+// --- notifications ------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct NotifQuery {
+    #[serde(default)]
+    unread: bool,
+}
+
+#[derive(Serialize)]
+pub struct Inbox {
+    unread: i64,
+    notifications: Vec<breadboard_core::Notification>,
+}
+
+pub async fn list_notifications(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<NotifQuery>,
+) -> AppResult<Json<Inbox>> {
+    Ok(Json(Inbox {
+        unread: store::unread_count(&app.db, user.0.id).await?,
+        notifications: store::list_notifications(&app.db, user.0.id, q.unread).await?,
+    }))
+}
+
+pub async fn mark_notification_read(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    store::mark_notification_read(&app.db, user.0.id, id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn mark_all_notifications_read(
+    State(app): State<AppState>,
+    user: AuthUser,
+) -> AppResult<StatusCode> {
+    store::mark_all_read(&app.db, user.0.id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_notification_prefs(
+    State(app): State<AppState>,
+    user: AuthUser,
+) -> AppResult<Json<store::NotificationPrefs>> {
+    Ok(Json(store::get_prefs(&app.db, user.0.id).await?))
+}
+
+pub async fn set_notification_prefs(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(prefs): Json<store::NotificationPrefs>,
+) -> AppResult<Json<store::NotificationPrefs>> {
+    Ok(Json(store::set_prefs(&app.db, user.0.id, prefs).await?))
 }

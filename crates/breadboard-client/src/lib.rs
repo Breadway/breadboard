@@ -3,7 +3,7 @@
 use breadboard_core::dto::{
     EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
 };
-use breadboard_core::{Comment, Cycle, Epic, Issue, Project, User};
+use breadboard_core::{Comment, Cycle, Epic, Issue, Notification, Project, User};
 use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -53,6 +53,12 @@ pub struct ActivityEntry {
     pub source: String,
     pub actor: Option<String>,
     pub at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Inbox {
+    pub unread: i64,
+    pub notifications: Vec<Notification>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -237,6 +243,20 @@ impl Client {
 
     pub async fn issue_activity(&self, key: &str) -> Result<Vec<ActivityEntry>> {
         self.send(self.build(reqwest::Method::GET, &format!("/api/issues/{key}/activity")))
+            .await
+    }
+
+    pub async fn inbox(&self, unread_only: bool) -> Result<Inbox> {
+        let path = if unread_only {
+            "/api/notifications?unread=true"
+        } else {
+            "/api/notifications"
+        };
+        self.send(self.build(reqwest::Method::GET, path)).await
+    }
+
+    pub async fn mark_all_read(&self) -> Result<()> {
+        self.send_empty(self.build(reqwest::Method::POST, "/api/notifications/read-all"))
             .await
     }
 

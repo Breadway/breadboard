@@ -8,6 +8,7 @@ import {
   type Cycle,
   type Epic,
   type EpicView,
+  type Notification,
   type Issue,
   type IssuePatch,
   type NewIssue,
@@ -32,6 +33,9 @@ class Store {
   toast = $state<string | null>(null);
 
   repos = $state<RepoView[]>([]);
+  notifications = $state<Notification[]>([]);
+  unread = $state(0);
+  bellOpen = $state(false);
 
   // UI state
   view = $state<"board" | "backlog" | "roadmap" | "settings">("board");
@@ -85,7 +89,35 @@ class Store {
       throw e;
     }
     await this.loadAll();
+    await this.loadInbox();
     this.#connect();
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission().catch(() => {});
+    }
+  }
+
+  async loadInbox() {
+    try {
+      const box = await api.inbox();
+      this.notifications = box.notifications;
+      this.unread = box.unread;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async markRead(id: number) {
+    this.notifications = this.notifications.map((n) =>
+      n.id === id ? { ...n, read: true } : n,
+    );
+    this.unread = Math.max(0, this.unread - 1);
+    await api.markRead(id).catch(() => this.loadInbox());
+  }
+
+  async markAllRead() {
+    this.notifications = this.notifications.map((n) => ({ ...n, read: true }));
+    this.unread = 0;
+    await api.markAllRead().catch(() => this.loadInbox());
   }
 
   async loadAll() {
@@ -139,6 +171,20 @@ class Store {
         break;
       case "sync.drift":
         this.flash(`sync drift on ${ev.key} (${ev.field})`);
+        break;
+      case "notified":
+        if (ev.user_id === this.me?.id) {
+          const before = this.notifications.map((n) => n.id);
+          await this.loadInbox();
+          const fresh = this.notifications.find((n) => !before.includes(n.id) && !n.read);
+          if (fresh && "Notification" in window && Notification.permission === "granted") {
+            try {
+              new Notification("breadboard", { body: fresh.body });
+            } catch {
+              /* ignore */
+            }
+          }
+        }
         break;
     }
   }

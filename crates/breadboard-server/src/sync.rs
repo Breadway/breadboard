@@ -147,6 +147,11 @@ pub async fn apply_issue(
 
     let after = store::update_issue(&state.db, &before.key, &patch, None, source).await?;
     emit_change_events(state, &before, &after);
+    if after.assignee_id != before.assignee_id {
+        if let Some(a) = after.assignee_id {
+            crate::notify::assigned(state, &after, a, None).await;
+        }
+    }
     Ok(())
 }
 

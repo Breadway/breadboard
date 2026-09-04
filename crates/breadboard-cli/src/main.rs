@@ -85,6 +85,12 @@ enum Command {
     Comment { key: String, body: String },
     /// Show an issue's change history (from sync_log).
     Activity { key: String },
+    /// Your notifications.
+    Inbox {
+        /// Mark everything read.
+        #[arg(long)]
+        read: bool,
+    },
     /// Manage projects.
     Project {
         #[command(subcommand)]
@@ -287,6 +293,18 @@ async fn main() -> Result<()> {
                 let who = a.actor.unwrap_or_else(|| a.source.clone());
                 let val = a.new_value.unwrap_or_else(|| "—".into());
                 println!("{}  {:<12} {} → {}  ({who})", a.at, a.field, a.old_value.unwrap_or_else(|| "—".into()), val);
+            }
+        }
+        Command::Inbox { read } => {
+            if read {
+                client.mark_all_read().await?;
+                println!("marked all read");
+            } else {
+                let box_ = client.inbox(false).await?;
+                for n in &box_.notifications {
+                    println!("{}  {}{}", n.created_at, if n.read { "  " } else { "• " }, n.body);
+                }
+                println!("\n{} unread", box_.unread);
             }
         }
         Command::Project { action } => projects(&client, action).await?,

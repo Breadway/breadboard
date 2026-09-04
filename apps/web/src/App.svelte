@@ -5,6 +5,7 @@
   import Backlog from "./lib/Backlog.svelte";
   import Roadmap from "./lib/Roadmap.svelte";
   import Settings from "./lib/Settings.svelte";
+  import NotificationBell from "./lib/NotificationBell.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
 
@@ -78,6 +79,7 @@
 
     <div class="right">
       <span class="dot" class:ok={store.connected} title={store.connected ? "live" : "reconnecting"}></span>
+      <NotificationBell />
       <span class="dim">{store.me?.login}</span>
       <button class="link" onclick={() => store.logout()}>sign out</button>
     </div>

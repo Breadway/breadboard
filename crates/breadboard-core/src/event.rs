@@ -40,6 +40,9 @@ pub enum BoardEvent {
         key: String,
         field: String,
     },
+    /// A user has a new in-app notification. Clients filter by their own id.
+    #[serde(rename = "notified")]
+    Notified { user_id: i64 },
 }
 
 impl BoardEvent {
@@ -54,6 +57,7 @@ impl BoardEvent {
             BoardEvent::CycleStarted { .. } => "bread.board.cycle.started",
             BoardEvent::CycleEnded { .. } => "bread.board.cycle.ended",
             BoardEvent::SyncDrift { .. } => "bread.board.sync.drift",
+            BoardEvent::Notified { .. } => "bread.board.notified",
         }
     }
 }

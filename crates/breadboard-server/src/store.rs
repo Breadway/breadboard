@@ -1230,6 +1230,166 @@ pub async fn issue_activity(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<Act
         .collect())
 }
 
+// ---------------------------------------------------------------------------
+// notifications
+// ---------------------------------------------------------------------------
+
+use breadboard_core::{Notification, NotificationKind};
+
+pub async fn create_notification(
+    db: &SqlitePool,
+    user_id: i64,
+    kind: NotificationKind,
+    issue_id: Option<i64>,
+    body: &str,
+) -> AppResult<i64> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO notifications (user_id, kind, issue_id, body, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5) RETURNING id",
+    )
+    .bind(user_id)
+    .bind(kind.as_str())
+    .bind(issue_id)
+    .bind(body)
+    .bind(now_rfc3339())
+    .fetch_one(db)
+    .await?;
+    Ok(id)
+}
+
+pub async fn list_notifications(
+    db: &SqlitePool,
+    user_id: i64,
+    unread_only: bool,
+) -> AppResult<Vec<Notification>> {
+    #[derive(FromRow)]
+    struct Row {
+        id: i64,
+        user_id: i64,
+        kind: String,
+        issue_id: Option<i64>,
+        body: String,
+        read: i64,
+        created_at: String,
+    }
+    let sql = format!(
+        "SELECT id, user_id, kind, issue_id, body, read, created_at FROM notifications
+         WHERE user_id = ?1 {} ORDER BY created_at DESC LIMIT 100",
+        if unread_only { "AND read = 0" } else { "" }
+    );
+    let rows: Vec<Row> = sqlx::query_as(&sql).bind(user_id).fetch_all(db).await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Notification {
+            id: r.id,
+            user_id: r.user_id,
+            kind: NotificationKind::parse(&r.kind).unwrap_or(NotificationKind::Mention),
+            issue_id: r.issue_id,
+            body: r.body,
+            read: r.read != 0,
+            created_at: parse_ts(&r.created_at),
+        })
+        .collect())
+}
+
+pub async fn unread_count(db: &SqlitePool, user_id: i64) -> AppResult<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND read = 0")
+            .bind(user_id)
+            .fetch_one(db)
+            .await?,
+    )
+}
+
+pub async fn mark_notification_read(db: &SqlitePool, user_id: i64, id: i64) -> AppResult<()> {
+    sqlx::query("UPDATE notifications SET read = 1 WHERE id = ?1 AND user_id = ?2")
+        .bind(id)
+        .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+pub async fn mark_all_read(db: &SqlitePool, user_id: i64) -> AppResult<()> {
+    sqlx::query("UPDATE notifications SET read = 1 WHERE user_id = ?1")
+        .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+pub struct NotificationPrefs {
+    pub assigned: bool,
+    pub mention: bool,
+    pub cycle: bool,
+    pub digest: bool,
+}
+
+impl Default for NotificationPrefs {
+    fn default() -> Self {
+        Self { assigned: true, mention: true, cycle: true, digest: false }
+    }
+}
+
+pub async fn get_prefs(db: &SqlitePool, user_id: i64) -> AppResult<NotificationPrefs> {
+    let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT assigned, mention, cycle, digest FROM notification_prefs WHERE user_id = ?1",
+    )
+    .bind(user_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(match row {
+        Some((a, m, c, d)) => NotificationPrefs {
+            assigned: a != 0,
+            mention: m != 0,
+            cycle: c != 0,
+            digest: d != 0,
+        },
+        None => NotificationPrefs::default(),
+    })
+}
+
+pub async fn set_prefs(
+    db: &SqlitePool,
+    user_id: i64,
+    p: NotificationPrefs,
+) -> AppResult<NotificationPrefs> {
+    sqlx::query(
+        "INSERT INTO notification_prefs (user_id, assigned, mention, cycle, digest)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(user_id) DO UPDATE SET
+            assigned = excluded.assigned, mention = excluded.mention,
+            cycle = excluded.cycle, digest = excluded.digest",
+    )
+    .bind(user_id)
+    .bind(p.assigned as i64)
+    .bind(p.mention as i64)
+    .bind(p.cycle as i64)
+    .bind(p.digest as i64)
+    .execute(db)
+    .await?;
+    Ok(p)
+}
+
+pub async fn find_user_by_login(db: &SqlitePool, login: &str) -> AppResult<Option<i64>> {
+    Ok(
+        sqlx::query_scalar("SELECT id FROM users WHERE login = ?1 COLLATE NOCASE")
+            .bind(login)
+            .fetch_optional(db)
+            .await?,
+    )
+}
+
+pub async fn issue_assignees_in_cycle(db: &SqlitePool, cycle_id: i64) -> AppResult<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT assignee_id FROM issues WHERE cycle_id = ?1 AND assignee_id IS NOT NULL",
+    )
+    .bind(cycle_id)
+    .fetch_all(db)
+    .await?)
+}
+
 fn dedup(labels: &[String]) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     labels

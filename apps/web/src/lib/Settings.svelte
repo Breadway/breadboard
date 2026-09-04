@@ -1,9 +1,11 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import type { NotificationPrefs } from "@breadboard/api-client";
   import { api, store } from "./store.svelte";
 
   let loading = $state(true);
   let busy = $state(false);
+  let prefs = $state<NotificationPrefs | null>(null);
 
   // new project form
   let npKey = $state("");
@@ -15,8 +17,20 @@
   let arName = $state("");
 
   onMount(() => {
-    store.loadSettings().finally(() => (loading = false));
+    Promise.all([
+      store.loadSettings(),
+      api.getNotificationPrefs().then((p) => (prefs = p)),
+    ]).finally(() => (loading = false));
   });
+
+  async function savePrefs() {
+    if (!prefs) return;
+    try {
+      prefs = await api.setNotificationPrefs(prefs);
+    } catch (e) {
+      store.flash(e instanceof Error ? e.message : String(e));
+    }
+  }
 
   async function run(fn: () => Promise<unknown>) {
     busy = true;
@@ -142,6 +156,28 @@
         (the reconcile pass is the fallback).
       </p>
     </section>
+
+    {#if prefs}
+      <section>
+        <h2>Notifications</h2>
+        <label class="check">
+          <input type="checkbox" bind:checked={prefs.assigned} onchange={savePrefs} />
+          When an issue is assigned to me
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={prefs.mention} onchange={savePrefs} />
+          When I'm @mentioned in a comment or description
+        </label>
+        <label class="check">
+          <input type="checkbox" bind:checked={prefs.cycle} onchange={savePrefs} />
+          When a cycle I have issues in starts or ends
+        </label>
+        <p class="hint">
+          Desktop pop-ups use your browser's notification permission. For pop-ups on the bread
+          desktop, run <code>modules/breadboard.lua</code> in breadd.
+        </p>
+      </section>
+    {/if}
   {/if}
 </div>
 
@@ -242,5 +278,15 @@
     background: var(--surface);
     padding: 1px 4px;
     border-radius: 3px;
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    padding: 4px 0;
+  }
+  .check input {
+    width: auto;
   }
 </style>

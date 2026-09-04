@@ -47,7 +47,14 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
-        .route("/sync/reconcile", post(api::reconcile_now));
+        .route("/sync/reconcile", post(api::reconcile_now))
+        .route("/notifications", get(api::list_notifications))
+        .route("/notifications/read-all", post(api::mark_all_notifications_read))
+        .route("/notifications/{id}/read", post(api::mark_notification_read))
+        .route(
+            "/notifications/prefs",
+            get(api::get_notification_prefs).put(api::set_notification_prefs),
+        );
 
     let auth_routes = Router::new()
         .route("/login", get(auth::login))

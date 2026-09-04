@@ -111,6 +111,34 @@ export interface ActivityEntry {
   at: string;
 }
 
+export type NotificationKind =
+  | "assigned"
+  | "mention"
+  | "cycle_started"
+  | "cycle_ended";
+
+export interface Notification {
+  id: number;
+  user_id: number;
+  kind: NotificationKind;
+  issue_id: number | null;
+  body: string;
+  read: boolean;
+  created_at: string;
+}
+
+export interface Inbox {
+  unread: number;
+  notifications: Notification[];
+}
+
+export interface NotificationPrefs {
+  assigned: boolean;
+  mention: boolean;
+  cycle: boolean;
+  digest: boolean;
+}
+
 export interface RepoView {
   repo: string;
   project_key: string | null;
@@ -162,7 +190,8 @@ export type BoardEvent =
   | { type: "card.deleted"; id: number; key: string }
   | { type: "cycle.started"; id: number; name: string; issues: number }
   | { type: "cycle.ended"; id: number; name: string }
-  | { type: "sync.drift"; issue_id: number; key: string; field: string };
+  | { type: "sync.drift"; issue_id: number; key: string; field: string }
+  | { type: "notified"; user_id: number };
 
 export class ApiError extends Error {
   constructor(
@@ -218,6 +247,14 @@ export class BreadboardClient {
     this.req<RepoView>("POST", "/api/repos", { repo, key, name });
   removeRepo = (repo: string) => this.req<void>("DELETE", `/api/repos/${repo}`);
   reconcile = () => this.req<void>("POST", "/api/sync/reconcile");
+
+  inbox = (unread = false) =>
+    this.req<Inbox>("GET", `/api/notifications${unread ? "?unread=true" : ""}`);
+  markRead = (id: number) => this.req<void>("POST", `/api/notifications/${id}/read`);
+  markAllRead = () => this.req<void>("POST", "/api/notifications/read-all");
+  getNotificationPrefs = () => this.req<NotificationPrefs>("GET", "/api/notifications/prefs");
+  setNotificationPrefs = (p: NotificationPrefs) =>
+    this.req<NotificationPrefs>("PUT", "/api/notifications/prefs", p);
 
   listEpics = () => this.req<EpicView[]>("GET", "/api/epics");
   createEpic = (e: { key: string; title: string; description?: string; project_id?: number }) =>

@@ -7,10 +7,11 @@ enforces it.
 
 Status: **deployed** at `breadboard.breadway.dev`. Server (REST CRUD, OAuth2,
 SSE), the Svelte web client (board with keyboard nav · backlog · roadmap/epics ·
-issue drawer with activity timeline · settings · `cmd-k`), the `breadboard` CLI +
-`ratatui` TUI (device-flow auth), and the Forgejo sync engine (bidirectional
-issues / comments / PR mirroring / milestone). Routes marked _(planned)_ are for
-later milestones (notifications).
+issue drawer with activity timeline · notification bell · settings · `cmd-k`),
+the `breadboard` CLI + `ratatui` TUI (device-flow auth), the Forgejo sync engine
+(bidirectional issues / comments / PR mirroring / milestone), and notifications
+(assigned / @mention / cycle, with a `notified` SSE event, browser pop-ups, and
+best-effort `bread-emit` for a co-located breadd — see `modules/breadboard.lua`).
 
 Web board keys: `h`/`l`/`←`/`→` column, `j`/`k`/`↑`/`↓` card, `[`/`]` move card
 between statuses, `enter`/`e` open, `c` command palette.
@@ -93,11 +94,19 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `POST` | `/auth/device/approve` | **session-authed** — `{ user_code }`; mints a `cli` token and attaches it to the pending code |
 | `POST` | `/auth/device/token` | poll — `{ device_code }` → `200 { access_token }` (one-time), `202 { status: "authorization_pending" }`, `410` expired, `404` unknown |
 
-### Planned
+### Notifications
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/api/notifications` | current user's notifications (milestone 7) |
+| `GET` | `/api/notifications` | `{ unread, notifications[] }`; `?unread=true` filters |
+| `POST` | `/api/notifications/{id}/read` | mark one read; `204` |
+| `POST` | `/api/notifications/read-all` | mark all read; `204` |
+| `GET`/`PUT` | `/api/notifications/prefs` | `{ assigned, mention, cycle, digest }` bools |
+
+Generated on: an issue assigned to you (not by you), an `@login` mention in a
+comment or description, and a cycle you have assigned issues in starting/ending.
+A `notified` SSE event wakes the recipient's clients; the web app also raises a
+browser notification when permission is granted.
 
 ---
 
@@ -116,6 +125,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field` |
+| `notified` | `bread.board.notified` | `user_id` (clients filter by their own id) |
 
 ---
 
@@ -183,6 +193,7 @@ repo with no mapped project are skipped with a warning.
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
 | `activity <key>` | change history |
+| `inbox [--read]` | your notifications; `--read` marks all read |
 | `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
 | `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project |
 | `epic list` · `epic new <KEY> <TITLE> [--project]` · `epic rename <KEY> <TITLE>` · `epic archive`/`unarchive <KEY>` | `list` shows done/total |
