@@ -21,16 +21,14 @@ one, as the source of truth for the contract.
 
 ## CI
 
-Runs on a self-hosted runner. Nothing runs on plain commits/PRs beyond what is
-listed here.
+`check.yml` runs on `feature/**`, `fix/**`, `main`: clippy `-D warnings`,
+`cargo test`, `check-docs`, and a frontend build. Self-hosted runner. Nothing
+else runs on plain commits/PRs.
 
-- `check.yml` — `feature/**`, `fix/**`, `main`: clippy + tests + `check-docs`.
-- `dev-release.yml` — push to `main`: builds `breadboard-server` + `breadboard`,
-  publishes the dev track to `dl.breadway.dev`.
-- `rc-release.yml` — `vX.Y.Z-rc.N` tag: beta track.
-- `release.yml` — other `v*` tags: signed stable release.
-
-Distribution is `bakery`, not a PKGBUILD.
+The server is deployed as a container (`packaging/`). Bakery distribution of the
+CLI is a later follow-up — it needs the minisign key + release tokens as repo
+Actions secrets first, then the dev/rc/release track workflows from the sibling
+repos.
 
 ## Architecture (local)
 

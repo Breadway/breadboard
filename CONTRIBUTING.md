@@ -7,10 +7,8 @@ as every other ecosystem product.
 
 ## Branches
 
-One long-lived branch: **`main`**. Every push to `main` auto-publishes a
-**dev-track** build.
-
-New work — features and fixes alike — goes on a short-lived branch:
+One long-lived branch: **`main`**. New work — features and fixes alike — goes on
+a short-lived branch:
 
 ```
 feature/<short-name>
@@ -18,20 +16,11 @@ fix/<issue-number-or-short-name>
 ```
 
 Branch off `main`, push back into `main` when ready. Short-lived branches are
-deleted on merge.
+deleted on merge. Push to `origin` only; `github` auto-mirrors.
 
-## The release cycle
-
-"stable" and "beta" are **tags** on `main`, not branches:
-
-1. Work accumulates on `main`. Each push auto-publishes a dev build —
-   `bakery track set dev && bakery update --all`.
-2. To stabilize: `git tag vX.Y.Z-rc.1 && git push origin vX.Y.Z-rc.1` — that tag
-   triggers a beta build. Cut `-rc.2`, `-rc.3` for fixes.
-3. When an RC is clean: `git tag vX.Y.Z && git push origin vX.Y.Z` — signed
-   stable release.
-
-Push tags to **`origin` only**; `github` auto-mirrors.
+The server is deployed as a container from `main` (`packaging/`). Bakery-track
+distribution of the CLI (dev / `vX.Y.Z-rc.N` / `vX.Y.Z`) will follow the sibling
+repos' workflow once the release secrets are in place.
 
 ## Local development
 
@@ -62,15 +51,10 @@ subcommand:
 
 ## CI
 
-- `check.yml` — `feature/**`, `fix/**`, `main`: clippy + tests + `check-docs`.
-- `dev-release.yml` — push to `main`.
-- `rc-release.yml` — `vX.Y.Z-rc.N` tags.
-- `release.yml` — other `v*` tags.
-
-All CI runs on a self-hosted runner; nothing runs automatically on plain commits
-or PRs beyond the track builds above.
+`check.yml` — on `feature/**`, `fix/**`, `main`: clippy `-D warnings`,
+`cargo test`, `check-docs`, and the frontend build. Self-hosted runner; nothing
+else runs on plain commits/PRs.
 
 ## Questions
 
-Open an issue on this repo's Forgejo tracker. (Once breadboard is dogfooding
-itself, file it in breadboard.)
+File an issue on this repo's tracker.
