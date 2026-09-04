@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "breadboard": {
+      "command": "node",
+      "args": ["apps/mcp/dist/index.js"],
+      "env": {
+        "BREADBOARD_SERVER": "https://breadboard.breadway.dev"
+      }
+    }
+  }
+}
