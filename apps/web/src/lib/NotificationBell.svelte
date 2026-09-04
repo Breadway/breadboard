@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade, fly } from "svelte/transition";
   import { store } from "./store.svelte";
 
   function open(issueId: number | null) {
@@ -19,8 +20,13 @@
 
   {#if store.bellOpen}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="scrim" role="presentation" onclick={() => (store.bellOpen = false)}></div>
-    <div class="panel">
+    <div
+      class="scrim"
+      role="presentation"
+      transition:fade={{ duration: 100 }}
+      onclick={() => (store.bellOpen = false)}
+    ></div>
+    <div class="panel" transition:fly={{ y: -6, duration: 120 }}>
       <div class="phead">
         <span>Notifications</span>
         {#if store.notifications.some((n) => !n.read)}

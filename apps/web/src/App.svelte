@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fade } from "svelte/transition";
   import { store } from "./lib/store.svelte";
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
@@ -94,6 +95,9 @@
     <div class="right">
       <span class="dot" class:ok={store.connected} title={store.connected ? "live" : "reconnecting"}></span>
       <NotificationBell />
+      {#if store.me?.avatar_url}
+        <img class="avatar" src={store.me.avatar_url} alt="" width="20" height="20" />
+      {/if}
       <span class="dim">{store.me?.login}</span>
       <button class="link" onclick={() => store.logout()}>sign out</button>
     </div>
@@ -113,7 +117,7 @@
   <CommandPalette />
 
   {#if store.toast}
-    <div class="toast">{store.toast}</div>
+    <div class="toast" transition:fade={{ duration: 150 }}>{store.toast}</div>
   {/if}
 {/if}
 
@@ -182,6 +186,11 @@
   }
   .dot.ok {
     background: #4caf50;
+  }
+  .avatar {
+    border-radius: 50%;
+    object-fit: cover;
+    display: block;
   }
   .center {
     height: 100vh;
