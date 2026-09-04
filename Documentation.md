@@ -123,10 +123,14 @@ webhooks → `POST /webhooks/forgejo`, HMAC-verified against
 issues **and** PRs); apply anything the webhook path missed, then advance
 `last_synced_at`. `POST /api/sync/reconcile` runs a pass on demand.
 
-**Writeback:** after a `PATCH /api/issues/{key}` changes a synced field on a
-linked issue in an enabled repo, the change is pushed to Forgejo with
-`forgejo.api_token` (`PATCH issue` for title/body/state/assignees, `PUT labels`
-otherwise).
+**Writeback:** with `forgejo.api_token` set —
+
+- creating an issue in a project mapped to an enabled repo also creates it on
+  Forgejo and links it (`forgejo_ref`); issues in a repo-less project (e.g. the
+  roadmap) stay breadboard-only.
+- a `PATCH /api/issues/{key}` that changes a synced field on a linked issue is
+  pushed (`PATCH issue` for title/body/state/assignees, `PUT labels` otherwise).
+- adding a comment on a linked issue is pushed.
 
 **Synced fields:**
 

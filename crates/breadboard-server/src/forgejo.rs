@@ -267,6 +267,34 @@ impl Forgejo {
         Ok(())
     }
 
+    /// Create an issue. Returns the new issue (for its `number`).
+    pub async fn create_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        title: &str,
+        body: &str,
+        labels: &[String],
+        assignees: &[String],
+    ) -> anyhow::Result<FgIssue> {
+        let mut payload = serde_json::json!({ "title": title, "body": body });
+        if !labels.is_empty() {
+            // The create endpoint takes label *names* on recent Forgejo.
+            payload["labels"] = serde_json::json!(labels);
+        }
+        if !assignees.is_empty() {
+            payload["assignees"] = serde_json::json!(assignees);
+        }
+        self.json(
+            self.req(
+                reqwest::Method::POST,
+                &format!("/repos/{owner}/{repo}/issues"),
+            )
+            .json(&payload),
+        )
+        .await
+    }
+
     pub async fn create_comment(
         &self,
         owner: &str,

@@ -245,6 +245,52 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
     }
 }
 
+/// If a newly-created breadboard issue belongs to a project mapped to an enabled
+/// repo, create it on Forgejo too and link it. Returns the linked issue (or the
+/// original if nothing was pushed). Best-effort — logs on failure.
+pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
+    if issue.forgejo_ref.is_some() || !state.forgejo.is_configured() {
+        return issue;
+    }
+    let Ok(project) = store::get_project(&state.db, issue.project_id).await else {
+        return issue;
+    };
+    let Some(repo) = project.forgejo_repo else { return issue };
+    if !matches!(store::repo_enabled(&state.db, &repo).await, Ok(true)) {
+        return issue;
+    }
+    let Ok((owner, name)) = split_repo(&repo) else { return issue };
+
+    let assignees: Vec<String> = match issue.assignee_id {
+        Some(id) => match store::get_user(&state.db, id).await {
+            Ok(u) => vec![u.login],
+            Err(_) => vec![],
+        },
+        None => vec![],
+    };
+
+    match state
+        .forgejo
+        .create_issue(owner, name, &issue.title, &issue.body, &issue.labels, &assignees)
+        .await
+    {
+        Ok(fg) => match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
+            Ok(linked) => {
+                tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
+                linked
+            }
+            Err(e) => {
+                tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
+                issue
+            }
+        },
+        Err(e) => {
+            tracing::warn!(key = %issue.key, error = %e, "forgejo issue creation failed");
+            issue
+        }
+    }
+}
+
 /// Push a breadboard-authored comment to Forgejo, recording the returned id so
 /// the webhook echo is deduped. Best-effort — logs on failure.
 pub async fn writeback_comment(state: &AppState, issue: &Issue, comment_id: i64, body: &str) {

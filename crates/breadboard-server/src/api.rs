@@ -139,6 +139,8 @@ pub async fn create_issue(
     Json(body): Json<NewIssue>,
 ) -> AppResult<(StatusCode, Json<Issue>)> {
     let issue = store::create_issue(&app.db, &body, Some(user.0.id)).await?;
+    // Push to Forgejo when the project maps to an enabled repo (no-op otherwise).
+    let issue = sync::writeback_new_issue(&app, issue).await;
     app.bus.publish(BoardEvent::CardCreated {
         id: issue.id,
         key: issue.key.clone(),

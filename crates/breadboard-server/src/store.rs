@@ -914,6 +914,40 @@ pub async fn create_comment(
     })
 }
 
+/// Attach a `forgejo_ref` to a breadboard-native issue after it has been
+/// created on Forgejo, and log it.
+pub async fn link_issue(
+    db: &SqlitePool,
+    issue_id: i64,
+    repo: &str,
+    number: i64,
+) -> AppResult<Issue> {
+    let ts = now_rfc3339();
+    sqlx::query(
+        "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1",
+    )
+    .bind(issue_id)
+    .bind(repo)
+    .bind(number)
+    .bind(&ts)
+    .execute(db)
+    .await?;
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+         VALUES (?1, 'created', NULL, ?2, 'breadboard', NULL, ?3)",
+    )
+    .bind(issue_id)
+    .bind(format!("{repo}#{number}"))
+    .bind(&ts)
+    .execute(db)
+    .await?;
+    let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE id = ?1"))
+        .bind(issue_id)
+        .fetch_one(db)
+        .await?;
+    hydrate(db, row).await
+}
+
 pub async fn set_comment_external_id(
     db: &SqlitePool,
     comment_id: i64,
