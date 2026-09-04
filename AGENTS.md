@@ -16,14 +16,13 @@ one, as the source of truth for the contract.
 
 ## Remotes
 
-- `origin` — Forgejo (`ssh://git@100.66.238.26:2222/Breadway/breadboard.git`) — authoritative.
-- `github` — mirror. It **auto-mirrors from origin**; push `origin` only
-  (per ecosystem memory, do not push both).
+- `origin` — Forgejo (`git.breadway.dev`) — authoritative.
+- `github` — mirror. It auto-mirrors from `origin`; push `origin` only.
 
 ## CI
 
-Runs on the self-hosted hestia runner. Nothing runs on plain commits/PRs beyond
-what is listed here.
+Runs on a self-hosted runner. Nothing runs on plain commits/PRs beyond what is
+listed here.
 
 - `check.yml` — `feature/**`, `fix/**`, `main`: clippy + tests + `check-docs`.
 - `dev-release.yml` — push to `main`: builds `breadboard-server` + `breadboard`,

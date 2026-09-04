@@ -1,8 +1,0 @@
-# Add to Breadway/infra → aegis/Caddyfile. 100.66.238.26 is Hestia's Tailscale IP.
-# Caddy auto-disables response buffering for text/event-stream, so the /events
-# SSE stream works through the proxy without extra config.
-
-breadboard.breadway.dev {
-	reverse_proxy 100.66.238.26:7280
-	encode gzip
-}

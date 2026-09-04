@@ -1,0 +1,9 @@
+# Example Caddy site block. Any TLS-terminating reverse proxy works; the only
+# requirement is that it does NOT buffer responses (the /events SSE stream needs
+# to flow). Caddy disables buffering for text/event-stream automatically; for
+# nginx set `proxy_buffering off;` on the /events location.
+
+issues.example.com {
+	reverse_proxy 127.0.0.1:7280
+	encode gzip
+}

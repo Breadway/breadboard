@@ -1,42 +1,49 @@
-# breadboard on Hestia. Sits behind the Aegis Caddy edge (see packaging/caddy/).
+# breadboard as a self-contained container. The Rust build runs in the
+# rust:1-bookworm stage of the Containerfile, so the host needs no toolchain.
 #
-#   podman-compose -f packaging/compose.yaml up -d
+#   docker compose -f packaging/compose.yaml --project-directory . up -d --build
 #
-# Secrets come from a sibling .env file (NOT committed):
+# Run it from the repo root (--project-directory .) so the build context and the
+# .env file resolve there. Secrets go in .env (NOT committed):
+#
+#   BREADBOARD_PUBLIC_URL=https://issues.example.com
+#   BREADBOARD_FORGEJO_BASE_URL=https://git.example.com
 #   BREADBOARD_FORGEJO_OAUTH_CLIENT_ID=...
 #   BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET=...
 #   BREADBOARD_FORGEJO_WEBHOOK_SECRET=...
 #   BREADBOARD_FORGEJO_API_TOKEN=...
+#
+# See packaging/DEPLOY.md for the full runbook.
 
 services:
   breadboard:
     build:
-      context: ..
+      context: .
       dockerfile: packaging/Containerfile
-    image: breadboard:latest
+    image: breadboard:local
+    container_name: breadboard
     restart: unless-stopped
     ports:
-      - "127.0.0.1:7280:7280" # Tailscale-only; the Aegis Caddy reverse-proxies here
+      - "${BREADBOARD_BIND:-127.0.0.1:7280}:7280"
     environment:
-      BREADBOARD_PUBLIC_URL: https://breadboard.breadway.dev
-      BREADBOARD_FORGEJO_OAUTH_CLIENT_ID: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_ID}
-      BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET}
-      BREADBOARD_FORGEJO_WEBHOOK_SECRET: ${BREADBOARD_FORGEJO_WEBHOOK_SECRET}
-      BREADBOARD_FORGEJO_API_TOKEN: ${BREADBOARD_FORGEJO_API_TOKEN}
+      BREADBOARD_PUBLIC_URL: ${BREADBOARD_PUBLIC_URL:?set BREADBOARD_PUBLIC_URL}
+      BREADBOARD_FORGEJO_BASE_URL: ${BREADBOARD_FORGEJO_BASE_URL:-}
+      BREADBOARD_FORGEJO_OAUTH_CLIENT_ID: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_ID:-}
+      BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET:-}
+      BREADBOARD_FORGEJO_WEBHOOK_SECRET: ${BREADBOARD_FORGEJO_WEBHOOK_SECRET:-}
+      BREADBOARD_FORGEJO_API_TOKEN: ${BREADBOARD_FORGEJO_API_TOKEN:-}
     volumes:
       - breadboard-data:/var/lib/breadboard
 
-  litestream:
-    image: docker.io/litestream/litestream:0.3
-    restart: unless-stopped
-    command: replicate
-    volumes:
-      - breadboard-data:/var/lib/breadboard
-      - ./litestream.yml:/etc/litestream.yml:ro
-      - breadboard-backups:/var/backups/breadboard
-    depends_on:
-      - breadboard
+  # Optional continuous backup. Uncomment and set a replica in litestream.yml.
+  # litestream:
+  #   image: litestream/litestream:0.3
+  #   restart: unless-stopped
+  #   command: replicate
+  #   volumes:
+  #     - breadboard-data:/var/lib/breadboard
+  #     - ./packaging/litestream.yml:/etc/litestream.yml:ro
+  #   depends_on: [breadboard]
 
 volumes:
   breadboard-data:
-  breadboard-backups:

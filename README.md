@@ -69,13 +69,12 @@ come from `BREADBOARD_*` env vars.
 
 ## Deployment
 
-The server serves the built SPA itself when `BREADBOARD_WEB_DIR` points at
-`apps/web/dist` — one origin, no separate web server. On Hestia it runs as a
-container (`packaging/Containerfile` + `packaging/compose.yaml`, with a
-Litestream sidecar), public via the Aegis Caddy edge
-(`packaging/caddy/aegis-breadboard.caddy` → `breadboard.breadway.dev`).
+One container (`packaging/Containerfile`) — a Rust server that also serves its
+built SPA — behind a TLS-terminating reverse proxy. The Rust build runs in a
+`rust:1-bookworm` stage, so the host needs no toolchain. See
+[`packaging/DEPLOY.md`](packaging/DEPLOY.md).
 
-CLI + desktop are distributed through bakery. See `Documentation.md` for the API
-and event contract, and the plan for the rollout.
+CLI is distributed through bakery. See `Documentation.md` for the API and event
+contract.
 
 Part of the [bread ecosystem](https://git.breadway.dev/Breadway). MIT licensed.

@@ -67,7 +67,8 @@ subcommand:
 - `rc-release.yml` — `vX.Y.Z-rc.N` tags.
 - `release.yml` — other `v*` tags.
 
-All CI runs on the self-hosted hestia runner.
+All CI runs on a self-hosted runner; nothing runs automatically on plain commits
+or PRs beyond the track builds above.
 
 ## Questions
 
