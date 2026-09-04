@@ -1072,6 +1072,33 @@ pub async fn link_issue(
     hydrate(db, row).await
 }
 
+/// Claim a local, not-yet-linked issue that matches an incoming Forgejo issue
+/// by project + exact title, created moments ago. This closes a race between
+/// `writeback_new_issue`'s own `link_issue` call and the webhook for the issue
+/// it just created arriving back at us first: without this, both paths insert
+/// their own row for the same Forgejo issue, producing a duplicate.
+pub async fn claim_unlinked_issue(
+    db: &SqlitePool,
+    project_id: i64,
+    title: &str,
+    repo: &str,
+    number: i64,
+) -> AppResult<Option<Issue>> {
+    let cutoff = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+    let row: Option<IssueRow> = sqlx::query_as(&format!(
+        "SELECT {ISSUE_COLS} FROM issues
+         WHERE project_id = ?1 AND forgejo_repo IS NULL AND title = ?2 AND created_at >= ?3
+         ORDER BY created_at DESC LIMIT 1"
+    ))
+    .bind(project_id)
+    .bind(title)
+    .bind(&cutoff)
+    .fetch_optional(db)
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+    link_issue(db, row.id, repo, number).await.map(Some)
+}
+
 pub async fn set_comment_external_id(
     db: &SqlitePool,
     comment_id: i64,
