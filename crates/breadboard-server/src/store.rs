@@ -6,8 +6,8 @@
 
 use anyhow::Context;
 use breadboard_core::{
-    Comment, Cycle, Epic, Issue, IssueLink, IssueType, LinkKind, Priority, Project, Status,
-    SyncSource, User,
+    Comment, Cycle, Epic, ForgejoRef, Issue, IssueLink, IssueType, LinkKind, Priority, Project,
+    Status, SyncSource, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqlitePool};
@@ -144,6 +144,17 @@ pub async fn get_project_by_key(db: &SqlitePool, key: &str) -> AppResult<Project
     .await?
     .ok_or(AppError::NotFound)?;
     Ok(row.into())
+}
+
+/// Resolve a project by numeric id or by key, same convention as
+/// `NewIssue::project`.
+pub async fn find_project(db: &SqlitePool, s: &str) -> AppResult<Project> {
+    if let Ok(id) = s.parse::<i64>() {
+        if let Ok(p) = get_project(db, id).await {
+            return Ok(p);
+        }
+    }
+    get_project_by_key(db, s).await
 }
 
 pub async fn get_project_by_repo(db: &SqlitePool, repo: &str) -> AppResult<Project> {
@@ -870,6 +881,59 @@ pub async fn update_issue(
 
     tx.commit().await?;
     get_issue_by_key(db, key).await
+}
+
+/// Move an issue to a different project: allocate a fresh key from the
+/// target project's counter and clear any Forgejo link (it belonged to the
+/// old project's repo). Returns the moved issue and the link it had before
+/// the move, so the caller can close it out on Forgejo and re-sync into the
+/// new project's repo if one is mapped.
+pub async fn move_issue_project(
+    db: &SqlitePool,
+    key: &str,
+    new_project: &Project,
+) -> AppResult<(Issue, Option<ForgejoRef>)> {
+    let before = get_issue_by_key(db, key).await?;
+    if before.project_id == new_project.id {
+        let old_ref = before.forgejo_ref.clone();
+        return Ok((before, old_ref));
+    }
+    let old_ref = before.forgejo_ref.clone();
+
+    let mut tx = db.begin().await?;
+    let n: i64 = new_project.next_number;
+    sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
+        .bind(new_project.id)
+        .execute(&mut *tx)
+        .await?;
+    let new_key = format!("{}-{}", new_project.key, n);
+    let ts = now_rfc3339();
+
+    sqlx::query(
+        "UPDATE issues SET project_id = ?2, key = ?3, forgejo_repo = NULL,
+            forgejo_number = NULL, milestone = NULL, updated_at = ?4 WHERE id = ?1",
+    )
+    .bind(before.id)
+    .bind(new_project.id)
+    .bind(&new_key)
+    .bind(&ts)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+         VALUES (?1, 'project', ?2, ?3, 'breadboard', NULL, ?4)",
+    )
+    .bind(before.id)
+    .bind(&before.key)
+    .bind(&new_key)
+    .bind(&ts)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    let after = get_issue_by_key(db, &new_key).await?;
+    Ok((after, old_ref))
 }
 
 pub async fn find_issue_by_forgejo(

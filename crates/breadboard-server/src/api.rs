@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::dto::{
-    EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
+    EpicPatch, IssueFilter, IssuePatch, MoveProject, NewCycle, NewEpic, NewIssue, NewProject,
+    ProjectPatch,
 };
 use crate::error::{AppError, AppResult};
 use crate::{notify, store, sync, AppState};
@@ -319,6 +320,21 @@ pub async fn patch_issue(
     // Push synced-field changes back to Forgejo (no-op if not linked/enabled).
     sync::writeback(&app, &before, &issue).await;
 
+    Ok(Json(issue))
+}
+
+pub async fn move_issue_project(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<MoveProject>,
+) -> AppResult<Json<Issue>> {
+    let project = store::find_project(&app.db, &body.project).await?;
+    let issue = sync::move_project(&app, &key, &project).await?;
+    app.bus.publish(BoardEvent::CardUpdated {
+        id: issue.id,
+        key: issue.key.clone(),
+    });
     Ok(Json(issue))
 }
 

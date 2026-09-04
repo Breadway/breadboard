@@ -9,6 +9,7 @@
     type Status,
   } from "@breadboard/api-client";
   import { api, store } from "./store.svelte";
+  import { renderMarkdown } from "./markdown";
 
   let detail = $state<IssueDetail | null>(null);
   let activity = $state<ActivityEntry[]>([]);
@@ -20,6 +21,7 @@
   let commentDraft = $state("");
   let confirmingDelete = $state(false);
   let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+  let editingBody = $state(false);
 
   function requestDelete() {
     if (confirmingDelete) {
@@ -36,6 +38,7 @@
     const key = store.selectedKey;
     clearTimeout(confirmTimer);
     confirmingDelete = false;
+    editingBody = false;
     if (!key) {
       detail = null;
       activity = [];
@@ -76,6 +79,9 @@
   }
   function saveBody() {
     if (detail && bodyDraft !== detail.body) void save({ body: bodyDraft });
+  }
+  function changeProject(project: string) {
+    if (detail) void store.moveProject(detail.key, project);
   }
   function saveLabels() {
     if (!detail) return;
@@ -169,6 +175,18 @@
           </button>
         </div>
 
+        <div class="row">
+          <label class="grow">
+            Project
+            <select
+              value={store.projectKey(detail.project_id)}
+              onchange={(e) => changeProject(e.currentTarget.value)}
+            >
+              {#each store.projects as p (p.id)}<option value={p.key}>{p.key} · {p.name}</option>{/each}
+            </select>
+          </label>
+        </div>
+
         {#if store.epics.length}
           <label class="block">
             Epic
@@ -183,10 +201,26 @@
           </label>
         {/if}
 
-        <label class="block">
-          Description
-          <textarea rows="6" bind:value={bodyDraft} onblur={saveBody}></textarea>
-        </label>
+        <div class="block">
+          <div class="field-head">
+            <span>Description</span>
+            <button class="link-btn" onclick={() => (editingBody = !editingBody)}>
+              {editingBody ? "Preview" : "Edit"}
+            </button>
+          </div>
+          {#if editingBody}
+            <textarea
+              rows="6"
+              bind:value={bodyDraft}
+              onblur={() => {
+                saveBody();
+                editingBody = false;
+              }}
+            ></textarea>
+          {:else}
+            <div class="md">{@html renderMarkdown(detail.body || "*No description.*")}</div>
+          {/if}
+        </div>
 
         <section class="comments">
           <div class="tabs">
@@ -204,7 +238,7 @@
                 <div class="meta dim">
                   {new Date(c.created_at).toLocaleString()}{c.external_id ? " · synced" : ""}
                 </div>
-                <div>{c.body}</div>
+                <div class="md">{@html renderMarkdown(c.body)}</div>
               </div>
             {:else}
               <p class="dim">No comments yet.</p>
@@ -307,8 +341,84 @@
     letter-spacing: 0.04em;
     color: var(--ink-dim);
   }
-  label.block {
+  .block {
     width: 100%;
+  }
+  .field-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--ink-dim);
+    margin-bottom: 3px;
+  }
+  .link-btn {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    text-decoration: underline;
+    cursor: pointer;
+    font-size: 11px;
+    text-transform: none;
+    letter-spacing: normal;
+    padding: 0;
+  }
+  .link-btn:hover {
+    color: var(--accent);
+  }
+  .md {
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  :global(.md p) {
+    margin: 0 0 8px;
+  }
+  :global(.md p:last-child) {
+    margin-bottom: 0;
+  }
+  :global(.md ul),
+  :global(.md ol) {
+    margin: 4px 0 8px;
+    padding-left: 20px;
+  }
+  :global(.md code) {
+    background: var(--bg);
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: ui-monospace, monospace;
+  }
+  :global(.md pre) {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px;
+    overflow-x: auto;
+  }
+  :global(.md pre code) {
+    background: none;
+    padding: 0;
+  }
+  :global(.md a) {
+    color: var(--accent);
+  }
+  :global(.md blockquote) {
+    border-left: 2px solid var(--border);
+    margin: 4px 0;
+    padding-left: 10px;
+    color: var(--ink-dim);
+  }
+  :global(.md h1),
+  :global(.md h2),
+  :global(.md h3) {
+    font-size: 1em;
+    font-weight: 600;
+    margin: 8px 0 4px;
+  }
+  :global(.md img) {
+    max-width: 100%;
   }
   label.grow {
     flex: 1;

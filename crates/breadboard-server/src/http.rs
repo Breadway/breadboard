@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
-use axum::routing::{get, patch, post};
+use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use futures::stream::Stream;
 use serde_json::json;
@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
                 .get(api::get_issue)
                 .delete(api::delete_issue),
         )
+        .route("/issues/{key}/project", put(api::move_issue_project))
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
