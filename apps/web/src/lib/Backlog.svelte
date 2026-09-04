@@ -96,12 +96,9 @@
     border: 1px solid var(--border);
     text-transform: capitalize;
   }
-  .s-doing {
-    color: #e0a052;
-    border-color: #e0a052;
-  }
-  .s-done {
-    color: #4caf50;
-    border-color: #4caf50;
-  }
+  .s-backlog { color: var(--status-backlog); border-color: var(--status-backlog); }
+  .s-todo { color: var(--status-todo); border-color: var(--status-todo); }
+  .s-doing { color: var(--status-doing); border-color: var(--status-doing); }
+  .s-review { color: var(--status-review); border-color: var(--status-review); }
+  .s-done { color: var(--status-done); border-color: var(--status-done); }
 </style>

@@ -97,6 +97,7 @@
   }
   .title {
     font-size: 13px;
+    font-weight: 500;
     line-height: 1.35;
   }
   .card-bot {

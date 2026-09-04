@@ -106,7 +106,7 @@
 <style>
   .wrap { height: calc(100vh - 46px); overflow-y: auto; padding: 18px 22px; max-width: 900px; }
   .head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 14px; }
-  h1 { margin: 0; font-size: 18px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
   .new { display: flex; gap: 6px; margin-left: auto; }
   .epic { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--surface); }
   .epic.archived { opacity: 0.55; }
@@ -117,18 +117,20 @@
   .count { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 12px; }
   .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 10px; background: var(--bg); }
   .seg { min-width: 2px; }
-  .seg.s-backlog { background: #3a3a3a; }
-  .seg.s-todo { background: #5a5a5a; }
-  .seg.s-doing { background: #d98a3d; }
-  .seg.s-review { background: #b07030; }
-  .seg.s-done { background: #4caf50; }
+  .seg.s-backlog { background: var(--status-backlog); }
+  .seg.s-todo { background: var(--status-todo); }
+  .seg.s-doing { background: var(--status-doing); }
+  .seg.s-review { background: var(--status-review); }
+  .seg.s-done { background: var(--status-done); }
   .seg.empty { background: var(--border); }
   .children { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
   .child { text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
   .child:hover { border-color: var(--accent); }
   .ckey { color: var(--ink-dim); font-family: ui-monospace, monospace; }
   .pill { font-size: 10px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); text-transform: capitalize; }
-  .s-doing { color: #e0a052; } .s-done { color: #4caf50; }
+  .s-backlog { color: var(--status-backlog); } .s-todo { color: var(--status-todo); }
+  .s-doing { color: var(--status-doing); } .s-review { color: var(--status-review); }
+  .s-done { color: var(--status-done); }
   button { background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: 0.5; }

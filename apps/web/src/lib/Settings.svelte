@@ -193,6 +193,7 @@
   }
   h2 {
     font-size: 13px;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--ink-dim);
