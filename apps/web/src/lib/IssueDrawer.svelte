@@ -7,6 +7,7 @@
   let titleDraft = $state("");
   let bodyDraft = $state("");
   let labelsDraft = $state("");
+  let commentDraft = $state("");
 
   $effect(() => {
     const key = store.selectedKey;
@@ -51,6 +52,17 @@
   }
 
   const assignedToMe = $derived(detail?.assignee_id === store.me?.id);
+
+  async function postComment() {
+    if (!detail || !commentDraft.trim()) return;
+    try {
+      const c = await api.addComment(detail.key, commentDraft.trim());
+      detail = { ...detail, comments: [...detail.comments, c] };
+      commentDraft = "";
+    } catch (e) {
+      store.flash(`comment failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
 </script>
 
 {#if store.selectedKey}
@@ -58,6 +70,9 @@
     <header>
       <span class="key">{store.selectedKey}</span>
       <div class="spacer"></div>
+      {#if detail?.milestone}
+        <span class="fg">◆ {detail.milestone}</span>
+      {/if}
       {#if detail?.forgejo_ref}
         <span class="fg">⇄ {detail.forgejo_ref.repo}#{detail.forgejo_ref.number}</span>
       {/if}
@@ -142,12 +157,21 @@
           <h3>Comments {detail.comments.length ? `(${detail.comments.length})` : ""}</h3>
           {#each detail.comments as c (c.id)}
             <div class="comment">
-              <div class="meta dim">{new Date(c.created_at).toLocaleString()}</div>
+              <div class="meta dim">
+                {new Date(c.created_at).toLocaleString()}{c.external_id ? " · synced" : ""}
+              </div>
               <div>{c.body}</div>
             </div>
           {:else}
-            <p class="dim">No comments. (Comment sync lands with the Forgejo engine.)</p>
+            <p class="dim">No comments yet.</p>
           {/each}
+          <textarea
+            rows="2"
+            bind:value={commentDraft}
+            placeholder="Add a comment…"
+            onkeydown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && postComment()}
+          ></textarea>
+          <button class="btn" onclick={postComment} disabled={!commentDraft.trim()}>Comment</button>
         </section>
 
         <footer>

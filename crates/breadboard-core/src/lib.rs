@@ -262,6 +262,8 @@ pub struct Issue {
     pub labels: Vec<String>,
     pub links: Vec<IssueLink>,
     pub forgejo_ref: Option<ForgejoRef>,
+    /// Forgejo milestone title, synced inbound only.
+    pub milestone: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

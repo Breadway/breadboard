@@ -163,6 +163,36 @@ pub async fn get_issue(
     Ok(Json(IssueDetail { issue, comments }))
 }
 
+#[derive(Deserialize)]
+pub struct NewComment {
+    body: String,
+}
+
+pub async fn add_comment(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<NewComment>,
+) -> AppResult<(StatusCode, Json<Comment>)> {
+    if body.body.trim().is_empty() {
+        return Err(crate::error::AppError::bad_request("comment body is empty"));
+    }
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    let comment = store::create_comment(&app.db, issue.id, Some(user.0.id), body.body.trim()).await?;
+    app.bus.publish(BoardEvent::CardUpdated {
+        id: issue.id,
+        key: issue.key.clone(),
+    });
+    sync::writeback_comment(&app, &issue, comment.id, &comment.body).await;
+    // Re-read so the response carries the external_id if writeback set one.
+    let stored = store::list_comments(&app.db, issue.id)
+        .await?
+        .into_iter()
+        .find(|c| c.id == comment.id)
+        .unwrap_or(comment);
+    Ok((StatusCode::CREATED, Json(stored)))
+}
+
 pub async fn patch_issue(
     State(app): State<AppState>,
     user: AuthUser,

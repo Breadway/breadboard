@@ -386,16 +386,20 @@ struct IssueRow {
     cycle_id: Option<i64>,
     forgejo_repo: Option<String>,
     forgejo_number: Option<i64>,
+    milestone: Option<String>,
     created_at: String,
     updated_at: String,
 }
 
 const ISSUE_COLS: &str = "id, key, project_id, title, body, status, priority, type, estimate, \
-    assignee_id, reporter_id, epic_id, cycle_id, forgejo_repo, forgejo_number, created_at, updated_at";
+    assignee_id, reporter_id, epic_id, cycle_id, forgejo_repo, forgejo_number, milestone, \
+    created_at, updated_at";
 
-/// Fields whose changes must be written to `sync_log` (and, once sync lands,
-/// pushed to Forgejo).
-pub const SYNCED_FIELDS: &[&str] = &["title", "body", "status", "assignee_id", "labels"];
+/// Fields whose changes are recorded in `sync_log`. Of these, `title` / `body` /
+/// `status` / `assignee_id` / `labels` also drive Forgejo writeback;
+/// `milestone` is inbound-only.
+pub const SYNCED_FIELDS: &[&str] =
+    &["title", "body", "status", "assignee_id", "labels", "milestone"];
 
 async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
     let labels: Vec<String> =
@@ -436,6 +440,7 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
             (Some(repo), Some(number)) => Some(breadboard_core::ForgejoRef { repo, number }),
             _ => None,
         },
+        milestone: r.milestone,
         created_at: parse_ts(&r.created_at),
         updated_at: parse_ts(&r.updated_at),
     })
@@ -650,6 +655,16 @@ pub async fn update_issue(
             );
         }
     }
+    if let Some(milestone) = &patch.milestone {
+        if *milestone != before.milestone {
+            set_col!(
+                "milestone",
+                milestone.clone(),
+                before.milestone.clone(),
+                milestone.clone()
+            );
+        }
+    }
     if let Some(cycle_id) = patch.cycle_id {
         if cycle_id != before.cycle_id {
             set_col!(
@@ -765,6 +780,7 @@ pub async fn import_issue(
     is_pr: bool,
     labels: &[String],
     assignee_id: Option<i64>,
+    milestone: Option<&str>,
     created_at: &str,
     updated_at: &str,
     source: SyncSource,
@@ -780,8 +796,8 @@ pub async fn import_issue(
     let row: IssueRow = sqlx::query_as(&format!(
         "INSERT INTO issues
             (key, project_id, title, body, status, priority, type, assignee_id,
-             forgejo_repo, forgejo_number, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11)
+             forgejo_repo, forgejo_number, milestone, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          RETURNING {ISSUE_COLS}"
     ))
     .bind(&key)
@@ -793,6 +809,7 @@ pub async fn import_issue(
     .bind(assignee_id)
     .bind(repo)
     .bind(number)
+    .bind(milestone)
     .bind(created_at)
     .bind(updated_at)
     .fetch_one(&mut *tx)
@@ -831,6 +848,27 @@ pub async fn upsert_synced_comment(
     created_at: &str,
     updated_at: &str,
 ) -> AppResult<()> {
+    // If a matching not-yet-linked local comment exists (our own writeback that
+    // hasn't recorded its external_id yet), claim it instead of inserting a dup.
+    let claimed = sqlx::query(
+        "UPDATE comments SET external_id = ?2, updated_at = ?3
+         WHERE id = (
+             SELECT id FROM comments
+             WHERE issue_id = ?1 AND external_id IS NULL AND body = ?4
+             ORDER BY id DESC LIMIT 1
+         )",
+    )
+    .bind(issue_id)
+    .bind(external_id)
+    .bind(updated_at)
+    .bind(body)
+    .execute(db)
+    .await?
+    .rows_affected();
+    if claimed > 0 {
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO comments (issue_id, author_id, body, external_id, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
@@ -844,6 +882,48 @@ pub async fn upsert_synced_comment(
     .bind(updated_at)
     .execute(db)
     .await?;
+    Ok(())
+}
+
+/// Create a breadboard-authored comment (no `external_id` until it is pushed).
+pub async fn create_comment(
+    db: &SqlitePool,
+    issue_id: i64,
+    author_id: Option<i64>,
+    body: &str,
+) -> AppResult<Comment> {
+    let ts = now_rfc3339();
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO comments (issue_id, author_id, body, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?4) RETURNING id",
+    )
+    .bind(issue_id)
+    .bind(author_id)
+    .bind(body)
+    .bind(&ts)
+    .fetch_one(db)
+    .await?;
+    Ok(Comment {
+        id,
+        issue_id,
+        author_id,
+        body: body.to_string(),
+        external_id: None,
+        created_at: parse_ts(&ts),
+        updated_at: parse_ts(&ts),
+    })
+}
+
+pub async fn set_comment_external_id(
+    db: &SqlitePool,
+    comment_id: i64,
+    external_id: i64,
+) -> AppResult<()> {
+    sqlx::query("UPDATE comments SET external_id = ?2 WHERE id = ?1 AND external_id IS NULL")
+        .bind(comment_id)
+        .bind(external_id)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

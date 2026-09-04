@@ -35,6 +35,7 @@ pub fn router(state: AppState) -> Router {
                 .get(api::get_issue)
                 .delete(api::delete_issue),
         )
+        .route("/issues/{key}/comments", post(api::add_comment))
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
         .route("/sync/reconcile", post(api::reconcile_now));

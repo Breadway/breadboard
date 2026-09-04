@@ -79,6 +79,8 @@ enum Command {
     },
     /// Show one issue.
     Show { key: String },
+    /// Add a comment to an issue (also pushed to Forgejo if linked).
+    Comment { key: String, body: String },
     /// Manage cycles.
     Cycle {
         #[command(subcommand)]
@@ -220,6 +222,10 @@ async fn main() -> Result<()> {
         Command::Show { key } => {
             let d = client.get_issue(&key).await?;
             print_issue(&d);
+        }
+        Command::Comment { key, body } => {
+            client.add_comment(&key, &body).await?;
+            println!("comment added to {key}");
         }
         Command::Cycle { action } => cycles(&client, action).await?,
         Command::Repos { action } => repos(&client, action).await?,
@@ -406,6 +412,9 @@ fn print_issue(d: &breadboard_client::IssueDetail) {
     }
     if !i.labels.is_empty() {
         println!("  labels    {}", i.labels.join(", "));
+    }
+    if let Some(m) = &i.milestone {
+        println!("  milestone {m}");
     }
     if let Some(f) = &i.forgejo_ref {
         println!("  forgejo   {}#{}", f.repo, f.number);

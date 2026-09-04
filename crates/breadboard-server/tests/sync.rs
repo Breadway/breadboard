@@ -3,8 +3,8 @@
 
 mod common;
 
-use breadboard_core::{Status, SyncSource};
-use breadboard_server::forgejo::{FgIssue, FgUser};
+use breadboard_core::{IssueType, Status, SyncSource};
+use breadboard_server::forgejo::{FgComment, FgIssue, FgMilestone, FgUser};
 use breadboard_server::{store, sync};
 use chrono::{Duration, Utc};
 use serde_json::json;
@@ -168,6 +168,77 @@ async fn webhook_hmac_gate() {
         .await
         .unwrap();
     assert!(imported.is_some(), "webhook issue imported");
+}
+
+#[tokio::test]
+async fn pr_import_and_milestone_sync() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+
+    // A PR (is_pr via pull_request field) with a milestone.
+    let mut pr = fg_issue(12, "add the sync engine", Utc::now());
+    pr.pull_request = Some(breadboard_server::forgejo::FgPullRequestStub { merged: false });
+    pr.milestone = Some(FgMilestone { title: "v1.0".into() });
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let imported = store::find_issue_by_forgejo(&app.db, repo, 12)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported.issue_type, IssueType::Pr);
+    assert_eq!(imported.milestone.as_deref(), Some("v1.0"));
+
+    // Milestone change flows in.
+    let mut pr2 = pr.clone();
+    pr2.milestone = Some(FgMilestone { title: "v1.1".into() });
+    pr2.updated_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &pr2, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    let again = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
+    assert_eq!(again.milestone.as_deref(), Some("v1.1"));
+    assert!(sync_log_count(&app.db, "milestone").await >= 1);
+}
+
+#[tokio::test]
+async fn breadboard_comment_absorbs_its_own_echo() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    let fg = fg_issue(3, "issue with comments", Utc::now());
+    sync::apply_issue(&app.state, repo, &fg, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let issue = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
+
+    // breadboard-authored comment (no external_id — Forgejo not configured in tests).
+    let local = store::create_comment(&app.db, issue.id, None, "looks good to me")
+        .await
+        .unwrap();
+    assert!(local.external_id.is_none());
+
+    // The webhook echo of that same comment arrives.
+    let echo = FgComment {
+        id: 555,
+        body: "looks good to me".into(),
+        user: None,
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+
+    let comments = store::list_comments(&app.db, issue.id).await.unwrap();
+    assert_eq!(comments.len(), 1, "echo claimed the local comment, no dup");
+    assert_eq!(comments[0].external_id, Some(555));
 }
 
 #[test]

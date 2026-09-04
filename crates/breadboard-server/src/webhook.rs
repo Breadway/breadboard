@@ -11,7 +11,7 @@ use hmac::{Hmac, Mac};
 use serde::Deserialize;
 use sha2::Sha256;
 
-use crate::forgejo::{FgComment, FgIssue};
+use crate::forgejo::{FgComment, FgIssue, FgPrObject};
 use crate::{store, sync, AppState};
 
 type HmacSha256 = Hmac<Sha256>;
@@ -35,6 +35,14 @@ struct CommentPayload {
     action: String,
     issue: FgIssue,
     comment: FgComment,
+    repository: Repository,
+}
+
+#[derive(Deserialize)]
+struct PrPayload {
+    #[serde(default)]
+    action: String,
+    pull_request: FgPrObject,
     repository: Repository,
 }
 
@@ -68,11 +76,10 @@ pub async fn handle(
             Ok(p) => apply_comment(&state, p).await,
             Err(e) => Err(e.into()),
         },
-        "pull_request" => {
-            // Mirrored read-mostly; full PR sync lands in a follow-up.
-            tracing::debug!("ignoring pull_request webhook (not yet synced)");
-            Ok(())
-        }
+        "pull_request" => match serde_json::from_slice::<PrPayload>(&body) {
+            Ok(p) => apply_pr(&state, p).await,
+            Err(e) => Err(e.into()),
+        },
         other => {
             tracing::debug!(event = other, "ignoring unhandled webhook event");
             Ok(())
@@ -95,6 +102,21 @@ async fn apply_issue(state: &AppState, p: IssuePayload) -> anyhow::Result<()> {
         state,
         &p.repository.full_name,
         &p.issue,
+        breadboard_core::SyncSource::ForgejoWebhook,
+    )
+    .await
+}
+
+async fn apply_pr(state: &AppState, p: PrPayload) -> anyhow::Result<()> {
+    if !store::repo_enabled(&state.db, &p.repository.full_name).await? {
+        return Ok(());
+    }
+    let fg = p.pull_request.into_fg_issue();
+    tracing::info!(repo = %p.repository.full_name, number = fg.number, action = %p.action, "webhook: pull_request");
+    sync::apply_issue(
+        state,
+        &p.repository.full_name,
+        &fg,
         breadboard_core::SyncSource::ForgejoWebhook,
     )
     .await

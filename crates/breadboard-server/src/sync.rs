@@ -78,6 +78,7 @@ pub async fn apply_issue(
             fg.is_pr(),
             &labels,
             assignee_id,
+            fg.milestone.as_ref().map(|m| m.title.as_str()),
             &fg.created_at,
             &fg.updated_at,
             source,
@@ -126,6 +127,10 @@ pub async fn apply_issue(
     });
     field!("labels", !same_set(&labels, &before.labels), {
         patch.labels = Some(labels.clone());
+    });
+    let fg_milestone = fg.milestone.as_ref().map(|m| m.title.clone());
+    field!("milestone", fg_milestone != before.milestone, {
+        patch.milestone = Some(fg_milestone.clone());
     });
 
     for field in drift {
@@ -187,6 +192,21 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
     }
     let Ok((owner, repo)) = split_repo(&fref.repo) else { return };
 
+    // Labels round-trip for both issues and PRs; the rest is issues-only
+    // (PRs are mirrored read-mostly).
+    if !same_set(&after.labels, &before.labels) {
+        if let Err(e) = state
+            .forgejo
+            .replace_labels(owner, repo, fref.number, &after.labels)
+            .await
+        {
+            tracing::warn!(key = %after.key, error = %e, "forgejo writeback (labels) failed");
+        }
+    }
+    if after.issue_type == breadboard_core::IssueType::Pr {
+        return;
+    }
+
     let title = (after.title != before.title).then_some(after.title.as_str());
     let body = (norm_body(&after.body) != norm_body(&before.body)).then(|| norm_body(&after.body));
     let state_change = if after.status != before.status
@@ -223,15 +243,26 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
             tracing::warn!(key = %after.key, error = %e, "forgejo writeback (patch) failed");
         }
     }
+}
 
-    if !same_set(&after.labels, &before.labels) {
-        if let Err(e) = state
-            .forgejo
-            .replace_labels(owner, repo, fref.number, &after.labels)
-            .await
-        {
-            tracing::warn!(key = %after.key, error = %e, "forgejo writeback (labels) failed");
+/// Push a breadboard-authored comment to Forgejo, recording the returned id so
+/// the webhook echo is deduped. Best-effort — logs on failure.
+pub async fn writeback_comment(state: &AppState, issue: &Issue, comment_id: i64, body: &str) {
+    let Some(fref) = &issue.forgejo_ref else { return };
+    if !state.forgejo.is_configured() {
+        return;
+    }
+    if !matches!(store::repo_enabled(&state.db, &fref.repo).await, Ok(true)) {
+        return;
+    }
+    let Ok((owner, repo)) = split_repo(&fref.repo) else { return };
+    match state.forgejo.create_comment(owner, repo, fref.number, body).await {
+        Ok(created) => {
+            store::set_comment_external_id(&state.db, comment_id, created.id)
+                .await
+                .ok();
         }
+        Err(e) => tracing::warn!(key = %issue.key, error = %e, "forgejo comment writeback failed"),
     }
 }
 

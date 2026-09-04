@@ -80,6 +80,7 @@ export interface Issue {
   labels: string[];
   links: IssueLink[];
   forgejo_ref: ForgejoRef | null;
+  milestone: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -210,6 +211,8 @@ export class BreadboardClient {
   patchIssue = (key: string, patch: IssuePatch) =>
     this.req<Issue>("PATCH", `/api/issues/${key}`, patch);
   deleteIssue = (key: string) => this.req<void>("DELETE", `/api/issues/${key}`);
+  addComment = (key: string, body: string) =>
+    this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
 
   /**
    * Subscribe to the live event stream. `onStatus(true|false)` reports the

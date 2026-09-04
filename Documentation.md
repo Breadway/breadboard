@@ -5,10 +5,10 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 5** — server (REST CRUD, OAuth2, SSE, Forgejo sync engine),
-the Svelte web client, and the **`breadboard` CLI + `ratatui` TUI** with
-device-flow auth. Routes marked _(planned)_ are for later milestones
-(notifications; PR mirroring; comment writeback).
+Status: **milestone 5 + 4b** — server (REST CRUD, OAuth2, SSE), the Svelte web
+client, the `breadboard` CLI + `ratatui` TUI (device-flow auth), and the Forgejo
+sync engine now with **bidirectional comments, PR mirroring, and milestone
+sync**. Routes marked _(planned)_ are for later milestones (notifications).
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -64,6 +64,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
+| `POST` | `/api/issues/{key}/comments` | `{ body }` — adds a comment; pushed to Forgejo if the issue is linked. `201` |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }` — maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -113,14 +114,14 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 
 **Direction:** bidirectional.
 
-**Inbound fast path:** Forgejo `issues` / `issue_comment` webhooks →
-`POST /webhooks/forgejo`, HMAC-verified against `forgejo.webhook_secret`, applied
-immediately. `pull_request` events are accepted but not yet synced.
+**Inbound fast path:** Forgejo `issues` / `issue_comment` / `pull_request`
+webhooks → `POST /webhooks/forgejo`, HMAC-verified against
+`forgejo.webhook_secret`, applied immediately.
 
 **Reconcile:** every `forgejo.reconcile_interval_mins` minutes, per enabled repo,
-`GET .../issues?since=<repo_sync_state.last_synced_at>&state=all` (paginated);
-apply anything the webhook path missed, then advance `last_synced_at`. `POST
-/api/sync/reconcile` runs a pass on demand.
+`GET .../issues?since=<repo_sync_state.last_synced_at>&state=all` (paginated,
+issues **and** PRs); apply anything the webhook path missed, then advance
+`last_synced_at`. `POST /api/sync/reconcile` runs a pass on demand.
 
 **Writeback:** after a `PATCH /api/issues/{key}` changes a synced field on a
 linked issue in an enabled repo, the change is pushed to Forgejo with
@@ -136,9 +137,9 @@ otherwise).
 | `assignee_id` | first assignee, mapped by `forgejo_id` (unknown users are imported) | both |
 | `labels` | labels (created on Forgejo if missing) | both |
 | `epic`, `cycle`, `priority`, `estimate`, `links` | — | breadboard-only |
-| comments | issue comments | inbound only (writeback: milestone 4b) |
-| PRs | — | not yet |
-| milestone | — | not yet |
+| comments | issue/PR comments | both (`external_id` dedups the echo; a matching unlinked local comment is claimed) |
+| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done` |
+| `milestone` | milestone title (plain string on the issue) | inbound only |
 
 **Conflict resolution:** per-field, the side with the newer issue-level
 `updated_at` wins; a value that already matches is a no-op (this absorbs the
@@ -168,6 +169,7 @@ repo with no mapped project are skipped with a warning.
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
+| `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
 | `sync` | `POST /api/sync/reconcile` |

@@ -169,6 +169,14 @@ impl Client {
             .await
     }
 
+    pub async fn add_comment(&self, key: &str, body: &str) -> Result<Comment> {
+        self.send(
+            self.build(reqwest::Method::POST, &format!("/api/issues/{key}/comments"))
+                .json(&serde_json::json!({ "body": body })),
+        )
+        .await
+    }
+
     // --- projects / epics / cycles ------------------------------------
 
     pub async fn list_projects(&self) -> Result<Vec<Project>> {

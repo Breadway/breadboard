@@ -142,8 +142,8 @@ impl Forgejo {
         serde_json::from_str(&body).with_context(|| format!("decoding forgejo response: {body}"))
     }
 
-    /// Issues updated since `since` (RFC3339), all states, paginated. Forgejo
-    /// returns PRs here too — callers filter with [`FgIssue::is_pr`].
+    /// Issues **and PRs** updated since `since` (RFC3339), all states, paginated.
+    /// Callers branch on [`FgIssue::is_pr`].
     pub async fn issues_since(
         &self,
         owner: &str,
@@ -152,9 +152,8 @@ impl Forgejo {
     ) -> anyhow::Result<Vec<FgIssue>> {
         let mut out = Vec::new();
         for page in 1..=50u32 {
-            let mut url = format!(
-                "/repos/{owner}/{repo}/issues?state=all&type=issues&limit=50&page={page}"
-            );
+            let mut url =
+                format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page={page}");
             if let Some(s) = since {
                 url.push_str(&format!("&since={}", urlencoding::encode(s)));
             }
@@ -290,4 +289,47 @@ impl Forgejo {
 pub fn split_repo(full: &str) -> anyhow::Result<(&str, &str)> {
     full.split_once('/')
         .ok_or_else(|| anyhow!("repo must be `owner/name`, got {full:?}"))
+}
+
+/// The `pull_request` object in a `pull_request` webhook payload — same fields
+/// we care about as an issue, plus `merged`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FgPrObject {
+    pub number: i64,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    /// "open" | "closed"
+    pub state: String,
+    #[serde(default)]
+    pub merged: bool,
+    #[serde(default)]
+    pub labels: Vec<FgLabel>,
+    #[serde(default)]
+    pub assignees: Option<Vec<FgUser>>,
+    #[serde(default)]
+    pub milestone: Option<FgMilestone>,
+    #[serde(default)]
+    pub user: Option<FgUser>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl FgPrObject {
+    /// Present a PR as an [`FgIssue`] so the same apply path handles it.
+    pub fn into_fg_issue(self) -> FgIssue {
+        FgIssue {
+            number: self.number,
+            title: self.title,
+            body: self.body,
+            state: if self.merged { "closed".into() } else { self.state },
+            labels: self.labels,
+            assignees: self.assignees,
+            milestone: self.milestone,
+            user: self.user,
+            pull_request: Some(FgPullRequestStub { merged: self.merged }),
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+        }
+    }
 }

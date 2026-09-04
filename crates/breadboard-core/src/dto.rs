@@ -108,6 +108,9 @@ pub struct IssuePatch {
     pub labels: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<IssueLink>>,
+    /// Sync-managed (Forgejo → breadboard); not pushed back.
+    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    pub milestone: Option<Option<String>>,
 }
 
 impl IssuePatch {
@@ -122,6 +125,7 @@ impl IssuePatch {
             && self.cycle_id.is_none()
             && self.labels.is_none()
             && self.links.is_none()
+            && self.milestone.is_none()
     }
 }
 
