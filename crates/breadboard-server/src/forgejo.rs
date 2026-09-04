@@ -267,21 +267,17 @@ impl Forgejo {
         Ok(())
     }
 
-    /// Create an issue. Returns the new issue (for its `number`).
+    /// Create an issue (bare — set labels afterward with [`Self::replace_labels`],
+    /// since the create endpoint only takes label *ids*). Returns the new issue.
     pub async fn create_issue(
         &self,
         owner: &str,
         repo: &str,
         title: &str,
         body: &str,
-        labels: &[String],
         assignees: &[String],
     ) -> anyhow::Result<FgIssue> {
         let mut payload = serde_json::json!({ "title": title, "body": body });
-        if !labels.is_empty() {
-            // The create endpoint takes label *names* on recent Forgejo.
-            payload["labels"] = serde_json::json!(labels);
-        }
         if !assignees.is_empty() {
             payload["assignees"] = serde_json::json!(assignees);
         }

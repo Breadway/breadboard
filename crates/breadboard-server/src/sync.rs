@@ -269,23 +269,35 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
         None => vec![],
     };
 
-    match state
+    let fg = match state
         .forgejo
-        .create_issue(owner, name, &issue.title, &issue.body, &issue.labels, &assignees)
+        .create_issue(owner, name, &issue.title, &issue.body, &assignees)
         .await
     {
-        Ok(fg) => match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
-            Ok(linked) => {
-                tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
-                linked
-            }
-            Err(e) => {
-                tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
-                issue
-            }
-        },
+        Ok(fg) => fg,
         Err(e) => {
             tracing::warn!(key = %issue.key, error = %e, "forgejo issue creation failed");
+            return issue;
+        }
+    };
+
+    if !issue.labels.is_empty() {
+        if let Err(e) = state
+            .forgejo
+            .replace_labels(owner, name, fg.number, &issue.labels)
+            .await
+        {
+            tracing::warn!(key = %issue.key, error = %e, "setting labels on new forgejo issue failed");
+        }
+    }
+
+    match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
+        Ok(linked) => {
+            tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
+            linked
+        }
+        Err(e) => {
+            tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
             issue
         }
     }
