@@ -16,7 +16,7 @@ fix/<issue-number-or-short-name>
 ```
 
 Branch off `main`, push back into `main` when ready. Short-lived branches are
-deleted on merge. Push to `origin` only; `github` auto-mirrors.
+deleted on merge. Push to `origin` (Forgejo).
 
 The server is deployed as a container from `main` (`packaging/`). Bakery-track
 distribution of the CLI (dev / `vX.Y.Z-rc.N` / `vX.Y.Z`) will follow the sibling

@@ -16,8 +16,8 @@ one, as the source of truth for the contract.
 
 ## Remotes
 
-- `origin` — Forgejo (`git.breadway.dev`) — authoritative.
-- `github` — mirror. It auto-mirrors from `origin`; push `origin` only.
+- `origin` — Forgejo (`git.breadway.dev`) — authoritative. Push here.
+- A GitHub push-mirror (as the sibling repos have) is not set up yet.
 
 ## CI
 
