@@ -83,7 +83,7 @@
     {@const issues = columns[ci]}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <section
-      class="column"
+      class="column s-{status}"
       role="list"
       aria-label={labels[status]}
       class:over={dragOver === status}
@@ -92,7 +92,7 @@
       ondragleave={() => (dragOver === status ? (dragOver = null) : null)}
       ondrop={(e) => drop(e, status)}
     >
-      <h2>{labels[status]} <span class="count">{issues.length}</span></h2>
+      <h2><span class="dot"></span>{labels[status]} <span class="count">{issues.length}</span></h2>
       <div class="cards">
         {#each issues as issue, ri (issue.id)}
           <Card {issue} keyboardSelected={ci === col && ri === row} />
@@ -118,12 +118,18 @@
   .column {
     background: var(--surface);
     border: 1px solid var(--border);
+    border-top: 2px solid var(--border);
     border-radius: 8px;
     padding: 8px;
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
+  .column.s-backlog { border-top-color: var(--status-backlog); }
+  .column.s-todo { border-top-color: var(--status-todo); }
+  .column.s-doing { border-top-color: var(--status-doing); }
+  .column.s-review { border-top-color: var(--status-review); }
+  .column.s-done { border-top-color: var(--status-done); }
   .column.over {
     border-color: var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, var(--surface));
@@ -134,12 +140,25 @@
   h2 {
     margin: 2px 4px 8px;
     font-size: 11px;
+    font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--ink-dim);
     display: flex;
+    align-items: center;
     gap: 6px;
   }
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--border);
+  }
+  .s-backlog .dot { background: var(--status-backlog); }
+  .s-todo .dot { background: var(--status-todo); }
+  .s-doing .dot { background: var(--status-doing); }
+  .s-review .dot { background: var(--status-review); }
+  .s-done .dot { background: var(--status-done); }
   .count {
     color: var(--border);
   }

@@ -9,6 +9,12 @@
   --ink: #e6e6e6;
   --ink-dim: #8a8a8a;
   --accent: #d98a3d;
+
+  --status-backlog: #6b6b6b;
+  --status-todo: #5a8fd6;
+  --status-doing: #d98a3d;
+  --status-review: #a875d6;
+  --status-done: #4caf50;
 }
 
 * {

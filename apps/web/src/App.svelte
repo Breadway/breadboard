@@ -68,7 +68,7 @@
   </div>
 {:else}
   <header>
-    <strong>breadboard</strong>
+    <div class="brand"><span class="mark">🍞</span><strong>breadboard</strong></div>
 
     <div class="seg">
       <button class:on={store.view === "board"} onclick={() => (store.view = "board")}>Board</button>
@@ -142,6 +142,15 @@
     font-size: 12px;
     cursor: pointer;
   }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .mark {
+    font-size: 16px;
+    line-height: 1;
+  }
   .seg {
     display: flex;
   }
@@ -156,15 +165,25 @@
     border-left: none;
   }
   button.on {
+    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
     border-color: var(--accent);
     color: var(--accent);
   }
+  .new {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #000;
+    font-weight: 600;
+  }
+  .new:hover {
+    filter: brightness(1.08);
+  }
   .new kbd {
-    border: 1px solid var(--border);
+    border: 1px solid rgba(0, 0, 0, 0.3);
     border-radius: 3px;
     padding: 0 3px;
     font-size: 10px;
-    color: var(--ink-dim);
+    color: rgba(0, 0, 0, 0.6);
   }
   .right {
     margin-left: auto;
