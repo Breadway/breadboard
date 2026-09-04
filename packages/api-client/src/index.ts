@@ -97,6 +97,20 @@ export interface Comment {
 
 export type IssueDetail = Issue & { comments: Comment[] };
 
+export type EpicView = Epic & {
+  progress: Record<string, number>;
+  total: number;
+};
+
+export interface ActivityEntry {
+  field: string;
+  old_value: string | null;
+  new_value: string | null;
+  source: string;
+  actor: string | null;
+  at: string;
+}
+
 export interface RepoView {
   repo: string;
   project_key: string | null;
@@ -205,9 +219,14 @@ export class BreadboardClient {
   removeRepo = (repo: string) => this.req<void>("DELETE", `/api/repos/${repo}`);
   reconcile = () => this.req<void>("POST", "/api/sync/reconcile");
 
-  listEpics = () => this.req<Epic[]>("GET", "/api/epics");
+  listEpics = () => this.req<EpicView[]>("GET", "/api/epics");
   createEpic = (e: { key: string; title: string; description?: string; project_id?: number }) =>
     this.req<Epic>("POST", "/api/epics", e);
+  updateEpic = (
+    id: number,
+    patch: { title?: string; description?: string | null; archived?: boolean },
+  ) => this.req<Epic>("PATCH", `/api/epics/${id}`, patch);
+  deleteEpic = (id: number) => this.req<void>("DELETE", `/api/epics/${id}`);
 
   listCycles = () => this.req<Cycle[]>("GET", "/api/cycles");
   createCycle = (c: { name: string; starts_on: string; ends_on: string }) =>
@@ -230,6 +249,8 @@ export class BreadboardClient {
   deleteIssue = (key: string) => this.req<void>("DELETE", `/api/issues/${key}`);
   addComment = (key: string, body: string) =>
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
+  getActivity = (key: string) =>
+    this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
 
   /**
    * Subscribe to the live event stream. `onStatus(true|false)` reports the

@@ -1,7 +1,10 @@
 //! Async client for `breadboard-server`. Shared by `breadboard-cli` (CLI + TUI).
 
-use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue, NewProject, ProjectPatch};
+use breadboard_core::dto::{
+    EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
+};
 use breadboard_core::{Comment, Cycle, Epic, Issue, Project, User};
+use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
@@ -32,6 +35,24 @@ pub struct IssueDetail {
     #[serde(flatten)]
     pub issue: Issue,
     pub comments: Vec<Comment>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EpicView {
+    #[serde(flatten)]
+    pub epic: Epic,
+    pub progress: BTreeMap<String, i64>,
+    pub total: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ActivityEntry {
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub source: String,
+    pub actor: Option<String>,
+    pub at: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,8 +218,26 @@ impl Client {
         .await
     }
 
-    pub async fn list_epics(&self) -> Result<Vec<Epic>> {
+    pub async fn list_epics(&self) -> Result<Vec<EpicView>> {
         self.send(self.build(reqwest::Method::GET, "/api/epics")).await
+    }
+
+    pub async fn create_epic(&self, new: &NewEpic) -> Result<Epic> {
+        self.send(self.build(reqwest::Method::POST, "/api/epics").json(new))
+            .await
+    }
+
+    pub async fn update_epic(&self, id: i64, patch: &EpicPatch) -> Result<Epic> {
+        self.send(
+            self.build(reqwest::Method::PATCH, &format!("/api/epics/{id}"))
+                .json(patch),
+        )
+        .await
+    }
+
+    pub async fn issue_activity(&self, key: &str) -> Result<Vec<ActivityEntry>> {
+        self.send(self.build(reqwest::Method::GET, &format!("/api/issues/{key}/activity")))
+            .await
     }
 
     pub async fn list_cycles(&self) -> Result<Vec<Cycle>> {

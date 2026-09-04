@@ -5,7 +5,9 @@ mod tui;
 
 use anyhow::{anyhow, bail, Context, Result};
 use breadboard_client::{Client, DevicePoll};
-use breadboard_core::dto::{IssueFilter, IssuePatch, NewCycle, NewIssue, NewProject, ProjectPatch};
+use breadboard_core::dto::{
+    EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
+};
 use breadboard_core::{Priority, Status};
 use clap::{Parser, Subcommand};
 
@@ -81,10 +83,17 @@ enum Command {
     Show { key: String },
     /// Add a comment to an issue (also pushed to Forgejo if linked).
     Comment { key: String, body: String },
+    /// Show an issue's change history (from sync_log).
+    Activity { key: String },
     /// Manage projects.
     Project {
         #[command(subcommand)]
         action: ProjectAction,
+    },
+    /// Manage epics (cross-repo).
+    Epic {
+        #[command(subcommand)]
+        action: EpicAction,
     },
     /// Manage cycles.
     Cycle {
@@ -120,6 +129,27 @@ enum ProjectAction {
     Rename {
         key: String,
         name: String,
+    },
+    Archive {
+        key: String,
+    },
+    Unarchive {
+        key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum EpicAction {
+    List,
+    New {
+        key: String,
+        title: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    Rename {
+        key: String,
+        title: String,
     },
     Archive {
         key: String,
@@ -252,7 +282,15 @@ async fn main() -> Result<()> {
             client.add_comment(&key, &body).await?;
             println!("comment added to {key}");
         }
+        Command::Activity { key } => {
+            for a in client.issue_activity(&key).await? {
+                let who = a.actor.unwrap_or_else(|| a.source.clone());
+                let val = a.new_value.unwrap_or_else(|| "—".into());
+                println!("{}  {:<12} {} → {}  ({who})", a.at, a.field, a.old_value.unwrap_or_else(|| "—".into()), val);
+            }
+        }
         Command::Project { action } => projects(&client, action).await?,
+        Command::Epic { action } => epics(&client, action).await?,
         Command::Cycle { action } => cycles(&client, action).await?,
         Command::Repos { action } => repos(&client, action).await?,
         Command::Sync => {
@@ -366,6 +404,62 @@ async fn set_archived(client: &Client, key: &str, archived: bool) -> Result<()> 
     Ok(())
 }
 
+async fn epics(client: &Client, action: EpicAction) -> Result<()> {
+    match action {
+        EpicAction::List => {
+            for e in client.list_epics().await? {
+                let done = e.progress.get("done").copied().unwrap_or(0);
+                let bar = if e.total > 0 {
+                    format!("{done}/{} done", e.total)
+                } else {
+                    "no issues".into()
+                };
+                println!(
+                    "{:<10} {:<32} {}{}",
+                    e.epic.key,
+                    e.epic.title,
+                    bar,
+                    if e.epic.archived { "  [archived]" } else { "" }
+                );
+            }
+        }
+        EpicAction::New { key, title, project } => {
+            let project_id = match project {
+                Some(p) => Some(resolve_project(client, &p).await?),
+                None => None,
+            };
+            let e = client
+                .create_epic(&NewEpic {
+                    key,
+                    title,
+                    description: None,
+                    project_id,
+                })
+                .await?;
+            println!("created epic {} ({})", e.key, e.title);
+        }
+        EpicAction::Rename { key, title } => {
+            let id = resolve_epic(client, &key).await?;
+            let e = client
+                .update_epic(id, &EpicPatch { title: Some(title), ..Default::default() })
+                .await?;
+            println!("renamed {} → {}", e.key, e.title);
+        }
+        EpicAction::Archive { key } => set_epic_archived(client, &key, true).await?,
+        EpicAction::Unarchive { key } => set_epic_archived(client, &key, false).await?,
+    }
+    Ok(())
+}
+
+async fn set_epic_archived(client: &Client, key: &str, archived: bool) -> Result<()> {
+    let id = resolve_epic(client, key).await?;
+    let e = client
+        .update_epic(id, &EpicPatch { archived: Some(archived), ..Default::default() })
+        .await?;
+    println!("{} {}", if e.archived { "archived" } else { "unarchived" }, e.key);
+    Ok(())
+}
+
 async fn resolve_project(client: &Client, key_or_id: &str) -> Result<i64> {
     if let Ok(id) = key_or_id.parse::<i64>() {
         return Ok(id);
@@ -473,8 +567,8 @@ async fn resolve_epic(client: &Client, key_or_id: &str) -> Result<i64> {
         .list_epics()
         .await?
         .into_iter()
-        .find(|e| e.key.eq_ignore_ascii_case(key_or_id))
-        .map(|e| e.id)
+        .find(|e| e.epic.key.eq_ignore_ascii_case(key_or_id))
+        .map(|e| e.epic.id)
         .ok_or_else(|| anyhow!("no epic with key {key_or_id:?}"))
 }
 

@@ -11,7 +11,9 @@ use breadboard_core::{BoardEvent, Comment, Cycle, Epic, Issue, Project, SyncSour
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
-use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch};
+use crate::dto::{
+    EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
+};
 use crate::error::{AppError, AppResult};
 use crate::{store, sync, AppState};
 
@@ -52,19 +54,42 @@ pub async fn update_project(
 
 // --- epics ----------------------------------------------------------------
 
+#[derive(Serialize)]
+pub struct EpicView {
+    #[serde(flatten)]
+    epic: Epic,
+    /// Child-issue counts, keyed by status.
+    progress: std::collections::BTreeMap<String, i64>,
+    total: i64,
+}
+
+async fn epic_view(app: &AppState, epic: Epic) -> AppResult<EpicView> {
+    let counts = store::epic_progress(&app.db, epic.id).await?;
+    let total = counts.iter().map(|(_, n)| n).sum();
+    Ok(EpicView {
+        epic,
+        progress: counts.into_iter().collect(),
+        total,
+    })
+}
+
 pub async fn list_epics(
     State(app): State<AppState>,
     _user: AuthUser,
-) -> AppResult<Json<Vec<Epic>>> {
-    Ok(Json(store::list_epics(&app.db).await?))
+) -> AppResult<Json<Vec<EpicView>>> {
+    let mut out = Vec::new();
+    for e in store::list_epics(&app.db).await? {
+        out.push(epic_view(&app, e).await?);
+    }
+    Ok(Json(out))
 }
 
 pub async fn get_epic(
     State(app): State<AppState>,
     _user: AuthUser,
     Path(id): Path<i64>,
-) -> AppResult<Json<Epic>> {
-    Ok(Json(store::get_epic(&app.db, id).await?))
+) -> AppResult<Json<EpicView>> {
+    Ok(Json(epic_view(&app, store::get_epic(&app.db, id).await?).await?))
 }
 
 pub async fn create_epic(
@@ -74,6 +99,24 @@ pub async fn create_epic(
 ) -> AppResult<(StatusCode, Json<Epic>)> {
     let epic = store::create_epic(&app.db, &body).await?;
     Ok((StatusCode::CREATED, Json(epic)))
+}
+
+pub async fn update_epic(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+    Json(patch): Json<EpicPatch>,
+) -> AppResult<Json<Epic>> {
+    Ok(Json(store::update_epic(&app.db, id, &patch).await?))
+}
+
+pub async fn delete_epic(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    store::delete_epic(&app.db, id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- cycles -------------------------------------------------------------
@@ -202,6 +245,15 @@ pub async fn add_comment(
         .find(|c| c.id == comment.id)
         .unwrap_or(comment);
     Ok((StatusCode::CREATED, Json(stored)))
+}
+
+pub async fn issue_activity(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(key): Path<String>,
+) -> AppResult<Json<Vec<store::ActivityEntry>>> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    Ok(Json(store::issue_activity(&app.db, issue.id).await?))
 }
 
 pub async fn patch_issue(

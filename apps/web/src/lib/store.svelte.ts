@@ -7,6 +7,7 @@ import {
   type BoardEvent,
   type Cycle,
   type Epic,
+  type EpicView,
   type Issue,
   type IssuePatch,
   type NewIssue,
@@ -26,14 +27,14 @@ class Store {
   issues = $state<Issue[]>([]);
   projects = $state<Project[]>([]);
   cycles = $state<Cycle[]>([]);
-  epics = $state<Epic[]>([]);
+  epics = $state<EpicView[]>([]);
   connected = $state(false);
   toast = $state<string | null>(null);
 
   repos = $state<RepoView[]>([]);
 
   // UI state
-  view = $state<"board" | "backlog" | "settings">("board");
+  view = $state<"board" | "backlog" | "roadmap" | "settings">("board");
   selectedKey = $state<string | null>(null);
   paletteOpen = $state(false);
   filterProject = $state<string>("");

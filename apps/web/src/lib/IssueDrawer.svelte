@@ -1,8 +1,17 @@
 <script lang="ts">
-  import { PRIORITIES, STATUSES, type IssueDetail, type Priority, type Status } from "@breadboard/api-client";
+  import {
+    PRIORITIES,
+    STATUSES,
+    type ActivityEntry,
+    type IssueDetail,
+    type Priority,
+    type Status,
+  } from "@breadboard/api-client";
   import { api, store } from "./store.svelte";
 
   let detail = $state<IssueDetail | null>(null);
+  let activity = $state<ActivityEntry[]>([]);
+  let tab = $state<"comments" | "activity">("comments");
   let loading = $state(false);
   let titleDraft = $state("");
   let bodyDraft = $state("");
@@ -13,6 +22,7 @@
     const key = store.selectedKey;
     if (!key) {
       detail = null;
+      activity = [];
       return;
     }
     loading = true;
@@ -26,7 +36,16 @@
       })
       .catch(() => store.flash(`couldn't load ${key}`))
       .finally(() => (loading = false));
+    api.getActivity(key).then((a) => (activity = a)).catch(() => {});
   });
+
+  function describe(a: ActivityEntry): string {
+    const who = a.actor ?? (a.source === "breadboard" ? "someone" : "Forgejo");
+    if (a.field === "created") return `${who} created this (${a.new_value ?? ""})`;
+    const from = a.old_value || "—";
+    const to = a.new_value || "—";
+    return `${who} changed ${a.field}: ${from} → ${to}`;
+  }
 
   async function save(patch: Parameters<typeof store.patch>[1]) {
     if (!detail) return;
@@ -154,24 +173,43 @@
         </label>
 
         <section class="comments">
-          <h3>Comments {detail.comments.length ? `(${detail.comments.length})` : ""}</h3>
-          {#each detail.comments as c (c.id)}
-            <div class="comment">
-              <div class="meta dim">
-                {new Date(c.created_at).toLocaleString()}{c.external_id ? " · synced" : ""}
+          <div class="tabs">
+            <button class:on={tab === "comments"} onclick={() => (tab = "comments")}>
+              Comments {detail.comments.length ? `(${detail.comments.length})` : ""}
+            </button>
+            <button class:on={tab === "activity"} onclick={() => (tab = "activity")}>
+              Activity {activity.length ? `(${activity.length})` : ""}
+            </button>
+          </div>
+
+          {#if tab === "comments"}
+            {#each detail.comments as c (c.id)}
+              <div class="comment">
+                <div class="meta dim">
+                  {new Date(c.created_at).toLocaleString()}{c.external_id ? " · synced" : ""}
+                </div>
+                <div>{c.body}</div>
               </div>
-              <div>{c.body}</div>
-            </div>
+            {:else}
+              <p class="dim">No comments yet.</p>
+            {/each}
+            <textarea
+              rows="2"
+              bind:value={commentDraft}
+              placeholder="Add a comment…"
+              onkeydown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && postComment()}
+            ></textarea>
+            <button class="btn" onclick={postComment} disabled={!commentDraft.trim()}>Comment</button>
           {:else}
-            <p class="dim">No comments yet.</p>
-          {/each}
-          <textarea
-            rows="2"
-            bind:value={commentDraft}
-            placeholder="Add a comment…"
-            onkeydown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && postComment()}
-          ></textarea>
-          <button class="btn" onclick={postComment} disabled={!commentDraft.trim()}>Comment</button>
+            {#each activity as a (a.at + a.field)}
+              <div class="event">
+                <div class="meta dim">{new Date(a.at).toLocaleString()}</div>
+                <div>{describe(a)}</div>
+              </div>
+            {:else}
+              <p class="dim">No recorded activity.</p>
+            {/each}
+          {/if}
         </section>
 
         <footer>
@@ -291,14 +329,28 @@
     border-color: #e05252;
     color: #e05252;
   }
-  .comments h3 {
-    font-size: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--ink-dim);
-    margin: 4px 0 8px;
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 8px;
   }
-  .comment {
+  .tabs button {
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: var(--ink-dim);
+    padding: 4px 2px;
+    margin-right: 10px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+  }
+  .tabs button.on {
+    color: var(--ink);
+    border-bottom-color: var(--accent);
+  }
+  .comment,
+  .event {
     border-top: 1px solid var(--border);
     padding: 8px 0;
     font-size: 13px;

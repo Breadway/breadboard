@@ -6,10 +6,14 @@ verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
 Status: **deployed** at `breadboard.breadway.dev`. Server (REST CRUD, OAuth2,
-SSE), the Svelte web client (board · backlog · issue drawer · settings ·
-`cmd-k`), the `breadboard` CLI + `ratatui` TUI (device-flow auth), and the
-Forgejo sync engine (bidirectional issues / comments / PR mirroring / milestone).
-Routes marked _(planned)_ are for later milestones (notifications).
+SSE), the Svelte web client (board with keyboard nav · backlog · roadmap/epics ·
+issue drawer with activity timeline · settings · `cmd-k`), the `breadboard` CLI +
+`ratatui` TUI (device-flow auth), and the Forgejo sync engine (bidirectional
+issues / comments / PR mirroring / milestone). Routes marked _(planned)_ are for
+later milestones (notifications).
+
+Web board keys: `h`/`l`/`←`/`→` column, `j`/`k`/`↑`/`↓` card, `[`/`]` move card
+between statuses, `enter`/`e` open, `c` command palette.
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -54,9 +58,11 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `POST` | `/api/projects` | `{ key, name, forgejo_repo? }`; `key` = uppercase letters/digits; `201` |
 | `GET` | `/api/projects/{id}` | one project |
 | `PATCH` | `/api/projects/{id}` | `{ name?, archived?, forgejo_repo? }` (`forgejo_repo: null` detaches) |
-| `GET` | `/api/epics` | list |
+| `GET` | `/api/epics` | list; each is `{ …epic, progress: {status→count}, total }` |
 | `POST` | `/api/epics` | `{ key, title, description?, project_id? }`; `201` |
-| `GET` | `/api/epics/{id}` | one epic |
+| `GET` | `/api/epics/{id}` | one epic with `progress` / `total` |
+| `PATCH` | `/api/epics/{id}` | `{ title?, description?, archived? }` |
+| `DELETE` | `/api/epics/{id}` | `204` (child issues keep running, `epic_id` cleared) |
 | `GET` | `/api/cycles` | list |
 | `POST` | `/api/cycles` | `{ name, starts_on, ends_on }` (ISO dates); `201` |
 | `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
@@ -64,6 +70,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
 | `POST` | `/api/issues` | create; only `title` required. `project` defaults to the first non-archived project; key allocated from that project's counter. `201` |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
+| `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }` — adds a comment; pushed to Forgejo if the issue is linked. `201` |
@@ -175,8 +182,10 @@ repo with no mapped project are skipped with a warning.
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
+| `activity <key>` | change history |
 | `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
 | `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project |
+| `epic list` · `epic new <KEY> <TITLE> [--project]` · `epic rename <KEY> <TITLE>` · `epic archive`/`unarchive <KEY>` | `list` shows done/total |
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
 | `sync` | `POST /api/sync/reconcile` |

@@ -2,7 +2,12 @@
   import type { Issue } from "@breadboard/api-client";
   import { store } from "./store.svelte";
 
-  let { issue }: { issue: Issue } = $props();
+  let { issue, keyboardSelected = false }: { issue: Issue; keyboardSelected?: boolean } = $props();
+
+  let el: HTMLButtonElement | undefined = $state();
+  $effect(() => {
+    if (keyboardSelected) el?.scrollIntoView({ block: "nearest" });
+  });
 
   const prioClass = $derived(
     issue.priority === "none" ? "" : `prio-${issue.priority}`,
@@ -10,8 +15,10 @@
 </script>
 
 <button
+  bind:this={el}
   class="card"
   class:selected={store.selectedKey === issue.key}
+  class:kb={keyboardSelected}
   draggable="true"
   ondragstart={(e) => e.dataTransfer?.setData("text/plain", issue.key)}
   onclick={() => (store.selectedKey = issue.key)}
@@ -61,6 +68,11 @@
   .card.selected {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent) inset;
+  }
+  .card.kb {
+    border-color: var(--accent);
+    outline: 2px solid color-mix(in srgb, var(--accent) 45%, transparent);
+    outline-offset: 1px;
   }
   .card:active {
     cursor: grabbing;

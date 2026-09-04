@@ -3,6 +3,7 @@
   import { store } from "./lib/store.svelte";
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
+  import Roadmap from "./lib/Roadmap.svelte";
   import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
@@ -56,10 +57,11 @@
     <div class="seg">
       <button class:on={store.view === "board"} onclick={() => (store.view = "board")}>Board</button>
       <button class:on={store.view === "backlog"} onclick={() => (store.view = "backlog")}>Backlog</button>
+      <button class:on={store.view === "roadmap"} onclick={() => (store.view = "roadmap")}>Roadmap</button>
       <button class:on={store.view === "settings"} onclick={() => (store.view = "settings")}>Settings</button>
     </div>
 
-    {#if store.view !== "settings"}
+    {#if store.view === "board" || store.view === "backlog"}
       <select bind:value={store.filterProject} title="Filter by project">
         <option value="">All projects</option>
         {#each store.projects as p (p.id)}<option value={p.key}>{p.key}</option>{/each}
@@ -85,6 +87,8 @@
     <Board />
   {:else if store.view === "backlog"}
     <Backlog />
+  {:else if store.view === "roadmap"}
+    <Roadmap />
   {:else}
     <Settings />
   {/if}

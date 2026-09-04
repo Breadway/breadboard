@@ -27,7 +27,12 @@ pub fn router(state: AppState) -> Router {
             get(api::get_project).patch(api::update_project),
         )
         .route("/epics", get(api::list_epics).post(api::create_epic))
-        .route("/epics/{id}", get(api::get_epic))
+        .route(
+            "/epics/{id}",
+            get(api::get_epic)
+                .patch(api::update_epic)
+                .delete(api::delete_epic),
+        )
         .route("/cycles", get(api::list_cycles).post(api::create_cycle))
         .route("/cycles/{id}/start", post(api::start_cycle))
         .route("/cycles/{id}/end", post(api::end_cycle))
@@ -39,6 +44,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(api::delete_issue),
         )
         .route("/issues/{key}/comments", post(api::add_comment))
+        .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
         .route("/sync/reconcile", post(api::reconcile_now));

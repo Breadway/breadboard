@@ -322,6 +322,80 @@ pub async fn create_epic(db: &SqlitePool, new: &NewEpic) -> AppResult<Epic> {
     Ok(row.into())
 }
 
+pub async fn update_epic(
+    db: &SqlitePool,
+    id: i64,
+    patch: &crate::dto::EpicPatch,
+) -> AppResult<Epic> {
+    let mut did = false;
+    if let Some(title) = &patch.title {
+        if title.trim().is_empty() {
+            return Err(AppError::bad_request("title must not be empty"));
+        }
+        sqlx::query("UPDATE epics SET title = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(title.trim())
+            .execute(db)
+            .await?;
+        did = true;
+    }
+    if let Some(desc) = &patch.description {
+        sqlx::query("UPDATE epics SET description = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(desc.as_deref())
+            .execute(db)
+            .await?;
+        did = true;
+    }
+    if let Some(archived) = patch.archived {
+        sqlx::query("UPDATE epics SET archived = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(archived as i64)
+            .execute(db)
+            .await?;
+        did = true;
+    }
+    if did {
+        sqlx::query("UPDATE epics SET updated_at = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(now_rfc3339())
+            .execute(db)
+            .await?;
+    }
+    get_epic(db, id).await
+}
+
+pub async fn delete_epic(db: &SqlitePool, id: i64) -> AppResult<()> {
+    let n = sqlx::query("DELETE FROM epics WHERE id = ?1")
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    if n == 0 {
+        return Err(AppError::NotFound);
+    }
+    Ok(())
+}
+
+/// Per-status child-issue counts for an epic (or, with `epic_id = None`, for
+/// issues with no epic — the backlog).
+pub async fn epic_progress(db: &SqlitePool, epic_id: i64) -> AppResult<[(String, i64); 5]> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status",
+    )
+    .bind(epic_id)
+    .fetch_all(db)
+    .await?;
+    let count = |s: &str| rows.iter().find(|(st, _)| st == s).map(|(_, n)| *n).unwrap_or(0);
+    Ok([
+        ("backlog".into(), count("backlog")),
+        ("todo".into(), count("todo")),
+        ("doing".into(), count("doing")),
+        ("review".into(), count("review")),
+        ("done".into(), count("done")),
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // cycles
 // ---------------------------------------------------------------------------
@@ -1110,6 +1184,48 @@ pub async fn list_comments(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<Comm
             external_id: r.external_id,
             created_at: parse_ts(&r.created_at),
             updated_at: parse_ts(&r.updated_at),
+        })
+        .collect())
+}
+
+/// One `sync_log` entry with the actor's login resolved, oldest first.
+#[derive(serde::Serialize)]
+pub struct ActivityEntry {
+    pub field: String,
+    pub old_value: Option<String>,
+    pub new_value: Option<String>,
+    pub source: String,
+    pub actor: Option<String>,
+    pub at: chrono::DateTime<chrono::Utc>,
+}
+
+pub async fn issue_activity(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<ActivityEntry>> {
+    #[derive(FromRow)]
+    struct Row {
+        field: String,
+        old_value: Option<String>,
+        new_value: Option<String>,
+        source: String,
+        actor: Option<String>,
+        at: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT s.field, s.old_value, s.new_value, s.source, u.login AS actor, s.at
+         FROM sync_log s LEFT JOIN users u ON u.id = s.actor_id
+         WHERE s.issue_id = ?1 ORDER BY s.at, s.id",
+    )
+    .bind(issue_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| ActivityEntry {
+            field: r.field,
+            old_value: r.old_value,
+            new_value: r.new_value,
+            source: r.source,
+            actor: r.actor,
+            at: parse_ts(&r.at),
         })
         .collect())
 }
