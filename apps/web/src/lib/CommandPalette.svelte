@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fade, fly } from "svelte/transition";
   import { store } from "./store.svelte";
 
   let query = $state("");
@@ -79,9 +80,17 @@
   <div
     class="scrim"
     role="presentation"
+    transition:fade={{ duration: 120 }}
     onclick={(e) => e.target === e.currentTarget && (store.paletteOpen = false)}
   >
-    <div class="palette" role="dialog" aria-modal="true" aria-label="Command palette" tabindex="-1">
+    <div
+      class="palette"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Command palette"
+      tabindex="-1"
+      transition:fly={{ y: -8, duration: 140 }}
+    >
       <input
         bind:this={inputEl}
         bind:value={query}

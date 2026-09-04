@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { fly } from "svelte/transition";
   import {
     PRIORITIES,
     STATUSES,
@@ -17,9 +18,24 @@
   let bodyDraft = $state("");
   let labelsDraft = $state("");
   let commentDraft = $state("");
+  let confirmingDelete = $state(false);
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function requestDelete() {
+    if (confirmingDelete) {
+      clearTimeout(confirmTimer);
+      confirmingDelete = false;
+      if (detail) void store.remove(detail.key);
+    } else {
+      confirmingDelete = true;
+      confirmTimer = setTimeout(() => (confirmingDelete = false), 3000);
+    }
+  }
 
   $effect(() => {
     const key = store.selectedKey;
+    clearTimeout(confirmTimer);
+    confirmingDelete = false;
     if (!key) {
       detail = null;
       activity = [];
@@ -85,7 +101,7 @@
 </script>
 
 {#if store.selectedKey}
-  <aside class="drawer">
+  <aside class="drawer" transition:fly={{ x: 40, duration: 150 }}>
     <header>
       <span class="key">{store.selectedKey}</span>
       <div class="spacer"></div>
@@ -213,8 +229,8 @@
         </section>
 
         <footer>
-          <button class="btn danger" onclick={() => detail && store.remove(detail.key)}>
-            Delete issue
+          <button class="btn danger" class:confirm={confirmingDelete} onclick={requestDelete}>
+            {confirmingDelete ? "Click again to confirm" : "Delete issue"}
           </button>
         </footer>
       </div>
@@ -328,6 +344,11 @@
   .btn.danger:hover {
     border-color: #e05252;
     color: #e05252;
+  }
+  .btn.danger.confirm {
+    background: #e05252;
+    border-color: #e05252;
+    color: #fff;
   }
   .tabs {
     display: flex;

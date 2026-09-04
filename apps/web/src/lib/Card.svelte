@@ -40,7 +40,11 @@
       {/each}
       {#if issue.estimate != null}<span class="est">{issue.estimate}</span>{/if}
       {#if issue.assignee_id === store.me?.id}
-        <span class="me" title="assigned to you">●</span>
+        {#if store.me?.avatar_url}
+          <img class="avatar" src={store.me.avatar_url} alt="" title="assigned to you" width="14" height="14" />
+        {:else}
+          <span class="me" title="assigned to you">●</span>
+        {/if}
       {:else if issue.assignee_id}
         <span class="assignee" title="assigned">◐</span>
       {/if}
@@ -61,9 +65,12 @@
     cursor: grab;
     color: var(--ink);
     font: inherit;
+    transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
   }
   .card:hover {
     border-color: var(--accent);
+    transform: translateY(-1px);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
   }
   .card.selected {
     border-color: var(--accent);
@@ -135,6 +142,12 @@
   .me {
     color: #4caf50;
     margin-left: auto;
+  }
+  .avatar {
+    border-radius: 50%;
+    object-fit: cover;
+    margin-left: auto;
+    display: block;
   }
   .assignee {
     color: var(--ink-dim);

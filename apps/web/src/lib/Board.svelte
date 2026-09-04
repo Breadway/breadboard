@@ -96,6 +96,8 @@
       <div class="cards">
         {#each issues as issue, ri (issue.id)}
           <Card {issue} keyboardSelected={ci === col && ri === row} />
+        {:else}
+          <p class="empty">No issues</p>
         {/each}
       </div>
     </section>
@@ -144,5 +146,13 @@
   .cards {
     overflow-y: auto;
     flex: 1;
+  }
+  .empty {
+    margin: 0;
+    padding: 10px 4px;
+    text-align: center;
+    font-size: 12px;
+    color: var(--ink-dim);
+    opacity: 0.6;
   }
 </style>
