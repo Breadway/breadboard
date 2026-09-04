@@ -12,11 +12,22 @@
     done: "Done",
   };
 
+  const DONE_LIMIT = 20;
+
   let dragOver = $state<Status | null>(null);
   let col = $state(0);
   let row = $state(0);
 
-  const columns = $derived(STATUSES.map((s) => store.byStatus(s)));
+  // byStatus() is sorted most-recently-updated first, so this keeps the
+  // freshest completions visible. Done otherwise grows without bound since
+  // issues never leave it — the full history is still one click away in Backlog.
+  const totalCounts = $derived(STATUSES.map((s) => store.byStatus(s).length));
+  const columns = $derived(
+    STATUSES.map((s) => {
+      const all = store.byStatus(s);
+      return s === "done" ? all.slice(0, DONE_LIMIT) : all;
+    }),
+  );
 
   function clamp() {
     col = Math.max(0, Math.min(col, 4));
@@ -92,13 +103,18 @@
       ondragleave={() => (dragOver === status ? (dragOver = null) : null)}
       ondrop={(e) => drop(e, status)}
     >
-      <h2><span class="dot"></span>{labels[status]} <span class="count">{issues.length}</span></h2>
+      <h2><span class="dot"></span>{labels[status]} <span class="count">{totalCounts[ci]}</span></h2>
       <div class="cards">
         {#each issues as issue, ri (issue.id)}
           <Card {issue} keyboardSelected={ci === col && ri === row} />
         {:else}
           <p class="empty">No issues</p>
         {/each}
+        {#if status === "done" && totalCounts[ci] > DONE_LIMIT}
+          <button class="more" onclick={() => (store.view = "backlog")}>
+            +{totalCounts[ci] - DONE_LIMIT} more · view in Backlog
+          </button>
+        {/if}
       </div>
     </section>
   {/each}
@@ -165,6 +181,23 @@
   .cards {
     overflow-y: auto;
     flex: 1;
+  }
+  .more {
+    display: block;
+    width: 100%;
+    margin: 2px 0 4px;
+    padding: 7px 4px;
+    text-align: center;
+    font-size: 11px;
+    background: none;
+    border: 1px dashed var(--border);
+    border-radius: 6px;
+    color: var(--ink-dim);
+    cursor: pointer;
+  }
+  .more:hover {
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .empty {
     margin: 0;
