@@ -5,9 +5,13 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 2** — health, SSE, REST CRUD (projects / epics / cycles /
-issues), and Forgejo OAuth2 login are implemented. Routes marked _(planned)_
-describe the intended contract for later milestones (sync, notifications).
+Status: **milestone 3** — server (health, SSE, REST CRUD, Forgejo OAuth2) plus
+the Svelte web client (board with drag-between-columns, backlog, issue drawer,
+`cmd-k` palette, live SSE refresh). Routes marked _(planned)_ describe the
+intended contract for later milestones (sync, notifications).
+
+The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
+is set; unknown paths fall back to `index.html` for client-side routing.
 
 ---
 

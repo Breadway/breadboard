@@ -1,0 +1,42 @@
+# breadboard on Hestia. Sits behind the Aegis Caddy edge (see packaging/caddy/).
+#
+#   podman-compose -f packaging/compose.yaml up -d
+#
+# Secrets come from a sibling .env file (NOT committed):
+#   BREADBOARD_FORGEJO_OAUTH_CLIENT_ID=...
+#   BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET=...
+#   BREADBOARD_FORGEJO_WEBHOOK_SECRET=...
+#   BREADBOARD_FORGEJO_API_TOKEN=...
+
+services:
+  breadboard:
+    build:
+      context: ..
+      dockerfile: packaging/Containerfile
+    image: breadboard:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7280:7280" # Tailscale-only; the Aegis Caddy reverse-proxies here
+    environment:
+      BREADBOARD_PUBLIC_URL: https://breadboard.breadway.dev
+      BREADBOARD_FORGEJO_OAUTH_CLIENT_ID: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_ID}
+      BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET}
+      BREADBOARD_FORGEJO_WEBHOOK_SECRET: ${BREADBOARD_FORGEJO_WEBHOOK_SECRET}
+      BREADBOARD_FORGEJO_API_TOKEN: ${BREADBOARD_FORGEJO_API_TOKEN}
+    volumes:
+      - breadboard-data:/var/lib/breadboard
+
+  litestream:
+    image: docker.io/litestream/litestream:0.3
+    restart: unless-stopped
+    command: replicate
+    volumes:
+      - breadboard-data:/var/lib/breadboard
+      - ./litestream.yml:/etc/litestream.yml:ro
+      - breadboard-backups:/var/backups/breadboard
+    depends_on:
+      - breadboard
+
+volumes:
+  breadboard-data:
+  breadboard-backups:

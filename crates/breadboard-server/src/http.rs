@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
 use crate::{api, auth, AppState};
@@ -41,11 +42,27 @@ pub fn router(state: AppState) -> Router {
         .route("/logout", post(auth::logout))
         .route("/dev-login", post(auth::dev_login));
 
-    Router::new()
+    let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/events", get(events))
         .nest("/api", api_routes)
-        .nest("/auth", auth_routes)
+        .nest("/auth", auth_routes);
+
+    // Serve the built SPA at `/` when a web_dir is configured (production).
+    // SPA routing: unknown paths fall back to index.html.
+    if let Some(dir) = &state.config.web_dir {
+        if dir.is_dir() {
+            let index = dir.join("index.html");
+            router = router.fallback_service(
+                ServeDir::new(dir).not_found_service(ServeFile::new(index)),
+            );
+            tracing::info!(dir = %dir.display(), "serving web SPA");
+        } else {
+            tracing::warn!(dir = %dir.display(), "web_dir does not exist — not serving SPA");
+        }
+    }
+
+    router
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
         .with_state(state)

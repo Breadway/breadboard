@@ -50,22 +50,32 @@ xtask/                `cargo run -p xtask -- check-docs`
 ```sh
 cargo build --workspace
 cargo test --workspace
-cargo run -p breadboard-server          # serves 127.0.0.1:7280 by default
 cargo run -p breadboard-cli -- ping
 ```
 
+Full stack (API + hot-reloading UI) in one command:
+
 ```sh
-cd apps/web && npm install && npm run dev
+npm install
+BREADBOARD_DEV_LOGIN=1 scripts/dev.sh      # UI on :5280, API on :7280
 ```
 
-Config lives at `~/.config/breadboard/breadboard.toml` (server) and
-`~/.config/breadboard/cli.toml` (CLI). Every key is optional.
+Open <http://127.0.0.1:5280>. With `BREADBOARD_DEV_LOGIN=1` the sign-in screen
+has a "dev login" box, so you can skip the Forgejo OAuth round-trip locally.
+
+Config: `~/.config/breadboard/breadboard.toml` (server) and
+`~/.config/breadboard/cli.toml` (CLI). Every key is optional; secrets can also
+come from `BREADBOARD_*` env vars.
 
 ## Deployment
 
-Server runs as a container on Hestia; public via the Aegis Caddy edge at
-`breadboard.breadway.dev`. Desktop + CLI are distributed through bakery. See
-`Documentation.md` for the API and event contract and the plan for the full
-rollout.
+The server serves the built SPA itself when `BREADBOARD_WEB_DIR` points at
+`apps/web/dist` — one origin, no separate web server. On Hestia it runs as a
+container (`packaging/Containerfile` + `packaging/compose.yaml`, with a
+Litestream sidecar), public via the Aegis Caddy edge
+(`packaging/caddy/aegis-breadboard.caddy` → `breadboard.breadway.dev`).
+
+CLI + desktop are distributed through bakery. See `Documentation.md` for the API
+and event contract, and the plan for the rollout.
 
 Part of the [bread ecosystem](https://git.breadway.dev/Breadway). MIT licensed.

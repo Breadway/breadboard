@@ -1,0 +1,216 @@
+// Reactive app state. One module-level singleton; components read its fields
+// directly (Svelte 5 deep reactivity) and call its methods to mutate.
+
+import {
+  ApiError,
+  BreadboardClient,
+  type BoardEvent,
+  type Cycle,
+  type Epic,
+  type Issue,
+  type IssuePatch,
+  type NewIssue,
+  type Project,
+  type Status,
+  type User,
+} from "@breadboard/api-client";
+
+export const api = new BreadboardClient();
+
+type AuthState = "loading" | "in" | "out";
+
+class Store {
+  me = $state<User | null>(null);
+  auth = $state<AuthState>("loading");
+  issues = $state<Issue[]>([]);
+  projects = $state<Project[]>([]);
+  cycles = $state<Cycle[]>([]);
+  epics = $state<Epic[]>([]);
+  connected = $state(false);
+  toast = $state<string | null>(null);
+
+  // UI state
+  view = $state<"board" | "backlog">("board");
+  selectedKey = $state<string | null>(null);
+  paletteOpen = $state(false);
+  filterProject = $state<string>("");
+  filterCycle = $state<number | 0>(0);
+  filterMine = $state(false);
+
+  #unsub: (() => void) | null = null;
+
+  get isDev() {
+    return import.meta.env.DEV;
+  }
+
+  get filtered(): Issue[] {
+    return this.issues.filter((i) => {
+      if (this.filterProject) {
+        const p = this.projects.find((p) => p.id === i.project_id);
+        if (!p || p.key !== this.filterProject) return false;
+      }
+      if (this.filterCycle && i.cycle_id !== this.filterCycle) return false;
+      if (this.filterMine && i.assignee_id !== this.me?.id) return false;
+      return true;
+    });
+  }
+
+  byStatus(status: Status): Issue[] {
+    return this.filtered
+      .filter((i) => i.status === status)
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  }
+
+  projectKey(id: number): string {
+    return this.projects.find((p) => p.id === id)?.key ?? "?";
+  }
+
+  async init() {
+    try {
+      this.me = await api.me();
+      this.auth = "in";
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
+        this.auth = "out";
+        return;
+      }
+      throw e;
+    }
+    await this.loadAll();
+    this.#connect();
+  }
+
+  async loadAll() {
+    const [issues, projects, cycles, epics] = await Promise.all([
+      api.listIssues(),
+      api.listProjects(),
+      api.listCycles(),
+      api.listEpics(),
+    ]);
+    this.issues = issues;
+    this.projects = projects;
+    this.cycles = cycles;
+    this.epics = epics;
+  }
+
+  #connect() {
+    this.#unsub?.();
+    this.#unsub = api.subscribe(
+      (ev) => void this.#onEvent(ev),
+      (live) => (this.connected = live),
+    );
+  }
+
+  async #onEvent(ev: BoardEvent) {
+    switch (ev.type) {
+      case "card.created":
+      case "card.updated":
+      case "card.moved":
+      case "card.assigned": {
+        try {
+          const fresh = await api.getIssue(ev.key);
+          this.#upsert(fresh);
+        } catch {
+          /* deleted between event and fetch */
+        }
+        break;
+      }
+      case "card.deleted":
+        this.issues = this.issues.filter((i) => i.key !== ev.key);
+        if (this.selectedKey === ev.key) this.selectedKey = null;
+        break;
+      case "cycle.started":
+      case "cycle.ended":
+        this.cycles = await api.listCycles();
+        break;
+      case "sync.drift":
+        this.flash(`sync drift on ${ev.key} (${ev.field})`);
+        break;
+    }
+  }
+
+  #upsert(issue: Issue) {
+    const idx = this.issues.findIndex((i) => i.id === issue.id);
+    if (idx === -1) this.issues = [...this.issues, issue];
+    else this.issues[idx] = issue;
+  }
+
+  flash(msg: string) {
+    this.toast = msg;
+    setTimeout(() => {
+      if (this.toast === msg) this.toast = null;
+    }, 3000);
+  }
+
+  // --- mutations (optimistic) ------------------------------------------
+
+  async move(key: string, status: Status) {
+    const issue = this.issues.find((i) => i.key === key);
+    if (!issue || issue.status === status) return;
+    const prev = issue.status;
+    issue.status = status; // optimistic
+    try {
+      const updated = await api.patchIssue(key, { status });
+      this.#upsert(updated);
+    } catch (e) {
+      issue.status = prev; // revert
+      this.flash(`couldn't move ${key}: ${errMsg(e)}`);
+    }
+  }
+
+  async patch(key: string, patch: IssuePatch) {
+    try {
+      const updated = await api.patchIssue(key, patch);
+      this.#upsert(updated);
+      return updated;
+    } catch (e) {
+      this.flash(`update failed: ${errMsg(e)}`);
+      throw e;
+    }
+  }
+
+  async create(input: NewIssue): Promise<Issue | null> {
+    try {
+      const issue = await api.createIssue(input);
+      this.#upsert(issue);
+      return issue;
+    } catch (e) {
+      this.flash(`create failed: ${errMsg(e)}`);
+      return null;
+    }
+  }
+
+  async remove(key: string) {
+    const snapshot = this.issues;
+    this.issues = this.issues.filter((i) => i.key !== key);
+    if (this.selectedKey === key) this.selectedKey = null;
+    try {
+      await api.deleteIssue(key);
+    } catch (e) {
+      this.issues = snapshot;
+      this.flash(`delete failed: ${errMsg(e)}`);
+    }
+  }
+
+  async devLogin(login: string) {
+    await fetch("/auth/dev-login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ login }),
+    });
+    this.auth = "loading";
+    await this.init();
+  }
+
+  async logout() {
+    await fetch("/auth/logout", { method: "POST", credentials: "include" });
+    location.reload();
+  }
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+export const store = new Store();

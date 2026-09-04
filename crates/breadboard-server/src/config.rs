@@ -21,6 +21,9 @@ pub struct Config {
     pub public_url: String,
     /// Path to the SQLite database file.
     pub database_path: PathBuf,
+    /// Directory of the built web SPA to serve at `/`. When unset (or missing),
+    /// only the API is served — the Vite dev server handles the UI in dev.
+    pub web_dir: Option<PathBuf>,
     pub forgejo: ForgejoConfig,
     pub notifications: NotificationConfig,
 }
@@ -61,6 +64,7 @@ impl Default for Config {
             listen: "127.0.0.1:7280".to_string(),
             public_url: "http://127.0.0.1:7280".to_string(),
             database_path: default_data_dir().join("breadboard.db"),
+            web_dir: None,
             forgejo: ForgejoConfig::default(),
             notifications: NotificationConfig::default(),
         }
@@ -113,6 +117,9 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BREADBOARD_DATABASE_PATH") {
             self.database_path = PathBuf::from(v);
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_WEB_DIR") {
+            self.web_dir = Some(PathBuf::from(v));
         }
         if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_OAUTH_CLIENT_ID") {
             self.forgejo.oauth_client_id = v;

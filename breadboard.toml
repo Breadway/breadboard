@@ -4,6 +4,9 @@
 listen      = "127.0.0.1:7280"
 public_url  = "http://127.0.0.1:7280"
 # database_path defaults to $XDG_DATA_HOME/breadboard/breadboard.db
+# web_dir: serve the built SPA at /. Unset in dev (Vite serves the UI).
+#   BREADBOARD_WEB_DIR overrides. e.g. "apps/web/dist" or an install path.
+# web_dir = "/usr/local/share/breadboard/web"
 
 [forgejo]
 base_url               = "https://git.breadway.dev"

@@ -1,0 +1,35 @@
+# breadboard-server + bundled web SPA, single image.
+# Build:  podman build -t breadboard -f packaging/Containerfile .
+# Run:    podman run -p 7280:7280 -v breadboard-data:/var/lib/breadboard \
+#           -e BREADBOARD_PUBLIC_URL=https://breadboard.breadway.dev \
+#           -e BREADBOARD_FORGEJO_OAUTH_CLIENT_ID=... (etc) breadboard
+
+FROM docker.io/library/node:22-alpine AS web
+WORKDIR /w
+COPY package.json package-lock.json* ./
+COPY packages/api-client/package.json packages/api-client/
+COPY apps/web/package.json apps/web/
+RUN npm ci
+COPY packages/api-client packages/api-client
+COPY apps/web apps/web
+RUN npm run build -w breadboard-web
+
+FROM docker.io/library/rust:1-bookworm AS server
+WORKDIR /s
+COPY Cargo.toml Cargo.lock ./
+COPY crates crates
+COPY migrations migrations
+COPY xtask xtask
+RUN cargo build --release --locked -p breadboard-server
+
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=server /s/target/release/breadboard-server /usr/local/bin/breadboard-server
+COPY --from=web /w/apps/web/dist /usr/local/share/breadboard/web
+ENV BREADBOARD_LISTEN=0.0.0.0:7280 \
+    BREADBOARD_DATABASE_PATH=/var/lib/breadboard/breadboard.db \
+    BREADBOARD_WEB_DIR=/usr/local/share/breadboard/web
+VOLUME /var/lib/breadboard
+EXPOSE 7280
+ENTRYPOINT ["breadboard-server"]
