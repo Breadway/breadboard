@@ -133,6 +133,14 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_API_TOKEN") {
             self.forgejo.api_token = v;
         }
+        if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_BASE_URL") {
+            self.forgejo.base_url = v;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_RECONCILE_INTERVAL_MINS") {
+            if let Ok(n) = v.parse() {
+                self.forgejo.reconcile_interval_mins = n;
+            }
+        }
     }
 
     /// SQLite connection string with `?mode=rwc` so the file is created on first run.

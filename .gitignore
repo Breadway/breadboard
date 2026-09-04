@@ -4,8 +4,9 @@
 
 # Node / frontend
 node_modules/
-apps/web/dist/
+dist/
 apps/desktop/gen/
+*.tsbuildinfo
 
 # Editor / IDE
 .vscode/

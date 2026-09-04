@@ -1,16 +1,22 @@
 //! Shared test harness: boot the real router on an ephemeral port with a
 //! throwaway SQLite file and a pre-created bearer token.
+#![allow(dead_code)] // each test binary uses a different subset
 
 use std::net::SocketAddr;
 
-use breadboard_server::{auth::sha256_hex, config::Config, db, http, store, AppState};
+use breadboard_server::{
+    auth::sha256_hex, config::Config, config::ForgejoConfig, db, http, store, AppState,
+};
 use chrono::Utc;
 use sqlx::SqlitePool;
+
+pub const WEBHOOK_SECRET: &str = "test-webhook-secret";
 
 pub struct TestApp {
     pub addr: SocketAddr,
     pub db: SqlitePool,
     pub token: String,
+    pub state: AppState,
     _tmp: tempfile::TempDir,
 }
 
@@ -20,6 +26,10 @@ pub async fn spawn() -> TestApp {
         database_path: tmp.path().join("test.db"),
         listen: "127.0.0.1:0".into(),
         public_url: "http://127.0.0.1".into(),
+        forgejo: ForgejoConfig {
+            webhook_secret: WEBHOOK_SECRET.into(),
+            ..ForgejoConfig::default()
+        },
         ..Config::default()
     };
 
@@ -45,7 +55,7 @@ pub async fn spawn() -> TestApp {
     .unwrap();
 
     let state = AppState::new(db.clone(), config).unwrap();
-    let app = http::router(state);
+    let app = http::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -57,8 +67,17 @@ pub async fn spawn() -> TestApp {
         addr,
         db,
         token,
+        state,
         _tmp: tmp,
     }
+}
+
+/// Hex HMAC-SHA256 of `body` with the test webhook secret.
+pub fn sign(body: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 /// Minimal SSE reader: pulls decoded `type` fields off `/events` in order.

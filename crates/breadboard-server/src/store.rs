@@ -146,6 +146,46 @@ pub async fn get_project_by_key(db: &SqlitePool, key: &str) -> AppResult<Project
     Ok(row.into())
 }
 
+pub async fn get_project_by_repo(db: &SqlitePool, repo: &str) -> AppResult<Project> {
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM projects WHERE forgejo_repo = ?1"
+    ))
+    .bind(repo)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(row.into())
+}
+
+/// Create the project if its key is free, or attach `forgejo_repo` to the
+/// existing one. Used by `POST /api/repos`.
+pub async fn upsert_project_for_repo(
+    db: &SqlitePool,
+    key: &str,
+    name: &str,
+    repo: &str,
+) -> AppResult<Project> {
+    if let Ok(p) = get_project_by_key(db, key).await {
+        if p.forgejo_repo.as_deref() != Some(repo) {
+            sqlx::query("UPDATE projects SET forgejo_repo = ?2 WHERE id = ?1")
+                .bind(p.id)
+                .bind(repo)
+                .execute(db)
+                .await?;
+        }
+        return get_project(db, p.id).await;
+    }
+    create_project(
+        db,
+        &NewProject {
+            key: key.to_string(),
+            name: name.to_string(),
+            forgejo_repo: Some(repo.to_string()),
+        },
+    )
+    .await
+}
+
 pub async fn create_project(db: &SqlitePool, new: &NewProject) -> AppResult<Project> {
     new.validate().map_err(AppError::BadRequest)?;
     let row: ProjectRow = sqlx::query_as(&format!(
@@ -691,6 +731,188 @@ pub async fn update_issue(
 
     tx.commit().await?;
     get_issue_by_key(db, key).await
+}
+
+pub async fn find_issue_by_forgejo(
+    db: &SqlitePool,
+    repo: &str,
+    number: i64,
+) -> AppResult<Option<Issue>> {
+    let row: Option<IssueRow> = sqlx::query_as(&format!(
+        "SELECT {ISSUE_COLS} FROM issues WHERE forgejo_repo = ?1 AND forgejo_number = ?2"
+    ))
+    .bind(repo)
+    .bind(number)
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some(r) => Ok(Some(hydrate(db, r).await?)),
+        None => Ok(None),
+    }
+}
+
+/// Import a Forgejo issue/PR as a new breadboard issue: allocate a key from the
+/// mapped project, set the `forgejo_ref`, and log the creation to `sync_log`.
+#[allow(clippy::too_many_arguments)]
+pub async fn import_issue(
+    db: &SqlitePool,
+    project: &Project,
+    repo: &str,
+    number: i64,
+    title: &str,
+    body: &str,
+    status: Status,
+    is_pr: bool,
+    labels: &[String],
+    assignee_id: Option<i64>,
+    created_at: &str,
+    updated_at: &str,
+    source: SyncSource,
+) -> AppResult<Issue> {
+    let mut tx = db.begin().await?;
+    let n: i64 = project.next_number;
+    sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
+        .bind(project.id)
+        .execute(&mut *tx)
+        .await?;
+    let key = format!("{}-{}", project.key, n);
+
+    let row: IssueRow = sqlx::query_as(&format!(
+        "INSERT INTO issues
+            (key, project_id, title, body, status, priority, type, assignee_id,
+             forgejo_repo, forgejo_number, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11)
+         RETURNING {ISSUE_COLS}"
+    ))
+    .bind(&key)
+    .bind(project.id)
+    .bind(title)
+    .bind(body)
+    .bind(status.as_str())
+    .bind(if is_pr { "pr" } else { "issue" })
+    .bind(assignee_id)
+    .bind(repo)
+    .bind(number)
+    .bind(created_at)
+    .bind(updated_at)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    for label in dedup(labels) {
+        sqlx::query("INSERT OR IGNORE INTO issue_labels (issue_id, label) VALUES (?1, ?2)")
+            .bind(row.id)
+            .bind(&label)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+         VALUES (?1, 'created', NULL, ?2, ?3, NULL, ?4)",
+    )
+    .bind(row.id)
+    .bind(format!("{repo}#{number}"))
+    .bind(source.as_str())
+    .bind(updated_at)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    hydrate(db, row).await
+}
+
+/// Insert or update a synced comment (matched by `(issue_id, external_id)`).
+pub async fn upsert_synced_comment(
+    db: &SqlitePool,
+    issue_id: i64,
+    external_id: i64,
+    author_id: Option<i64>,
+    body: &str,
+    created_at: &str,
+    updated_at: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO comments (issue_id, author_id, body, external_id, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(issue_id, external_id) DO UPDATE SET body = excluded.body, updated_at = excluded.updated_at",
+    )
+    .bind(issue_id)
+    .bind(author_id)
+    .bind(body)
+    .bind(external_id)
+    .bind(created_at)
+    .bind(updated_at)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+// --- repo sync state ---------------------------------------------------
+
+pub struct RepoSyncView {
+    pub repo: String,
+    pub project_key: Option<String>,
+    pub enabled: bool,
+    pub last_synced_at: Option<String>,
+}
+
+pub async fn list_repos(db: &SqlitePool) -> AppResult<Vec<RepoSyncView>> {
+    let rows: Vec<(String, i64, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT r.forgejo_repo, r.enabled, r.last_synced_at, p.key
+         FROM repo_sync_state r
+         LEFT JOIN projects p ON p.forgejo_repo = r.forgejo_repo
+         ORDER BY r.forgejo_repo",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(repo, enabled, last, key)| RepoSyncView {
+            repo,
+            project_key: key,
+            enabled: enabled != 0,
+            last_synced_at: last,
+        })
+        .collect())
+}
+
+pub async fn upsert_repo(db: &SqlitePool, repo: &str, enabled: bool) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO repo_sync_state (forgejo_repo, enabled) VALUES (?1, ?2)
+         ON CONFLICT(forgejo_repo) DO UPDATE SET enabled = excluded.enabled",
+    )
+    .bind(repo)
+    .bind(enabled as i64)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+pub async fn enabled_repos(db: &SqlitePool) -> AppResult<Vec<(String, Option<String>)>> {
+    let rows: Vec<(String, Option<String>)> = sqlx::query_as(
+        "SELECT forgejo_repo, last_synced_at FROM repo_sync_state WHERE enabled = 1",
+    )
+    .fetch_all(db)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn repo_enabled(db: &SqlitePool, repo: &str) -> AppResult<bool> {
+    let v: Option<i64> =
+        sqlx::query_scalar("SELECT enabled FROM repo_sync_state WHERE forgejo_repo = ?1")
+            .bind(repo)
+            .fetch_optional(db)
+            .await?;
+    Ok(v == Some(1))
+}
+
+pub async fn set_repo_synced_at(db: &SqlitePool, repo: &str, ts: &str) -> AppResult<()> {
+    sqlx::query("UPDATE repo_sync_state SET last_synced_at = ?2 WHERE forgejo_repo = ?1")
+        .bind(repo)
+        .bind(ts)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
 pub async fn delete_issue(db: &SqlitePool, key: &str) -> AppResult<()> {

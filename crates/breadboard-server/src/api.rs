@@ -8,12 +8,12 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use breadboard_core::{BoardEvent, Comment, Cycle, Epic, Issue, Project, SyncSource};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject};
-use crate::error::AppResult;
-use crate::{store, AppState};
+use crate::error::{AppError, AppResult};
+use crate::{store, sync, AppState};
 
 // --- projects --------------------------------------------------------------
 
@@ -200,6 +200,10 @@ pub async fn patch_issue(
             assignee_id: issue.assignee_id,
         });
     }
+
+    // Push synced-field changes back to Forgejo (no-op if not linked/enabled).
+    sync::writeback(&app, &before, &issue).await;
+
     Ok(Json(issue))
 }
 
@@ -215,4 +219,97 @@ pub async fn delete_issue(
         key: issue.key,
     });
     Ok(StatusCode::NO_CONTENT)
+}
+
+// --- synced repos ---------------------------------------------------------
+
+#[derive(Serialize)]
+pub struct RepoView {
+    repo: String,
+    project_key: Option<String>,
+    enabled: bool,
+    last_synced_at: Option<String>,
+}
+
+pub async fn list_repos(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<Vec<RepoView>>> {
+    let rows = store::list_repos(&app.db).await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|r| RepoView {
+                repo: r.repo,
+                project_key: r.project_key,
+                enabled: r.enabled,
+                last_synced_at: r.last_synced_at,
+            })
+            .collect(),
+    ))
+}
+
+#[derive(Deserialize)]
+pub struct AddRepo {
+    /// `owner/name` on the configured Forgejo instance.
+    repo: String,
+    /// Project key to file this repo's issues under (created if absent).
+    key: String,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+pub async fn add_repo(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<AddRepo>,
+) -> AppResult<(StatusCode, Json<RepoView>)> {
+    if crate::forgejo::split_repo(&body.repo).is_err() {
+        return Err(AppError::bad_request("repo must be `owner/name`"));
+    }
+    let name = body.name.unwrap_or_else(|| {
+        body.repo.split('/').next_back().unwrap_or(&body.repo).to_string()
+    });
+    let project = store::upsert_project_for_repo(&app.db, &body.key, &name, &body.repo).await?;
+    store::upsert_repo(&app.db, &body.repo, true).await?;
+
+    // Kick an initial import in the background.
+    let state = app.clone();
+    let repo = body.repo.clone();
+    tokio::spawn(async move {
+        if let Err(e) = sync::reconcile_once(&state).await {
+            tracing::warn!(%repo, error = %e, "initial repo import failed");
+        }
+    });
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RepoView {
+            repo: body.repo,
+            project_key: Some(project.key),
+            enabled: true,
+            last_synced_at: None,
+        }),
+    ))
+}
+
+pub async fn remove_repo(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path((owner, name)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    let repo = format!("{owner}/{name}");
+    store::upsert_repo(&app.db, &repo, false).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn reconcile_now(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<StatusCode> {
+    tokio::spawn(async move {
+        if let Err(e) = sync::reconcile_once(&app).await {
+            tracing::warn!(error = %e, "manual reconcile failed");
+        }
+    });
+    Ok(StatusCode::ACCEPTED)
 }

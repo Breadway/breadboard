@@ -5,10 +5,10 @@ event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
 verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
-Status: **milestone 3** — server (health, SSE, REST CRUD, Forgejo OAuth2) plus
-the Svelte web client (board with drag-between-columns, backlog, issue drawer,
-`cmd-k` palette, live SSE refresh). Routes marked _(planned)_ describe the
-intended contract for later milestones (sync, notifications).
+Status: **milestone 4** — server (health, SSE, REST CRUD, Forgejo OAuth2), the
+Svelte web client, and the **Forgejo sync engine** (inbound webhook + reconcile
+loop + writeback, per-field LWW, `sync_log`). Routes marked _(planned)_ are for
+later milestones (notifications; PR mirroring; comment writeback).
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -64,6 +64,11 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
+| `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
+| `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }` — maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
+| `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
+| `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202` |
+| `POST` | `/webhooks/forgejo` | inbound sync — **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 
 **IssuePatch** — every field optional; absent = unchanged. `title`, `body`,
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
@@ -74,10 +79,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/api/notifications` | current user's notifications (milestone 7) |
-| `POST` | `/webhooks/forgejo` | HMAC-verified inbound sync (milestone 4) |
 | `POST` | `/auth/device` · `/auth/device/token` | CLI device flow (milestone 5) |
-| `GET`/`POST`/`DELETE` | `/api/repos` | which `owner/repo` are synced (milestone 4) |
-| `POST` | `/api/sync/reconcile` | force a full reconcile (milestone 4) |
 
 ---
 
@@ -103,38 +105,43 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 
 **Direction:** bidirectional.
 
-**Inbound fast path:** Forgejo webhooks (`issues`, `issue_comment`,
-`pull_request`) → `POST /webhooks/forgejo`, HMAC-verified against
-`forgejo.webhook_secret`. Applied immediately.
+**Inbound fast path:** Forgejo `issues` / `issue_comment` webhooks →
+`POST /webhooks/forgejo`, HMAC-verified against `forgejo.webhook_secret`, applied
+immediately. `pull_request` events are accepted but not yet synced.
 
 **Reconcile:** every `forgejo.reconcile_interval_mins` minutes, per enabled repo,
-`GET .../issues?since=<repo_sync_state.last_synced_at>`; diff and apply anything
-the webhook path missed. A divergence emits `sync.drift`.
+`GET .../issues?since=<repo_sync_state.last_synced_at>&state=all` (paginated);
+apply anything the webhook path missed, then advance `last_synced_at`. `POST
+/api/sync/reconcile` runs a pass on demand.
 
-**Writeback:** breadboard mutations to synced fields call the Forgejo REST API
-with `forgejo.api_token`.
+**Writeback:** after a `PATCH /api/issues/{key}` changes a synced field on a
+linked issue in an enabled repo, the change is pushed to Forgejo with
+`forgejo.api_token` (`PATCH issue` for title/body/state/assignees, `PUT labels`
+otherwise).
 
 **Synced fields:**
 
-| breadboard | Forgejo |
-| --- | --- |
-| `title`, `body` | issue title / body |
-| `status` | open (`backlog`–`review`) / closed (`done`) |
-| `assignee_id` | assignee (mapped by `forgejo_id`) |
-| `labels` | labels |
-| `cycle` ↔ nothing; `epic` ↔ nothing | breadboard-only |
-| comments | issue comments (both ways) |
-| PRs | linked, read-mostly (writeback: labels/links only) |
+| breadboard | Forgejo | direction |
+| --- | --- | --- |
+| `title`, `body` | issue title / body | both |
+| `status` | open (`backlog`–`review`) ↔ closed (`done`); a fine-grained open status is preserved, reopen → `todo` | both |
+| `assignee_id` | first assignee, mapped by `forgejo_id` (unknown users are imported) | both |
+| `labels` | labels (created on Forgejo if missing) | both |
+| `epic`, `cycle`, `priority`, `estimate`, `links` | — | breadboard-only |
+| comments | issue comments | inbound only (writeback: milestone 4b) |
+| PRs | — | not yet |
+| milestone | — | not yet |
 
-**Conflict resolution:** per-field last-write-wins keyed on `updated_at`. Every
-change from either side appends a `sync_log` row
-(`field`, `old_value`, `new_value`, `source`, `actor_id`, `at`).
+**Conflict resolution:** per-field, the side with the newer issue-level
+`updated_at` wins; a value that already matches is a no-op (this absorbs the
+webhook echo of a writeback). Applied changes append a `sync_log` row
+(`field`, `old_value`, `new_value`, `source`, `actor_id`, `at`). When breadboard
+is the newer side and the two still differ, a `sync.drift` event fires and no
+change is applied (writeback, or the next breadboard edit, resolves it).
 
-**Loop prevention:** each writeback is tagged with its `source`; the webhook echo
-it generates carries the same `external_id` and is recognised as already-applied.
-
-**Scope:** only repos present in `repo_sync_state` with `enabled = 1`
-(`breadboard repos add owner/repo`).
+**Scope:** only repos in `repo_sync_state` with `enabled = 1`, each mapped to a
+project via `projects.forgejo_repo` (`POST /api/repos`). Issues in an enabled
+repo with no mapped project are skipped with a warning.
 
 ---
 
@@ -151,6 +158,6 @@ it generates carries the same `external_id` and is recognised as already-applied
 | `board [--cycle] [--project]` | planned |
 | `ls [--mine] [--status]` | planned |
 | `cycle list` · `start <name>` · `end <name>` | planned |
-| `repos list` · `add <repos…>` · `remove <repos…>` | planned |
-| `sync [--full]` | planned |
+| `repos list` · `add <repo> <key>` · `remove <repo>` | planned (server: implemented) |
+| `sync` | planned (server: `POST /api/sync/reconcile`) |
 | `tui` | planned (milestone 5) |

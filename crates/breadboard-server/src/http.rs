@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, auth, AppState};
+use crate::{api, auth, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -34,7 +34,10 @@ pub fn router(state: AppState) -> Router {
             patch(api::patch_issue)
                 .get(api::get_issue)
                 .delete(api::delete_issue),
-        );
+        )
+        .route("/repos", get(api::list_repos).post(api::add_repo))
+        .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
+        .route("/sync/reconcile", post(api::reconcile_now));
 
     let auth_routes = Router::new()
         .route("/login", get(auth::login))
@@ -45,6 +48,7 @@ pub fn router(state: AppState) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(healthz))
         .route("/events", get(events))
+        .route("/webhooks/forgejo", post(webhook::handle))
         .nest("/api", api_routes)
         .nest("/auth", auth_routes);
 

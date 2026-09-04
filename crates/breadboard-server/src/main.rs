@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use breadboard_server::{auth, config::Config, db, http, store, AppState};
+use breadboard_server::{auth, config::Config, db, http, store, sync, AppState};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -42,6 +42,17 @@ async fn main() -> anyhow::Result<()> {
 
     let listen = config.listen.clone();
     let state = AppState::new(db, config).context("building app state")?;
+
+    if state.forgejo.is_configured() {
+        sync::spawn_reconcile(state.clone());
+        tracing::info!(
+            interval_mins = state.config.forgejo.reconcile_interval_mins,
+            "forgejo reconcile loop started"
+        );
+    } else {
+        tracing::info!("forgejo.api_token unset — sync disabled");
+    }
+
     let app = http::router(state);
 
     let addr: SocketAddr = listen.parse().context("parsing listen address")?;

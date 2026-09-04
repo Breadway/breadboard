@@ -8,31 +8,39 @@ pub mod config;
 pub mod db;
 pub mod dto;
 pub mod error;
+pub mod forgejo;
 pub mod http;
 pub mod store;
+pub mod sync;
+pub mod webhook;
 
 use std::sync::Arc;
 
 use crate::bus::Bus;
 use crate::config::Config;
+use crate::forgejo::Forgejo;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: db::Db,
     pub bus: Bus,
     pub http: reqwest::Client,
+    pub forgejo: Forgejo,
     pub config: Arc<Config>,
 }
 
 impl AppState {
     /// Build state from a ready database + config. Used by the binary and tests.
     pub fn new(db: db::Db, config: Config) -> anyhow::Result<Self> {
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("breadboard-server/", env!("CARGO_PKG_VERSION")))
+            .build()?;
+        let forgejo = Forgejo::new(http.clone(), &config.forgejo);
         Ok(Self {
             db,
             bus: Bus::new(),
-            http: reqwest::Client::builder()
-                .user_agent(concat!("breadboard-server/", env!("CARGO_PKG_VERSION")))
-                .build()?,
+            http,
+            forgejo,
             config: Arc::new(config),
         })
     }
