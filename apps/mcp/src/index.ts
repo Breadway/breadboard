@@ -162,7 +162,10 @@ server.tool(
 
 server.tool(
   "update_issue",
-  "Patch an issue. Any omitted field is left unchanged.",
+  "Patch an issue. Any omitted field is left unchanged. " +
+    "Workflow: move to doing when you actually start work (not just at the end) — backlog/todo "
+    + "→ doing → review (implemented, not yet verified/deployed) → done (verified live). "
+    + "Don't jump straight from backlog/todo to review or done.",
   {
     key: z.string(),
     status: z.enum(STATUSES as [string, ...string[]]).optional(),
@@ -193,7 +196,9 @@ server.tool(
 
 server.tool(
   "move_issue",
-  "Shorthand: set an issue's status.",
+  "Shorthand: set an issue's status. Workflow: doing when work actually starts, review once "
+    + "implemented (not yet verified/deployed), done only after you've verified it. Don't skip "
+    + "doing on the way to review/done.",
   { key: z.string(), status: z.enum(STATUSES as [string, ...string[]]) },
   ({ key, status }) => run(() => client.patchIssue(key, { status: status as IssuePatch["status"] })),
 );
