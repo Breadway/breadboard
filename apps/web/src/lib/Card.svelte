@@ -12,8 +12,13 @@
   const prioClass = $derived(
     issue.priority === "none" ? "" : `prio-${issue.priority}`,
   );
-  const closeLinks = $derived(
-    issue.links.filter((l) => l.kind === "closes" || l.kind === "closed-by"),
+  // PRs that close this issue don't get their own card (see store.filtered) —
+  // their state surfaces here instead, so the board shows one thing, not two.
+  const closingPrs = $derived(
+    issue.links
+      .filter((l) => l.kind === "closed-by")
+      .map((l) => store.findIssue(l.target_id))
+      .filter((t): t is Issue => !!t && t.type === "pr"),
   );
 </script>
 
@@ -36,11 +41,12 @@
     {/if}
   </div>
   <div class="title">{issue.title}</div>
-  {#if closeLinks.length}
-    <div class="link-line">
-      {#each closeLinks as l (l.kind + l.target_id)}
-        {@const t = store.findIssue(l.target_id)}
-        <span title={t?.title ?? ""}>{l.kind === "closes" ? "→" : "←"} {t?.key ?? `#${l.target_id}`}</span>
+  {#if closingPrs.length}
+    <div class="pr-badges">
+      {#each closingPrs as pr (pr.id)}
+        <span class="pr-badge" class:merged={pr.status === "done"} title={pr.title}>
+          {pr.status === "done" ? "✓" : "⇢"} PR #{pr.forgejo_ref?.number ?? pr.id}
+        </span>
       {/each}
     </div>
   {/if}
@@ -114,13 +120,22 @@
     font-weight: 500;
     line-height: 1.35;
   }
-  .link-line {
+  .pr-badges {
     display: flex;
-    gap: 8px;
+    gap: 6px;
     flex-wrap: wrap;
-    margin-top: 3px;
-    font-size: 11px;
-    color: var(--ink-dim);
+    margin-top: 4px;
+  }
+  .pr-badge {
+    font-size: 10px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+  }
+  .pr-badge.merged {
+    border-color: var(--status-done);
+    color: var(--status-done);
   }
   .card-bot {
     display: flex;
