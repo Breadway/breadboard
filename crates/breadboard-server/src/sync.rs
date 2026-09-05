@@ -38,9 +38,15 @@ const CLOSE_KEYWORDS: &[&str] = &[
     "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ];
 
-/// Issue numbers referenced by a closing keyword ("closes #4", "Fixes #4, #5")
-/// in a PR body — the same convention Forgejo/GitHub use for auto-closing.
-fn parse_closes_refs(text: &str) -> Vec<i64> {
+/// Scan `text` for a closing keyword, then for each occurrence extract every
+/// consecutive reference token that follows (comma/"and"/whitespace
+/// separated — "closes #4, #5", "fixes ECO-4 and ECO-5"). `extract` is tried
+/// against the lowercased remainder at each token boundary and returns
+/// `Some((value, bytes_consumed))` on a match.
+fn scan_after_close_keywords<T>(
+    text: &str,
+    mut extract: impl FnMut(&str) -> Option<(T, usize)>,
+) -> Vec<T> {
     let mut out = Vec::new();
     let lower = text.to_ascii_lowercase();
     let bytes = lower.as_bytes();
@@ -62,21 +68,10 @@ fn parse_closes_refs(text: &str) -> Vec<i64> {
                         k += 4;
                         continue;
                     }
-                    if k < bytes.len() && bytes[k] == b'#' {
-                        let num_start = k + 1;
-                        let mut m = num_start;
-                        while m < bytes.len() && bytes[m].is_ascii_digit() {
-                            m += 1;
-                        }
-                        if m > num_start {
-                            if let Ok(n) = lower[num_start..m].parse::<i64>() {
-                                if !out.contains(&n) {
-                                    out.push(n);
-                                }
-                            }
-                            k = m;
-                            continue;
-                        }
+                    if let Some((val, consumed)) = extract(&lower[k..]) {
+                        out.push(val);
+                        k += consumed;
+                        continue;
                     }
                     break;
                 }
@@ -89,6 +84,51 @@ fn parse_closes_refs(text: &str) -> Vec<i64> {
     out
 }
 
+fn dedup(mut v: Vec<i64>) -> Vec<i64> {
+    let mut seen = Vec::with_capacity(v.len());
+    v.retain(|n| {
+        if seen.contains(n) {
+            false
+        } else {
+            seen.push(*n);
+            true
+        }
+    });
+    v
+}
+
+/// Forgejo issue numbers referenced by a closing keyword ("closes #4",
+/// "Fixes #4, #5") in a PR body — the same convention Forgejo/GitHub use for
+/// auto-closing.
+fn parse_closes_refs(text: &str) -> Vec<i64> {
+    dedup(scan_after_close_keywords(text, |tail| {
+        let rest = tail.strip_prefix('#')?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        Some((digits.parse().ok()?, 1 + digits.len()))
+    }))
+}
+
+/// breadboard-key references ("ECO-4", case-insensitive on the prefix)
+/// governed by a closing keyword. Agents and humans alike naturally
+/// reference the key they can actually see (in `board`/`list_issues`, on the
+/// card) rather than the underlying Forgejo issue number the two only
+/// coincidentally share early on — without this, a PR body like "Fixes
+/// ECO-17" silently fails to link at all.
+fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
+    let prefix = format!("{}-", project_key.to_ascii_lowercase());
+    dedup(scan_after_close_keywords(text, |tail| {
+        let rest = tail.strip_prefix(prefix.as_str())?;
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        Some((digits.parse().ok()?, prefix.len() + digits.len()))
+    }))
+}
+
 /// Sync a PR's "closes" relationships: link it to the issue(s) its body
 /// references (so the board shows the connection instead of two
 /// seemingly-unrelated cards), and — since Forgejo doesn't reliably
@@ -99,11 +139,23 @@ fn parse_closes_refs(text: &str) -> Vec<i64> {
 /// `INSERT OR IGNORE`, and the status cascade no-ops once already done) —
 /// safe to call on every sync of a PR, not just its creation.
 async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str, pr_done: bool) {
+    let mut targets = Vec::new();
     for number in parse_closes_refs(body) {
-        let Ok(Some(target)) = store::find_issue_by_forgejo(&state.db, repo, number).await else {
-            continue;
-        };
-        if target.id == pr_issue_id {
+        if let Ok(Some(t)) = store::find_issue_by_forgejo(&state.db, repo, number).await {
+            targets.push(t);
+        }
+    }
+    if let Ok(project) = store::get_project_by_repo(&state.db, repo).await {
+        for n in parse_closes_key_refs(body, &project.key) {
+            if let Ok(t) = store::get_issue_by_key(&state.db, &format!("{}-{n}", project.key)).await {
+                targets.push(t);
+            }
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for target in targets {
+        if target.id == pr_issue_id || !seen.insert(target.id) {
             continue;
         }
         let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
@@ -591,7 +643,7 @@ fn emit_change_events(state: &AppState, before: &Issue, after: &Issue) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_closes_refs;
+    use super::{parse_closes_key_refs, parse_closes_refs};
 
     #[test]
     fn closes_ref_parsing() {
@@ -605,5 +657,29 @@ mod tests {
         );
         assert_eq!(parse_closes_refs("no refs here"), Vec::<i64>::new());
         assert_eq!(parse_closes_refs("see #9 for context"), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn closes_key_ref_parsing() {
+        // The real case that slipped through: an agent referenced breadboard's
+        // own key instead of the underlying Forgejo issue number.
+        assert_eq!(
+            parse_closes_key_refs("Fixes ECO-17 (\"Text clipping\")", "ECO"),
+            vec![17]
+        );
+        assert_eq!(
+            parse_closes_key_refs("Closes ECO-2, ECO-3 and eco-4", "ECO"),
+            vec![2, 3, 4]
+        );
+        assert_eq!(
+            parse_closes_key_refs("Closes BB-5", "ECO"),
+            Vec::<i64>::new(),
+            "must not match a different project's key"
+        );
+        assert_eq!(
+            parse_closes_key_refs("see ECO-6 for context", "ECO"),
+            Vec::<i64>::new(),
+            "no closing keyword, no link"
+        );
     }
 }
