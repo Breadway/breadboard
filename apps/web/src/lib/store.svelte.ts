@@ -77,6 +77,10 @@ class Store {
     return this.projects.find((p) => p.id === id)?.key ?? "?";
   }
 
+  findIssue(id: number): Issue | undefined {
+    return this.issues.find((i) => i.id === id);
+  }
+
   async init() {
     try {
       this.me = await api.me();

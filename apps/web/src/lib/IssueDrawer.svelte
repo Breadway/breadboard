@@ -58,6 +58,14 @@
     api.getActivity(key).then((a) => (activity = a)).catch(() => {});
   });
 
+  const linkLabels: Record<string, string> = {
+    closes: "Closes",
+    "closed-by": "Closed by",
+    blocks: "Blocks",
+    "blocked-by": "Blocked by",
+    "relates-to": "Relates to",
+  };
+
   function describe(a: ActivityEntry): string {
     const who = a.actor ?? (a.source === "breadboard" ? "someone" : "Forgejo");
     if (a.field === "created") return `${who} created this (${a.new_value ?? ""})`;
@@ -130,6 +138,17 @@
           onblur={saveTitle}
           onkeydown={(e) => e.key === "Enter" && e.currentTarget.blur()}
         />
+
+        {#if detail.links.length}
+          <div class="links">
+            {#each detail.links as l (l.kind + l.target_id)}
+              {@const t = store.findIssue(l.target_id)}
+              <button class="link-chip" onclick={() => t && (store.selectedKey = t.key)}>
+                {linkLabels[l.kind] ?? l.kind} {t?.key ?? `#${l.target_id}`}{t ? ` · ${t.title}` : ""}
+              </button>
+            {/each}
+          </div>
+        {/if}
 
         <div class="row">
           <label>
@@ -331,6 +350,24 @@
     display: flex;
     gap: 8px;
     flex-wrap: wrap;
+  }
+  .links {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .link-chip {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 3px 10px;
+    color: var(--ink-dim);
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .link-chip:hover {
+    border-color: var(--accent);
+    color: var(--ink);
   }
   label {
     display: flex;

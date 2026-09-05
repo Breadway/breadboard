@@ -12,6 +12,9 @@
   const prioClass = $derived(
     issue.priority === "none" ? "" : `prio-${issue.priority}`,
   );
+  const closeLinks = $derived(
+    issue.links.filter((l) => l.kind === "closes" || l.kind === "closed-by"),
+  );
 </script>
 
 <button
@@ -33,6 +36,14 @@
     {/if}
   </div>
   <div class="title">{issue.title}</div>
+  {#if closeLinks.length}
+    <div class="link-line">
+      {#each closeLinks as l (l.kind + l.target_id)}
+        {@const t = store.findIssue(l.target_id)}
+        <span title={t?.title ?? ""}>{l.kind === "closes" ? "→" : "←"} {t?.key ?? `#${l.target_id}`}</span>
+      {/each}
+    </div>
+  {/if}
   {#if issue.labels.length || issue.estimate != null || issue.assignee_id}
     <div class="card-bot">
       {#each issue.labels as label (label)}
@@ -102,6 +113,14 @@
     font-size: 13px;
     font-weight: 500;
     line-height: 1.35;
+  }
+  .link-line {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--ink-dim);
   }
   .card-bot {
     display: flex;
