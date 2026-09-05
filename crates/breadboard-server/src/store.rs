@@ -581,6 +581,15 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
     })
 }
 
+pub async fn get_issue(db: &SqlitePool, id: i64) -> AppResult<Issue> {
+    let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE id = ?1"))
+        .bind(id)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    hydrate(db, row).await
+}
+
 pub async fn get_issue_by_key(db: &SqlitePool, key: &str) -> AppResult<Issue> {
     let row: IssueRow =
         sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
