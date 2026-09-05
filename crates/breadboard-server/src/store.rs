@@ -936,6 +936,24 @@ pub async fn move_issue_project(
     Ok((after, old_ref))
 }
 
+/// Add a single link if it doesn't already exist, without touching the
+/// issue's other links (unlike `IssuePatch.links`, which replaces the whole
+/// set — this is for sync-driven links like `closes`/`closed-by`).
+pub async fn add_link(
+    db: &SqlitePool,
+    issue_id: i64,
+    target_id: i64,
+    kind: LinkKind,
+) -> AppResult<()> {
+    sqlx::query("INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)")
+        .bind(issue_id)
+        .bind(target_id)
+        .bind(kind.as_str())
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 pub async fn find_issue_by_forgejo(
     db: &SqlitePool,
     repo: &str,

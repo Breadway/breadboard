@@ -120,6 +120,11 @@ pub enum LinkKind {
     Blocks,
     BlockedBy,
     RelatesTo,
+    /// A synced PR closes this issue (parsed from its body's closing
+    /// keywords, e.g. "Closes #4") — links the two Forgejo objects breadboard
+    /// otherwise mirrors as unrelated-looking cards.
+    Closes,
+    ClosedBy,
 }
 
 impl LinkKind {
@@ -128,6 +133,8 @@ impl LinkKind {
             LinkKind::Blocks => "blocks",
             LinkKind::BlockedBy => "blocked-by",
             LinkKind::RelatesTo => "relates-to",
+            LinkKind::Closes => "closes",
+            LinkKind::ClosedBy => "closed-by",
         }
     }
 
@@ -136,6 +143,8 @@ impl LinkKind {
             "blocks" => Some(LinkKind::Blocks),
             "blocked-by" => Some(LinkKind::BlockedBy),
             "relates-to" => Some(LinkKind::RelatesTo),
+            "closes" => Some(LinkKind::Closes),
+            "closed-by" => Some(LinkKind::ClosedBy),
             _ => None,
         }
     }

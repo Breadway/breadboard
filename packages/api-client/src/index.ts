@@ -6,7 +6,7 @@
 export type Status = "backlog" | "todo" | "doing" | "review" | "done";
 export type Priority = "none" | "low" | "medium" | "high" | "urgent";
 export type IssueType = "issue" | "pr";
-export type LinkKind = "blocks" | "blocked-by" | "relates-to";
+export type LinkKind = "blocks" | "blocked-by" | "relates-to" | "closes" | "closed-by";
 
 export const STATUSES: Status[] = ["backlog", "todo", "doing", "review", "done"];
 export const PRIORITIES: Priority[] = ["none", "low", "medium", "high", "urgent"];

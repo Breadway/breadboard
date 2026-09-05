@@ -8,7 +8,7 @@
 //! a `sync.drift` event is emitted.
 
 use anyhow::Context;
-use breadboard_core::{BoardEvent, Issue, Project, Status, SyncSource};
+use breadboard_core::{BoardEvent, Issue, IssueType, LinkKind, Project, Status, SyncSource};
 use chrono::{DateTime, Utc};
 
 use crate::dto::IssuePatch;
@@ -32,6 +32,77 @@ pub fn map_status(fg_closed: bool, current: Status) -> Status {
 
 fn norm_body(s: &str) -> String {
     s.replace("\r\n", "\n").trim_end().to_string()
+}
+
+const CLOSE_KEYWORDS: &[&str] = &[
+    "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
+];
+
+/// Issue numbers referenced by a closing keyword ("closes #4", "Fixes #4, #5")
+/// in a PR body — the same convention Forgejo/GitHub use for auto-closing.
+fn parse_closes_refs(text: &str) -> Vec<i64> {
+    let mut out = Vec::new();
+    let lower = text.to_ascii_lowercase();
+    let bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphabetic() && (i == 0 || !bytes[i - 1].is_ascii_alphanumeric()) {
+            let start = i;
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_alphabetic() {
+                j += 1;
+            }
+            if CLOSE_KEYWORDS.contains(&&lower[start..j]) {
+                let mut k = j;
+                loop {
+                    while k < bytes.len() && matches!(bytes[k], b' ' | b',' | b':') {
+                        k += 1;
+                    }
+                    if lower[k..].starts_with("and ") {
+                        k += 4;
+                        continue;
+                    }
+                    if k < bytes.len() && bytes[k] == b'#' {
+                        let num_start = k + 1;
+                        let mut m = num_start;
+                        while m < bytes.len() && bytes[m].is_ascii_digit() {
+                            m += 1;
+                        }
+                        if m > num_start {
+                            if let Ok(n) = lower[num_start..m].parse::<i64>() {
+                                if !out.contains(&n) {
+                                    out.push(n);
+                                }
+                            }
+                            k = m;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Link a PR to whatever issues its body says it closes, so the board shows
+/// the connection instead of two seemingly-unrelated cards. Bidirectional
+/// and idempotent (`add_link` is `INSERT OR IGNORE`) — safe to call on every
+/// sync of a PR, not just its creation.
+async fn link_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str) {
+    for number in parse_closes_refs(body) {
+        if let Ok(Some(target)) = store::find_issue_by_forgejo(&state.db, repo, number).await {
+            if target.id == pr_issue_id {
+                continue;
+            }
+            let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
+            let _ = store::add_link(&state.db, target.id, pr_issue_id, LinkKind::ClosedBy).await;
+        }
+    }
 }
 
 async fn resolve_user(state: &AppState, fg: Option<&FgUser>) -> anyhow::Result<Option<i64>> {
@@ -95,6 +166,9 @@ pub async fn apply_issue(
             source,
         )
         .await?;
+        if fg.is_pr() {
+            link_pr_closes(state, repo, issue.id, &fg.body).await;
+        }
         state.bus.publish(BoardEvent::CardCreated {
             id: issue.id,
             key: issue.key,
@@ -162,6 +236,9 @@ pub async fn apply_issue(
         if let Some(a) = after.assignee_id {
             crate::notify::assigned(state, &after, a, None).await;
         }
+    }
+    if after.issue_type == IssueType::Pr {
+        link_pr_closes(state, repo, after.id, &after.body).await;
     }
     Ok(())
 }
@@ -468,4 +545,23 @@ fn emit_change_events(state: &AppState, before: &Issue, after: &Issue) {
         id: after.id,
         key: after.key.clone(),
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_closes_refs;
+
+    #[test]
+    fn closes_ref_parsing() {
+        assert_eq!(parse_closes_refs("Closes #2, #3, #4"), vec![2, 3, 4]);
+        assert_eq!(parse_closes_refs("fixes #5 and #6"), vec![5, 6]);
+        assert_eq!(parse_closes_refs("Resolved: #7"), vec![7]);
+        assert_eq!(
+            parse_closes_refs("this discloses #8"),
+            Vec::<i64>::new(),
+            "discloses must not match closes as a substring"
+        );
+        assert_eq!(parse_closes_refs("no refs here"), Vec::<i64>::new());
+        assert_eq!(parse_closes_refs("see #9 for context"), Vec::<i64>::new());
+    }
 }

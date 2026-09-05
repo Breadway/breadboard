@@ -161,9 +161,11 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 | `status` | open (`backlog`–`review`) ↔ closed (`done`); a fine-grained open status is preserved, reopen → `todo` | both |
 | `assignee_id` | first assignee, mapped by `forgejo_id` (unknown users are imported) | both |
 | `labels` | labels (created on Forgejo if missing) | both |
-| `epic`, `cycle`, `priority`, `estimate`, `links` | — | breadboard-only |
+| `epic`, `cycle`, `priority`, `estimate` | — | breadboard-only |
+| `links` (`blocks`/`blocked-by`/`relates-to`) | — | breadboard-only |
+| `links` (`closes`/`closed-by`) | a synced PR's body ("Closes #4", "Fixes #4, #5" — same keywords Forgejo/GitHub use) | inbound-derived; re-parsed on every sync of that PR, not just import |
 | comments | issue/PR comments | both (`external_id` dedups the echo; a matching unlinked local comment is claimed) |
-| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done` |
+| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done`. A PR's closing references become `closes`/`closed-by` links so the board shows the connection instead of two unrelated-looking cards |
 | `milestone` | milestone title (plain string on the issue) | inbound only |
 
 **Conflict resolution:** per-field, the side with the newer issue-level
