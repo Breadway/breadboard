@@ -57,6 +57,10 @@ class Store {
 
   get filtered(): Issue[] {
     return this.issues.filter((i) => {
+      // A PR that closes a real issue collapses into that issue's card
+      // instead of showing as a second, seemingly-unrelated card — its
+      // status surfaces there as a small badge instead (see Card.svelte).
+      if (i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
       if (this.filterProject) {
         const p = this.projects.find((p) => p.id === i.project_id);
         if (!p || p.key !== this.filterProject) return false;
