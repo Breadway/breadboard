@@ -133,7 +133,10 @@ server.tool(
 
 server.tool(
   "create_issue",
-  "Create an issue. Only title is required. If the project maps to a synced repo it is also created on Forgejo.",
+  "Create an issue. Only title is required. If the project maps to a synced repo it is also created on Forgejo. " +
+    "If you later open a PR that resolves this issue, reference its key with a closing keyword in the PR body " +
+    "(e.g. \"Closes ECO-17\" or \"Closes #17\") — breadboard links the PR to the issue and collapses them into " +
+    "one card instead of showing two unrelated ones.",
   {
     title: z.string(),
     project: z.string().optional().describe("project key; defaults to the first project"),
