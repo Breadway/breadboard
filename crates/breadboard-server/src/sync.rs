@@ -89,18 +89,60 @@ fn parse_closes_refs(text: &str) -> Vec<i64> {
     out
 }
 
-/// Link a PR to whatever issues its body says it closes, so the board shows
-/// the connection instead of two seemingly-unrelated cards. Bidirectional
-/// and idempotent (`add_link` is `INSERT OR IGNORE`) — safe to call on every
-/// sync of a PR, not just its creation.
-async fn link_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str) {
+/// Sync a PR's "closes" relationships: link it to the issue(s) its body
+/// references (so the board shows the connection instead of two
+/// seemingly-unrelated cards), and — since Forgejo doesn't reliably
+/// auto-close every issue in a comma-separated "Closes #a, #b" list
+/// (confirmed: only the first one actually closes) — cascade breadboard's
+/// own `done` status onto all of them once the PR itself is merged/closed,
+/// best-effort closing their Forgejo issues too. Idempotent (`add_link` is
+/// `INSERT OR IGNORE`, and the status cascade no-ops once already done) —
+/// safe to call on every sync of a PR, not just its creation.
+async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str, pr_done: bool) {
     for number in parse_closes_refs(body) {
-        if let Ok(Some(target)) = store::find_issue_by_forgejo(&state.db, repo, number).await {
-            if target.id == pr_issue_id {
-                continue;
+        let Ok(Some(target)) = store::find_issue_by_forgejo(&state.db, repo, number).await else {
+            continue;
+        };
+        if target.id == pr_issue_id {
+            continue;
+        }
+        let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
+        let _ = store::add_link(&state.db, target.id, pr_issue_id, LinkKind::ClosedBy).await;
+
+        if !pr_done || target.status == Status::Done {
+            continue;
+        }
+        let patch = IssuePatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        };
+        let Ok(updated) =
+            store::update_issue(&state.db, &target.key, &patch, None, SyncSource::ForgejoWebhook)
+                .await
+        else {
+            continue;
+        };
+        emit_change_events(state, &target, &updated);
+        let Some(fref) = &updated.forgejo_ref else { continue };
+        if !state.forgejo.is_configured() {
+            continue;
+        }
+        if let Ok((owner, r)) = split_repo(&fref.repo) {
+            if let Err(e) = state
+                .forgejo
+                .patch_issue(
+                    owner,
+                    r,
+                    fref.number,
+                    FgIssuePatch {
+                        state: Some("closed"),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(key = %updated.key, error = %e, "closing cascaded issue on forgejo failed");
             }
-            let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
-            let _ = store::add_link(&state.db, target.id, pr_issue_id, LinkKind::ClosedBy).await;
         }
     }
 }
@@ -167,7 +209,7 @@ pub async fn apply_issue(
         )
         .await?;
         if fg.is_pr() {
-            link_pr_closes(state, repo, issue.id, &fg.body).await;
+            sync_pr_closes(state, repo, issue.id, &fg.body, status == Status::Done).await;
         }
         state.bus.publish(BoardEvent::CardCreated {
             id: issue.id,
@@ -238,7 +280,7 @@ pub async fn apply_issue(
         }
     }
     if after.issue_type == IssueType::Pr {
-        link_pr_closes(state, repo, after.id, &after.body).await;
+        sync_pr_closes(state, repo, after.id, &after.body, after.status == Status::Done).await;
     }
     Ok(())
 }
