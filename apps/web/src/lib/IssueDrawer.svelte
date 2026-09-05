@@ -204,6 +204,19 @@
               {#each store.projects as p (p.id)}<option value={p.key}>{p.key} · {p.name}</option>{/each}
             </select>
           </label>
+          <label class="grow">
+            Cycle
+            <select
+              value={detail.cycle_id ?? ""}
+              onchange={(e) =>
+                save({ cycle_id: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) })}
+            >
+              <option value="">—</option>
+              {#each store.cycles as c (c.id)}
+                <option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>
+              {/each}
+            </select>
+          </label>
         </div>
 
         {#if store.epics.length}

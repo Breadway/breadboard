@@ -37,6 +37,16 @@
   let arKey = $state("");
   let arName = $state("");
 
+  // new cycle form
+  let ncName = $state("");
+  let ncStart = $state("");
+  let ncEnd = $state("");
+
+  function cycleCounts(id: number) {
+    const all = store.issues.filter((i) => i.cycle_id === id);
+    return { total: all.length, done: all.filter((i) => i.status === "done").length };
+  }
+
   onMount(() => {
     Promise.all([
       store.loadSettings(),
@@ -94,6 +104,17 @@
       await api.reconcile();
       store.flash("reconcile queued");
     });
+
+  const createCycle = () =>
+    run(async () => {
+      await api.createCycle({ name: ncName.trim(), starts_on: ncStart, ends_on: ncEnd });
+      ncName = "";
+      ncStart = "";
+      ncEnd = "";
+    });
+
+  const toggleCycle = (id: number, closed: boolean) =>
+    run(() => (closed ? api.startCycle(id) : api.endCycle(id)));
 </script>
 
 <div class="wrap">
@@ -201,6 +222,53 @@
           Creates the project if the key is free, enables sync, and imports the repo's issues.
           Register a webhook at <code>{store.serverBase}/webhooks/forgejo</code> for real-time updates
           (the reconcile pass is the fallback).
+        </p>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>Cycles &amp; releases</h2>
+      <table>
+        <thead>
+          <tr><th>Name</th><th>Dates</th><th>Issues</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+          {#each store.cycles as c (c.id)}
+            {@const counts = cycleCounts(c.id)}
+            <tr>
+              <td>{c.name}</td>
+              <td class="dim mono">{c.starts_on} → {c.ends_on}</td>
+              <td class="dim">{counts.done}/{counts.total} done</td>
+              <td><span class="badge" class:on={!c.closed} class:off={c.closed}>{c.closed ? "closed" : "open"}</span></td>
+              <td class="right">
+                <button disabled={busy} onclick={() => toggleCycle(c.id, c.closed)}>
+                  {c.closed ? "Reopen" : "Close & archive"}
+                </button>
+              </td>
+            </tr>
+          {:else}
+            <tr><td colspan="5" class="dim">No cycles yet.</td></tr>
+          {/each}
+        </tbody>
+      </table>
+      <div class="add-form">
+        <span class="add-label">New cycle</span>
+        <div class="add-row">
+          <input placeholder="Name (e.g. BOS 0.6.2)" bind:value={ncName} style="width:200px" />
+          <input type="date" bind:value={ncStart} />
+          <input type="date" bind:value={ncEnd} />
+          <button
+            class="primary"
+            disabled={busy || !ncName.trim() || !ncStart || !ncEnd}
+            onclick={createCycle}
+          >
+            Add cycle
+          </button>
+        </div>
+        <p class="hint">
+          A cycle spans every project — use it for a release like "BOS 0.6.2" that pulls in work
+          from several repos. Closing one archives its done issues off the default board/backlog
+          view; they're still there by picking that cycle from the header filter.
         </p>
       </div>
     </section>
