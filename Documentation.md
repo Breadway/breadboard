@@ -171,7 +171,7 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 | `epic`, `cycle`, `priority`, `estimate` | n/a | breadboard-only |
 | `links` (`blocks`/`blocked-by`/`relates-to`) | n/a | breadboard-only |
 | `links` (`closes`/`closed-by`) | a synced PR's body: closing keywords (Forgejo/GitHub convention) followed by either a Forgejo issue number ("Closes #4") or breadboard's own key ("Fixes ECO-4", agents/humans naturally reference the key they can see) | inbound-derived; re-parsed on every sync of that PR, not just import |
-| comments | issue/PR comments | both (`external_id` dedups the echo; a matching unlinked local comment is claimed) |
+| comments | issue/PR comments | both (see **Comment echo suppression** below) |
 | PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done`. A PR's closing references become `closes`/`closed-by` links, and a PR with one is hidden from the board/backlog; its state surfaces as a badge on the issue's own card instead. When the PR itself flips to `done`, every issue it closes is cascaded to `done` too (best-effort closing their Forgejo issue): Forgejo only reliably auto-closes the *first* issue in a comma-separated "Closes #a, #b" list, so breadboard doesn't rely on that |
 | `milestone` | milestone title (plain string on the issue) | inbound only |
 
@@ -188,6 +188,24 @@ field the two sides disagree on, a `sync.drift` event fires in addition to the
 timestamp. This is the live signal that a webhook was missed. It fires whether
 Forgejo or breadboard won the field. The webhook path stays silent: an
 out-of-order webhook is not a missed one.
+
+**Comment echo suppression:** a breadboard-authored comment is stored with a
+null `external_id`, then writeback records the Forgejo comment id on it. When
+Forgejo echoes that comment back over the `issue_comment` webhook, breadboard
+recognises it two ways and never duplicates it:
+
+- if the writeback id is already recorded, the `(issue_id, external_id)` unique
+  key turns the insert into an in-place update;
+- if the echo wins the race with writeback (id not recorded yet), the newest
+  unlinked local comment with the same body on that issue is claimed and gets
+  the `external_id`. Either way the original `author_id` is kept, so the
+  comment is not re-attributed to the writeback account.
+
+A comment that originates in Forgejo is inserted once (keyed by `external_id`)
+and is never written back: only `POST /api/issues/{key}/comments` triggers
+writeback, and the webhook path does not. Redelivery and edits (same Forgejo id,
+new body) update the row in place. Known gaps: comment deletions and comments on
+an issue whose creation webhook was missed are not reconciled (webhook only).
 
 **Scope:** only repos in `repo_sync_state` with `enabled = 1`, each mapped to a
 project via `projects.forgejo_repo` (`POST /api/repos`). Issues in an enabled
