@@ -230,3 +230,14 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `create_issue` / `update_issue` / `move_issue` / `comment`, `activity`,
 `list_{projects,epics,cycles,repos}`, `create_project`, `add_repo`, `reconcile`,
 `import_markdown`. See `apps/mcp/README.md`.
+
+## Operations
+
+Deployed as one container (`packaging/`) behind a TLS proxy. The database is a
+single SQLite file in WAL mode on the `breadboard-data` volume.
+
+**Backups:** the `litestream` service in `packaging/compose.yaml` continuously
+replicates the database (file replica by default, S3-compatible optional). The
+server sets `journal_mode=WAL` once and never checkpoints or switches journal
+modes by hand, so Litestream owns checkpointing. Restore procedure and the
+row-count verification step are in `packaging/DEPLOY.md`.

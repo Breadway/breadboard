@@ -1,0 +1,21 @@
+[Unit]
+Description=Litestream continuous backup for breadboard.db
+After=network-online.target breadboard-server.service
+Wants=network-online.target
+# Not a hard dependency: Litestream can start replicating whenever the
+# database file exists, and should keep running if the server restarts.
+
+[Service]
+Type=simple
+# Point -config at a copy of packaging/litestream.yml. Adjust the `path`
+# inside it to match `database_path` in breadboard.toml if you are not using
+# the container image default.
+ExecStart=/usr/local/bin/litestream replicate -config /etc/breadboard/litestream.yml
+Restart=on-failure
+RestartSec=5
+# S3 credentials, if used, go here or in an EnvironmentFile.
+# Environment=LITESTREAM_ACCESS_KEY_ID=...
+# Environment=LITESTREAM_SECRET_ACCESS_KEY=...
+
+[Install]
+WantedBy=default.target

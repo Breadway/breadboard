@@ -1,24 +1,37 @@
 # Litestream continuous-replication config for the breadboard SQLite database.
 #
-# Run alongside breadboard-server (sidecar container, or
-# `litestream replicate` as a second systemd unit). Restore with
-# `litestream restore -o /path/to/breadboard.db <replica-url>`.
+# Used by the `litestream` service in packaging/compose.yaml. It can also run as
+# a standalone `litestream replicate` process (see
+# packaging/systemd/breadboard-litestream.service).
 #
-# Point `path` at the same file as `database_path` in breadboard.toml
-# (default: $XDG_DATA_HOME/breadboard/breadboard.db).
+# `path` must match `database_path` in breadboard.toml. In the container image
+# that is /var/lib/breadboard/breadboard.db (BREADBOARD_DATABASE_PATH in
+# packaging/Containerfile); Litestream reads the -wal and -shm files alongside
+# it on the same volume.
+#
+# Restore:  litestream restore -o /path/to/breadboard.db <replica-url>
+# Full runbook and verification steps: packaging/DEPLOY.md.
 
 dbs:
   - path: /var/lib/breadboard/breadboard.db
     replicas:
-      # Local filesystem replica (e.g. a mounted backup volume).
+      # Local filesystem replica. In compose this directory is bind-mounted
+      # from BREADBOARD_BACKUP_DIR on the host, so it survives container
+      # recreation. Point that at real storage (a separate disk or a mount
+      # that is itself backed up), not the same volume as the live database.
       - type: file
         path: /var/backups/breadboard/litestream
+        retention: 168h            # keep 7 days of restore points
+        snapshot-interval: 24h     # a fresh full snapshot once a day
 
-      # Optional off-box replica. Fill in and uncomment for an
-      # S3-compatible target (MinIO / Backblaze B2 / etc).
+      # Optional off-box replica. Uncomment and fill in for an S3-compatible
+      # target (MinIO / Backblaze B2 / Cloudflare R2 / AWS S3). Credentials
+      # come from LITESTREAM_ACCESS_KEY_ID / LITESTREAM_SECRET_ACCESS_KEY in
+      # the environment (wired through in packaging/compose.yaml).
       # - type: s3
       #   bucket: breadboard-backups
       #   path: breadboard.db
       #   endpoint: https://s3.example.com
-      #   access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
-      #   secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+      #   region: auto
+      #   retention: 168h
+      #   snapshot-interval: 24h
