@@ -1,4 +1,4 @@
-//! Request shapes for the REST API — shared by the server and by
+//! Request shapes for the REST API: shared by the server and by
 //! `breadboard-client` (the CLI/TUI). HTTP-flavoured, but no I/O.
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,7 @@ fn non_empty(s: &str) -> Result<(), String> {
     }
 }
 
-/// Move an issue to a different project — `project` is a key or numeric id,
+/// Move an issue to a different project: `project` is a key or numeric id,
 /// same resolution as `NewIssue::project`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MoveProject {
@@ -87,7 +87,7 @@ pub struct NewCycle {
     pub ends_on: chrono::NaiveDate,
 }
 
-/// Only `title` is required — the "create a card with just a title" rule.
+/// Only `title` is required: the "create a card with just a title" rule.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NewIssue {
     pub title: String,

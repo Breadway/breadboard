@@ -220,7 +220,7 @@ async fn breadboard_comment_absorbs_its_own_echo() {
         .unwrap();
     let issue = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
 
-    // breadboard-authored comment (no external_id — Forgejo not configured in tests).
+    // breadboard-authored comment (no external_id; Forgejo not configured in tests).
     let local = store::create_comment(&app.db, issue.id, None, "looks good to me")
         .await
         .unwrap();

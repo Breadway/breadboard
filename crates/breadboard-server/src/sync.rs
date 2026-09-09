@@ -40,7 +40,7 @@ const CLOSE_KEYWORDS: &[&str] = &[
 
 /// Scan `text` for a closing keyword, then for each occurrence extract every
 /// consecutive reference token that follows (comma/"and"/whitespace
-/// separated — "closes #4, #5", "fixes ECO-4 and ECO-5"). `extract` is tried
+/// separated: "closes #4, #5", "fixes ECO-4 and ECO-5"). `extract` is tried
 /// against the lowercased remainder at each token boundary and returns
 /// `Some((value, bytes_consumed))` on a match.
 fn scan_after_close_keywords<T>(
@@ -98,7 +98,7 @@ fn dedup(mut v: Vec<i64>) -> Vec<i64> {
 }
 
 /// Forgejo issue numbers referenced by a closing keyword ("closes #4",
-/// "Fixes #4, #5") in a PR body — the same convention Forgejo/GitHub use for
+/// "Fixes #4, #5") in a PR body: the same convention Forgejo/GitHub use for
 /// auto-closing.
 fn parse_closes_refs(text: &str) -> Vec<i64> {
     dedup(scan_after_close_keywords(text, |tail| {
@@ -115,7 +115,7 @@ fn parse_closes_refs(text: &str) -> Vec<i64> {
 /// governed by a closing keyword. Agents and humans alike naturally
 /// reference the key they can actually see (in `board`/`list_issues`, on the
 /// card) rather than the underlying Forgejo issue number the two only
-/// coincidentally share early on — without this, a PR body like "Fixes
+/// coincidentally share early on: without this, a PR body like "Fixes
 /// ECO-17" silently fails to link at all.
 fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
     let prefix = format!("{}-", project_key.to_ascii_lowercase());
@@ -131,12 +131,12 @@ fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
 
 /// Sync a PR's "closes" relationships: link it to the issue(s) its body
 /// references (so the board shows the connection instead of two
-/// seemingly-unrelated cards), and — since Forgejo doesn't reliably
+/// seemingly-unrelated cards), and, since Forgejo doesn't reliably
 /// auto-close every issue in a comma-separated "Closes #a, #b" list
-/// (confirmed: only the first one actually closes) — cascade breadboard's
+/// (confirmed: only the first one actually closes), cascade breadboard's
 /// own `done` status onto all of them once the PR itself is merged/closed,
 /// best-effort closing their Forgejo issues too. Idempotent (`add_link` is
-/// `INSERT OR IGNORE`, and the status cascade no-ops once already done) —
+/// `INSERT OR IGNORE`, and the status cascade no-ops once already done):
 /// safe to call on every sync of a PR, not just its creation.
 async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str, pr_done: bool) {
     let mut targets = Vec::new();
@@ -224,7 +224,7 @@ pub async fn apply_issue(
     let labels = fg.label_names();
 
     let Some(before) = existing else {
-        // New to breadboard — but first check whether this is the echo of an
+        // New to breadboard, but first check whether this is the echo of an
         // issue breadboard itself just created (writeback_new_issue's own
         // link_issue call can lose this race to the webhook). If so, claim
         // that pending local issue instead of importing a duplicate.
@@ -434,7 +434,7 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
 
 /// If a newly-created breadboard issue belongs to a project mapped to an enabled
 /// repo, create it on Forgejo too and link it. Returns the linked issue (or the
-/// original if nothing was pushed). Best-effort — logs on failure.
+/// original if nothing was pushed). Best-effort: logs on failure.
 pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
     if issue.forgejo_ref.is_some() || !state.forgejo.is_configured() {
         return issue;
@@ -510,7 +510,7 @@ pub async fn move_project(
                         owner,
                         repo,
                         old.number,
-                        &format!("Moved to {} — closing here.", issue.key),
+                        &format!("Moved to {}: closing here.", issue.key),
                     )
                     .await;
                 if let Err(e) = state
@@ -536,7 +536,7 @@ pub async fn move_project(
 }
 
 /// Push a breadboard-authored comment to Forgejo, recording the returned id so
-/// the webhook echo is deduped. Best-effort — logs on failure.
+/// the webhook echo is deduped. Best-effort: logs on failure.
 pub async fn writeback_comment(state: &AppState, issue: &Issue, comment_id: i64, body: &str) {
     let Some(fref) = &issue.forgejo_ref else { return };
     if !state.forgejo.is_configured() {

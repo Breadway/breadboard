@@ -1,4 +1,4 @@
-# breadboard — API & contract
+# breadboard: API & contract
 
 Source of truth for the REST surface, the SSE event types, the `bread.board.*`
 event names, and the Forgejo sync rules. `cargo run -p xtask -- check-docs`
@@ -11,7 +11,7 @@ issue drawer with activity timeline · notification bell · settings · `cmd-k`)
 the `breadboard` CLI + `ratatui` TUI (device-flow auth), the Forgejo sync engine
 (bidirectional issues / comments / PR mirroring / milestone), and notifications
 (assigned / @mention / cycle, with a `notified` SSE event, browser pop-ups, and
-best-effort `bread-emit` for a co-located breadd — see `modules/breadboard.lua`).
+best-effort `bread-emit` for a co-located breadd; see `modules/breadboard.lua`).
 
 Web board keys: `h`/`l`/`←`/`→` column, `j`/`k`/`↑`/`↓` card, `[`/`]` move card
 between statuses, `enter`/`e` open, `c` command palette.
@@ -41,7 +41,7 @@ Link kinds: `blocks` · `blocked-by` · `relates-to`.
 ## HTTP
 
 Base URL: the server's `public_url`. JSON in/out. `/healthz` and `/events` are
-public; everything under `/api` requires auth — a session cookie (`bb_session`,
+public; everything under `/api` requires auth: a session cookie (`bb_session`,
 web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 
 ### Implemented
@@ -74,16 +74,16 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
-| `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id) — moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
-| `POST` | `/api/issues/{key}/comments` | `{ body }` — adds a comment; pushed to Forgejo if the issue is linked. `201` |
+| `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
+| `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
-| `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }` — maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
+| `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
 | `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202` |
-| `POST` | `/api/import` | `{ project, markdown, dry_run? }` — `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
-| `POST` | `/webhooks/forgejo` | inbound sync — **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
+| `POST` | `/api/import` | `{ project, markdown, dry_run? }`: `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
+| `POST` | `/webhooks/forgejo` | inbound sync: **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 
-**IssuePatch** — every field optional; absent = unchanged. `title`, `body`,
+**IssuePatch**: every field optional; absent = unchanged. `title`, `body`,
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
 `cycle_id` accept `null` to clear. `labels` and `links` replace the whole set.
 
@@ -93,8 +93,8 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | --- | --- | --- |
 | `POST` | `/auth/device` | start: `{ device_code, user_code, verification_uri, verification_uri_complete, expires_in, interval }` |
 | `GET` | `/auth/device?user_code=…` | approval page (bounces through Forgejo OAuth if not signed in) |
-| `POST` | `/auth/device/approve` | **session-authed** — `{ user_code }`; mints a `cli` token and attaches it to the pending code |
-| `POST` | `/auth/device/token` | poll — `{ device_code }` → `200 { access_token }` (one-time), `202 { status: "authorization_pending" }`, `410` expired, `404` unknown |
+| `POST` | `/auth/device/approve` | **session-authed**: `{ user_code }`; mints a `cli` token and attaches it to the pending code |
+| `POST` | `/auth/device/token` | poll: `{ device_code }` → `200 { access_token }` (one-time), `202 { status: "authorization_pending" }`, `410` expired, `404` unknown |
 
 ### Notifications
 
@@ -144,7 +144,7 @@ webhooks → `POST /webhooks/forgejo`, HMAC-verified against
 issues **and** PRs); apply anything the webhook path missed, then advance
 `last_synced_at`. `POST /api/sync/reconcile` runs a pass on demand.
 
-**Writeback:** with `forgejo.api_token` set —
+**Writeback:** with `forgejo.api_token` set:
 
 - creating an issue in a project mapped to an enabled repo also creates it on
   Forgejo and links it (`forgejo_ref`); issues in a repo-less project (e.g. the
@@ -161,11 +161,11 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 | `status` | open (`backlog`–`review`) ↔ closed (`done`); a fine-grained open status is preserved, reopen → `todo` | both |
 | `assignee_id` | first assignee, mapped by `forgejo_id` (unknown users are imported) | both |
 | `labels` | labels (created on Forgejo if missing) | both |
-| `epic`, `cycle`, `priority`, `estimate` | — | breadboard-only |
-| `links` (`blocks`/`blocked-by`/`relates-to`) | — | breadboard-only |
-| `links` (`closes`/`closed-by`) | a synced PR's body — closing keywords (Forgejo/GitHub convention) followed by either a Forgejo issue number ("Closes #4") or breadboard's own key ("Fixes ECO-4" — agents/humans naturally reference the key they can see) | inbound-derived; re-parsed on every sync of that PR, not just import |
+| `epic`, `cycle`, `priority`, `estimate` | n/a | breadboard-only |
+| `links` (`blocks`/`blocked-by`/`relates-to`) | n/a | breadboard-only |
+| `links` (`closes`/`closed-by`) | a synced PR's body: closing keywords (Forgejo/GitHub convention) followed by either a Forgejo issue number ("Closes #4") or breadboard's own key ("Fixes ECO-4", agents/humans naturally reference the key they can see) | inbound-derived; re-parsed on every sync of that PR, not just import |
 | comments | issue/PR comments | both (`external_id` dedups the echo; a matching unlinked local comment is claimed) |
-| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done`. A PR's closing references become `closes`/`closed-by` links, and a PR with one is hidden from the board/backlog — its state surfaces as a badge on the issue's own card instead. When the PR itself flips to `done`, every issue it closes is cascaded to `done` too (best-effort closing their Forgejo issue): Forgejo only reliably auto-closes the *first* issue in a comma-separated "Closes #a, #b" list, so breadboard doesn't rely on that |
+| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done`. A PR's closing references become `closes`/`closed-by` links, and a PR with one is hidden from the board/backlog; its state surfaces as a badge on the issue's own card instead. When the PR itself flips to `done`, every issue it closes is cascaded to `done` too (best-effort closing their Forgejo issue): Forgejo only reliably auto-closes the *first* issue in a comma-separated "Closes #a, #b" list, so breadboard doesn't rely on that |
 | `milestone` | milestone title (plain string on the issue) | inbound only |
 
 **Conflict resolution:** per-field, the side with the newer issue-level
@@ -189,7 +189,7 @@ repo with no mapped project are skipped with a warning.
 | Command | Notes |
 | --- | --- |
 | `ping` | connectivity check |
-| `auth login` | device flow — prints a code + URL, opens the browser, polls until approved |
+| `auth login` | device flow: prints a code + URL, opens the browser, polls until approved |
 | `auth logout` · `auth status` | |
 | `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name |
 | `mv <key> <status>` | |
@@ -205,18 +205,18 @@ repo with no mapped project are skipped with a warning.
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
 | `sync` | `POST /api/sync/reconcile` |
 | `import <file.md> --project <KEY> [--dry-run]` | markdown outline → epics + issues |
-| `tui` | full-screen board — `hjkl`/arrows move, `[` `]` move a card between statuses, `enter` detail, `r` refresh, `q` quit |
+| `tui` | full-screen board: `hjkl`/arrows move, `[` `]` move a card between statuses, `enter` detail, `r` refresh, `q` quit |
 
 ## Desktop shell
 
-`apps/desktop/` — a Tauri 2 window that loads the live site (so cookies + OAuth
+`apps/desktop/`: a Tauri 2 window that loads the live site (so cookies + OAuth
 work unchanged). Global shortcuts: `Ctrl+Shift+B` toggle window, `Ctrl+Shift+N`
 show + open the new-issue palette (the SPA acts on a `#new` URL hash). Built on
 demand, not in CI. See `apps/desktop/README.md`.
 
 ## MCP server
 
-`apps/mcp/` — a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
+`apps/mcp/`: a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
 `@breadboard/api-client`, so an MCP client (Claude, …) can read and drive the
 board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `BREADBOARD_TOKEN`. Tools: `whoami`, `list_issues` / `get_issue` / `board`,

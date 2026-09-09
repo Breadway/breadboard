@@ -398,7 +398,7 @@ pub async fn delete_epic(db: &SqlitePool, id: i64) -> AppResult<()> {
 }
 
 /// Per-status child-issue counts for an epic (or, with `epic_id = None`, for
-/// issues with no epic — the backlog).
+/// issues with no epic; the backlog).
 pub async fn epic_progress(db: &SqlitePool, epic_id: i64) -> AppResult<[(String, i64); 5]> {
     let rows: Vec<(String, i64)> = sqlx::query_as(
         "SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status",
@@ -667,7 +667,7 @@ pub async fn create_issue(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(AppError::bad_request(
-            "no project exists yet — create one first",
+            "no project exists yet: create one first",
         ))?,
     };
 
@@ -947,7 +947,7 @@ pub async fn move_issue_project(
 
 /// Add a single link if it doesn't already exist, without touching the
 /// issue's other links (unlike `IssuePatch.links`, which replaces the whole
-/// set — this is for sync-driven links like `closes`/`closed-by`).
+/// set; this is for sync-driven links like `closes`/`closed-by`).
 pub async fn add_link(
     db: &SqlitePool,
     issue_id: i64,

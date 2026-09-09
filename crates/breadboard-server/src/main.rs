@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     store::ensure_seed(&db).await?;
 
     if auth::dev_login_enabled() {
-        tracing::warn!("BREADBOARD_DEV_LOGIN=1 — /auth/dev-login is enabled (insecure, dev only)");
+        tracing::warn!("BREADBOARD_DEV_LOGIN=1: /auth/dev-login is enabled (insecure, dev only)");
     }
 
     let listen = config.listen.clone();
@@ -50,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
             "forgejo reconcile loop started"
         );
     } else {
-        tracing::info!("forgejo.api_token unset — sync disabled");
+        tracing::info!("forgejo.api_token unset: sync disabled");
     }
 
     let app = http::router(state);

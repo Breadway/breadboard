@@ -20,7 +20,7 @@
 
   // byStatus() is sorted most-recently-updated first, so this keeps the
   // freshest completions visible. Done otherwise grows without bound since
-  // issues never leave it — the full history is still one click away in Backlog.
+  // issues never leave it; the full history is still one click away in Backlog.
   const totalCounts = $derived(STATUSES.map((s) => store.byStatus(s).length));
   const columns = $derived(
     STATUSES.map((s) => {

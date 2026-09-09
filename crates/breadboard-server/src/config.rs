@@ -1,4 +1,4 @@
-//! `breadboard.toml` — every key optional, sane defaults (ecosystem convention).
+//! `breadboard.toml`: every key optional, sane defaults (ecosystem convention).
 //!
 //! Search order for the file:
 //!   1. `$BREADBOARD_CONFIG` if set
@@ -22,7 +22,7 @@ pub struct Config {
     /// Path to the SQLite database file.
     pub database_path: PathBuf,
     /// Directory of the built web SPA to serve at `/`. When unset (or missing),
-    /// only the API is served — the Vite dev server handles the UI in dev.
+    /// only the API is served; the Vite dev server handles the UI in dev.
     pub web_dir: Option<PathBuf>,
     pub forgejo: ForgejoConfig,
     pub notifications: NotificationConfig,

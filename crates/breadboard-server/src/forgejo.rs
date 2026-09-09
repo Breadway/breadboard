@@ -267,7 +267,7 @@ impl Forgejo {
         Ok(())
     }
 
-    /// Create an issue (bare — set labels afterward with [`Self::replace_labels`],
+    /// Create an issue (bare; set labels afterward with [`Self::replace_labels`],
     /// since the create endpoint only takes label *ids*). Returns the new issue.
     pub async fn create_issue(
         &self,
@@ -315,7 +315,7 @@ pub fn split_repo(full: &str) -> anyhow::Result<(&str, &str)> {
         .ok_or_else(|| anyhow!("repo must be `owner/name`, got {full:?}"))
 }
 
-/// The `pull_request` object in a `pull_request` webhook payload — same fields
+/// The `pull_request` object in a `pull_request` webhook payload: same fields
 /// we care about as an issue, plus `merged`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct FgPrObject {

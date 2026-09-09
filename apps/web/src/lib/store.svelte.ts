@@ -58,11 +58,11 @@ class Store {
   get filtered(): Issue[] {
     return this.issues.filter((i) => {
       // A PR that closes a real issue collapses into that issue's card
-      // instead of showing as a second, seemingly-unrelated card — its
+      // instead of showing as a second, seemingly-unrelated card; its
       // status surfaces there as a small badge instead (see Card.svelte).
       if (i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
       // Once a cycle (release) ships and is closed, its done work archives
-      // off the default board/backlog view instead of piling up forever —
+      // off the default board/backlog view instead of piling up forever;
       // still there if you explicitly pick that cycle from the filter.
       if (!this.filterCycle && i.status === "done" && i.cycle_id) {
         const cycle = this.cycles.find((c) => c.id === i.cycle_id);

@@ -266,7 +266,7 @@
           </button>
         </div>
         <p class="hint">
-          A cycle spans every project — use it for a release like "BOS 0.6.2" that pulls in work
+          A cycle spans every project: use it for a release like "BOS 0.6.2" that pulls in work
           from several repos. Closing one archives its done issues off the default board/backlog
           view; they're still there by picking that cycle from the header filter.
         </p>

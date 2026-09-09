@@ -1,4 +1,4 @@
-//! Shared domain types for breadboard — the issue tracker for the bread ecosystem.
+//! Shared domain types for breadboard: the issue tracker for the bread ecosystem.
 //!
 //! This crate is deliberately dependency-light (serde + chrono only). It is the
 //! contract shared by `breadboard-server`, `breadboard-client`, and the CLI/TUI.
@@ -121,7 +121,7 @@ pub enum LinkKind {
     BlockedBy,
     RelatesTo,
     /// A synced PR closes this issue (parsed from its body's closing
-    /// keywords, e.g. "Closes #4") — links the two Forgejo objects breadboard
+    /// keywords, e.g. "Closes #4"); links the two Forgejo objects breadboard
     /// otherwise mirrors as unrelated-looking cards.
     Closes,
     ClosedBy,
@@ -150,7 +150,7 @@ impl LinkKind {
     }
 }
 
-/// Where a mutation originated — used for sync-loop prevention.
+/// Where a mutation originated: used for sync-loop prevention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SyncSource {
@@ -222,7 +222,7 @@ pub struct Epic {
     pub updated_at: DateTime<Utc>,
 }
 
-/// A cycle is breadboard's sprint. Cycles are optional — nothing forces an
+/// A cycle is breadboard's sprint. Cycles are optional; nothing forces an
 /// issue into one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cycle {
@@ -248,7 +248,7 @@ pub struct IssueLink {
     pub target_id: i64,
 }
 
-/// The core entity. `key` (e.g. `BREAD-42`) is breadboard's own counter — it is
+/// The core entity. `key` (e.g. `BREAD-42`) is breadboard's own counter; it is
 /// *not* the Forgejo issue number (that lives in `forgejo_ref`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Issue {

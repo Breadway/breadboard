@@ -79,7 +79,7 @@ fn strip_md(s: &str) -> String {
         match c {
             '`' | '*' => {}
             '[' => {
-                // [text](url) — keep text, drop the rest of the link.
+                // [text](url): keep text, drop the rest of the link.
                 let mut text = String::new();
                 for ic in chars.by_ref() {
                     if ic == ']' {

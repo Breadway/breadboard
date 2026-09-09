@@ -1,5 +1,5 @@
 name = "breadboard"
-description = "Issue tracker for the bread ecosystem — a Linear-lite layer over Forgejo"
+description = "Issue tracker for the bread ecosystem: a Linear-lite layer over Forgejo"
 binaries = ["breadboard-server", "breadboard"]
 system_deps = ["sqlite", "openssl"]
 optional_system_deps = []
