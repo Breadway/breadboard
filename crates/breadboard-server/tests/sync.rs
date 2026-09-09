@@ -241,6 +241,132 @@ async fn breadboard_comment_absorbs_its_own_echo() {
     assert_eq!(comments[0].external_id, Some(555));
 }
 
+/// The non-race half of direction 1: writeback has already recorded the
+/// external_id by the time Forgejo echoes the comment back. The echo must
+/// update in place (no duplicate) and must not re-attribute the comment to
+/// the webhook's author.
+#[tokio::test]
+async fn breadboard_comment_echo_after_writeback_recorded() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    sync::apply_issue(
+        &app.state,
+        repo,
+        &fg_issue(3, "issue with comments", Utc::now()),
+        SyncSource::ForgejoWebhook,
+    )
+    .await
+    .unwrap();
+    let issue = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
+
+    // Local comment by breadboard user 1, then writeback records its Forgejo id.
+    let local = store::create_comment(&app.db, issue.id, Some(1), "ship it")
+        .await
+        .unwrap();
+    store::set_comment_external_id(&app.db, local.id, 900)
+        .await
+        .unwrap();
+
+    // Forgejo echoes it back, attributed to the service account (user 7).
+    let echo = FgComment {
+        id: 900,
+        body: "ship it".into(),
+        user: Some(user("breadboard-bot", 7)),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: (Utc::now() + Duration::seconds(1)).to_rfc3339(),
+    };
+    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+
+    let comments = store::list_comments(&app.db, issue.id).await.unwrap();
+    assert_eq!(comments.len(), 1, "echo updated in place, no dup");
+    assert_eq!(comments[0].external_id, Some(900));
+    assert_eq!(comments[0].author_id, Some(1), "author stays the breadboard user");
+}
+
+/// Direction 2: a comment that originates in Forgejo is imported exactly once
+/// and repeated webhooks for the same comment id are idempotent.
+#[tokio::test]
+async fn forgejo_origin_comment_imported_once() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    sync::apply_issue(
+        &app.state,
+        repo,
+        &fg_issue(4, "forgejo side chat", Utc::now()),
+        SyncSource::ForgejoWebhook,
+    )
+    .await
+    .unwrap();
+    let issue = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
+
+    let fg_comment = FgComment {
+        id: 1234,
+        body: "found it in the logs".into(),
+        user: Some(user("otherdev", 88)),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    sync::apply_comment(&app.state, repo, 4, &fg_comment)
+        .await
+        .unwrap();
+    // Redelivery (Forgejo retry, or a reconcile-style re-apply): still one row.
+    sync::apply_comment(&app.state, repo, 4, &fg_comment)
+        .await
+        .unwrap();
+
+    let comments = store::list_comments(&app.db, issue.id).await.unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!(comments[0].external_id, Some(1234));
+    assert!(comments[0].author_id.is_some(), "attributed to the Forgejo author");
+}
+
+/// The edit case: an edited Forgejo comment (same id, new body) updates the
+/// existing row rather than creating a second one.
+#[tokio::test]
+async fn forgejo_comment_edit_updates_in_place() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    sync::apply_issue(
+        &app.state,
+        repo,
+        &fg_issue(5, "edited comment", Utc::now()),
+        SyncSource::ForgejoWebhook,
+    )
+    .await
+    .unwrap();
+    let issue = store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap();
+
+    let mut c = FgComment {
+        id: 42,
+        body: "frist".into(),
+        user: Some(user("typo", 5)),
+        created_at: Utc::now().to_rfc3339(),
+        updated_at: Utc::now().to_rfc3339(),
+    };
+    sync::apply_comment(&app.state, repo, 5, &c).await.unwrap();
+
+    c.body = "first".into();
+    c.updated_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
+    sync::apply_comment(&app.state, repo, 5, &c).await.unwrap();
+
+    let comments = store::list_comments(&app.db, issue.id).await.unwrap();
+    assert_eq!(comments.len(), 1, "edit updates in place");
+    assert_eq!(comments[0].body, "first");
+    assert_eq!(comments[0].external_id, Some(42));
+}
+
 #[test]
 fn status_boundary_mapping() {
     // open keeps a fine-grained status; closed forces done; reopen -> todo.
