@@ -126,7 +126,7 @@ browser notification when permission is granted.
 | `card.deleted` | `bread.board.card.deleted` | `id`, `key` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
-| `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field` |
+| `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
 | `notified` | `bread.board.notified` | `user_id` (clients filter by their own id) |
 
 ---
@@ -171,9 +171,16 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 **Conflict resolution:** per-field, the side with the newer issue-level
 `updated_at` wins; a value that already matches is a no-op (this absorbs the
 webhook echo of a writeback). Applied changes append a `sync_log` row
-(`field`, `old_value`, `new_value`, `source`, `actor_id`, `at`). When breadboard
-is the newer side and the two still differ, a `sync.drift` event fires and no
-change is applied (writeback, or the next breadboard edit, resolves it).
+(`field`, `old_value`, `new_value`, `source`, `actor_id`, `at`). When Forgejo is
+the newer side its value is applied; when breadboard is the newer side no change
+is applied and writeback (or the next breadboard edit) resolves it.
+
+**Drift signal:** when the *reconcile* pass (not the webhook fast path) finds a
+field the two sides disagree on, a `sync.drift` event fires in addition to the
+`sync_log` row: it carries `field`, both values, the winning side, and a
+timestamp. This is the live signal that a webhook was missed. It fires whether
+Forgejo or breadboard won the field. The webhook path stays silent: an
+out-of-order webhook is not a missed one.
 
 **Scope:** only repos in `repo_sync_state` with `enabled = 1`, each mapped to a
 project via `projects.forgejo_repo` (`POST /api/repos`). Issues in an enabled

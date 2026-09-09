@@ -33,12 +33,19 @@ pub enum BoardEvent {
     CycleStarted { id: i64, name: String, issues: i64 },
     #[serde(rename = "cycle.ended")]
     CycleEnded { id: i64, name: String },
-    /// The reconcile pass found a divergence the webhook path missed.
+    /// The reconcile pass found a field where Forgejo and breadboard disagree,
+    /// i.e. a webhook the fast path missed. `winner` is the side whose value is
+    /// authoritative (`"breadboard"` or `"forgejo"`), decided by issue-level
+    /// `updated_at`; when Forgejo wins the value is also applied.
     #[serde(rename = "sync.drift")]
     SyncDrift {
         issue_id: i64,
         key: String,
         field: String,
+        breadboard_value: String,
+        forgejo_value: String,
+        winner: String,
+        at: String,
     },
     /// A user has a new in-app notification. Clients filter by their own id.
     #[serde(rename = "notified")]
