@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b6ea5"/>
+      <stop offset="1" stop-color="#2b527d"/>
+    </linearGradient>
+    <linearGradient id="crust" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6a15c"/>
+      <stop offset="1" stop-color="#c9803c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" rx="224" fill="url(#bg)"/>
+
+  <!-- loaf -->
+  <g transform="translate(512 540)">
+    <path transform="translate(14 16)" fill="#1f3a5a" opacity="0.35"
+      d="M -300 40
+         C -300 -150 -170 -250 0 -250
+         C 170 -250 300 -150 300 40
+         C 300 90 268 120 210 120
+         L -210 120
+         C -268 120 -300 90 -300 40 Z"/>
+    <path fill="url(#crust)" stroke="#a5652c" stroke-width="14"
+      d="M -300 40
+         C -300 -150 -170 -250 0 -250
+         C 170 -250 300 -150 300 40
+         C 300 90 268 120 210 120
+         L -210 120
+         C -268 120 -300 90 -300 40 Z"/>
+    <!-- score marks -->
+    <g stroke="#8a5424" stroke-width="26" stroke-linecap="round" opacity="0.85">
+      <line x1="-150" y1="-150" x2="-70" y2="10"/>
+      <line x1="-30"  y1="-185" x2="50"  y2="-15"/>
+      <line x1="90"   y1="-165" x2="170" y2="5"/>
+    </g>
+    <!-- base highlight -->
+    <path fill="#f2c58a" opacity="0.5"
+      d="M -286 30 C -286 -140 -160 -232 0 -232 C 160 -232 286 -140 286 30
+         C 286 10 250 -20 0 -20 C -250 -20 -286 10 -286 30 Z"/>
+  </g>
+</svg>
