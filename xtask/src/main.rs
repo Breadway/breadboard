@@ -61,7 +61,15 @@ fn all_event_names() -> Vec<&'static str> {
         CardDeleted { id: 0, key: String::new() },
         CycleStarted { id: 0, name: String::new(), issues: 0 },
         CycleEnded { id: 0, name: String::new() },
-        SyncDrift { issue_id: 0, key: String::new(), field: String::new() },
+        SyncDrift {
+            issue_id: 0,
+            key: String::new(),
+            field: String::new(),
+            breadboard_value: String::new(),
+            forgejo_value: String::new(),
+            winner: String::new(),
+            at: String::new(),
+        },
         Notified { user_id: 0 },
     ];
     samples.iter().map(|e| e.bread_event_name()).collect()

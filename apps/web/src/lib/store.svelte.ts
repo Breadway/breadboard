@@ -190,7 +190,7 @@ class Store {
         this.cycles = await api.listCycles();
         break;
       case "sync.drift":
-        this.flash(`sync drift on ${ev.key} (${ev.field})`);
+        this.flash(`sync drift on ${ev.key}: ${ev.field} (${ev.winner} won)`);
         break;
       case "notified":
         if (ev.user_id === this.me?.id) {

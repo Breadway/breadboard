@@ -4,8 +4,9 @@
 //! Conflict model: per-field, the side with the newer issue-level `updated_at`
 //! wins, and a value that already matches is a no-op (this absorbs the webhook
 //! echo of our own writeback). Every applied change is logged to `sync_log` by
-//! the store layer; when breadboard is the newer side and the two still differ,
-//! a `sync.drift` event is emitted.
+//! the store layer. A reconcile pass (not the webhook fast path) that finds a
+//! field the two sides disagree on also emits a `sync.drift` event, carrying
+//! both values and the winning side: the live signal that a webhook was missed.
 
 use anyhow::Context;
 use breadboard_core::{BoardEvent, Issue, IssueType, LinkKind, Project, Status, SyncSource};
@@ -275,49 +276,92 @@ pub async fn apply_issue(
         _ => true,
     };
 
-    // Diff the mapped fields.
+    // Diff the mapped fields. On a reconcile pass (not the webhook fast path),
+    // any field the two sides disagree on is drift: a webhook the fast path
+    // missed. Record it with both values and the winning side; Forgejo's value
+    // is still applied when Forgejo is the newer side.
     let mut patch = IssuePatch::default();
-    let mut drift: Vec<&'static str> = Vec::new();
+    let is_reconcile = source == SyncSource::ForgejoReconcile;
+    struct Drift {
+        field: &'static str,
+        breadboard_value: String,
+        forgejo_value: String,
+        fg_won: bool,
+    }
+    let mut drift: Vec<Drift> = Vec::new();
     let target_status = map_status(fg.is_closed(), before.status);
 
     macro_rules! field {
-        ($name:literal, $differs:expr, $apply:block) => {
+        ($name:literal, $differs:expr, $bb:expr, $fg:expr, $apply:block) => {
             if $differs {
                 if fg_newer {
                     $apply
-                } else {
-                    drift.push($name);
+                }
+                if is_reconcile {
+                    drift.push(Drift {
+                        field: $name,
+                        breadboard_value: $bb,
+                        forgejo_value: $fg,
+                        fg_won: fg_newer,
+                    });
                 }
             }
         };
     }
 
-    field!("title", fg.title.trim() != before.title, {
-        patch.title = Some(fg.title.trim().to_string());
+    let fg_title = fg.title.trim();
+    field!("title", fg_title != before.title, before.title.clone(), fg_title.to_string(), {
+        patch.title = Some(fg_title.to_string());
     });
-    field!("body", norm_body(&fg.body) != norm_body(&before.body), {
-        patch.body = Some(norm_body(&fg.body));
+    let (fg_body, before_body) = (norm_body(&fg.body), norm_body(&before.body));
+    field!("body", fg_body != before_body, before_body.clone(), fg_body.clone(), {
+        patch.body = Some(fg_body.clone());
     });
-    field!("status", target_status != before.status, {
-        patch.status = Some(target_status);
-    });
-    field!("assignee_id", assignee_id != before.assignee_id, {
-        patch.assignee_id = Some(assignee_id);
-    });
-    field!("labels", !same_set(&labels, &before.labels), {
-        patch.labels = Some(labels.clone());
-    });
+    field!(
+        "status",
+        target_status != before.status,
+        before.status.as_str().to_string(),
+        target_status.as_str().to_string(),
+        { patch.status = Some(target_status); }
+    );
+    field!(
+        "assignee_id",
+        assignee_id != before.assignee_id,
+        opt_id(before.assignee_id),
+        opt_id(assignee_id),
+        { patch.assignee_id = Some(assignee_id); }
+    );
+    field!(
+        "labels",
+        !same_set(&labels, &before.labels),
+        before.labels.join(", "),
+        labels.join(", "),
+        { patch.labels = Some(labels.clone()); }
+    );
     let fg_milestone = fg.milestone.as_ref().map(|m| m.title.clone());
-    field!("milestone", fg_milestone != before.milestone, {
-        patch.milestone = Some(fg_milestone.clone());
-    });
+    field!(
+        "milestone",
+        fg_milestone != before.milestone,
+        before.milestone.clone().unwrap_or_default(),
+        fg_milestone.clone().unwrap_or_default(),
+        { patch.milestone = Some(fg_milestone.clone()); }
+    );
 
-    for field in drift {
-        state.bus.publish(BoardEvent::SyncDrift {
-            issue_id: before.id,
-            key: before.key.clone(),
-            field: field.to_string(),
-        });
+    if !drift.is_empty() {
+        let at = Utc::now().to_rfc3339();
+        for d in drift {
+            let event = BoardEvent::SyncDrift {
+                issue_id: before.id,
+                key: before.key.clone(),
+                field: d.field.to_string(),
+                breadboard_value: d.breadboard_value,
+                forgejo_value: d.forgejo_value,
+                winner: (if d.fg_won { "forgejo" } else { "breadboard" }).to_string(),
+                at: at.clone(),
+            };
+            crate::notify::emit_bread(state, &event);
+            state.bus.publish(event);
+        }
     }
 
     if patch.is_empty() {
@@ -617,6 +661,11 @@ fn same_set(a: &[String], b: &[String]) -> bool {
     a.sort();
     b.sort();
     a == b
+}
+
+/// Render an optional user id for a drift record's value fields.
+fn opt_id(id: Option<i64>) -> String {
+    id.map_or_else(|| "none".to_string(), |n| n.to_string())
 }
 
 fn emit_change_events(state: &AppState, before: &Issue, after: &Issue) {

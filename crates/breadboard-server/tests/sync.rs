@@ -3,7 +3,7 @@
 
 mod common;
 
-use breadboard_core::{IssueType, Status, SyncSource};
+use breadboard_core::{BoardEvent, IssueType, Status, SyncSource};
 use breadboard_server::forgejo::{FgComment, FgIssue, FgMilestone, FgUser};
 use breadboard_server::{store, sync};
 use chrono::{Duration, Utc};
@@ -248,6 +248,101 @@ fn status_boundary_mapping() {
     assert_eq!(sync::map_status(true, Status::Doing), Status::Done);
     assert_eq!(sync::map_status(false, Status::Done), Status::Todo);
     assert_eq!(sync::map_status(true, Status::Done), Status::Done);
+}
+
+/// Every `SyncDrift` sitting in the broadcast channel, as
+/// `(field, winner, breadboard_value, forgejo_value)`.
+fn drain_drift(
+    rx: &mut tokio::sync::broadcast::Receiver<BoardEvent>,
+) -> Vec<(String, String, String, String)> {
+    let mut out = Vec::new();
+    while let Ok(ev) = rx.try_recv() {
+        if let BoardEvent::SyncDrift {
+            field,
+            winner,
+            breadboard_value,
+            forgejo_value,
+            ..
+        } = ev
+        {
+            out.push((field, winner, breadboard_value, forgejo_value));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn reconcile_drift_signals_a_missed_webhook() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+
+    // Import via the webhook fast path.
+    let fg = fg_issue(7, "OSD on wrong monitor", Utc::now());
+    sync::apply_issue(&app.state, repo, &fg, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let mut rx = app.state.bus.subscribe();
+
+    // 1. A webhook was missed: Forgejo changed the title and is the newer side.
+    //    Reconcile applies it AND emits drift (winner: forgejo).
+    let mut changed = fg.clone();
+    changed.title = "OSD renders on the wrong monitor".into();
+    changed.updated_at = (Utc::now() + Duration::seconds(60)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &changed, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        drain_drift(&mut rx),
+        vec![(
+            "title".to_string(),
+            "forgejo".to_string(),
+            "OSD on wrong monitor".to_string(),
+            "OSD renders on the wrong monitor".to_string(),
+        )],
+        "reconcile applies the missed change and emits one drift event"
+    );
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        "OSD renders on the wrong monitor"
+    );
+
+    // 2. Drift the other way: a stale Forgejo value seen during reconcile.
+    //    breadboard wins (no apply), but the divergence is still signalled.
+    let mut stale = fg.clone();
+    stale.title = "a title from the past".into();
+    stale.updated_at = (Utc::now() - Duration::days(5)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &stale, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+
+    let drift = drain_drift(&mut rx);
+    assert_eq!(drift.len(), 1);
+    assert_eq!(drift[0].0, "title");
+    assert_eq!(drift[0].1, "breadboard");
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        "OSD renders on the wrong monitor",
+        "breadboard's value is kept"
+    );
+
+    // 3. The webhook fast path never emits drift, even for an out-of-order
+    //    (stale) webhook: that is not a missed webhook.
+    let mut ooo = fg.clone();
+    ooo.title = "another stale title".into();
+    ooo.updated_at = (Utc::now() - Duration::days(3)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &ooo, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    assert!(
+        drain_drift(&mut rx).is_empty(),
+        "webhook path stays silent on divergence"
+    );
 }
 
 // --- helpers ---

@@ -190,7 +190,16 @@ export type BoardEvent =
   | { type: "card.deleted"; id: number; key: string }
   | { type: "cycle.started"; id: number; name: string; issues: number }
   | { type: "cycle.ended"; id: number; name: string }
-  | { type: "sync.drift"; issue_id: number; key: string; field: string }
+  | {
+      type: "sync.drift";
+      issue_id: number;
+      key: string;
+      field: string;
+      breadboard_value: string;
+      forgejo_value: string;
+      winner: "breadboard" | "forgejo";
+      at: string;
+    }
   | { type: "notified"; user_id: number };
 
 export class ApiError extends Error {
