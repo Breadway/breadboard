@@ -84,7 +84,7 @@ pub fn router(state: AppState) -> Router {
             );
             tracing::info!(dir = %dir.display(), "serving web SPA");
         } else {
-            tracing::warn!(dir = %dir.display(), "web_dir does not exist — not serving SPA");
+            tracing::warn!(dir = %dir.display(), "web_dir does not exist: not serving SPA");
         }
     }
 

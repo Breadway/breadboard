@@ -10,8 +10,8 @@ npm install                       # from the repo root
 npm run build -w breadboard-mcp   # → apps/mcp/dist/index.js
 ```
 
-Auth: it reads `~/.config/breadboard/cli.toml` (`server`, `token`) — the same
-file `breadboard auth login` writes — or `BREADBOARD_SERVER` / `BREADBOARD_TOKEN`
+Auth: it reads `~/.config/breadboard/cli.toml` (`server`, `token`), the same
+file `breadboard auth login` writes, or `BREADBOARD_SERVER` / `BREADBOARD_TOKEN`
 env vars. Without a token, only unauthenticated calls work.
 
 ## Register with Claude Code

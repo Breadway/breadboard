@@ -1,4 +1,4 @@
-//! `breadboard` — CLI + TUI for breadboard.
+//! `breadboard`: CLI + TUI for breadboard.
 
 mod config;
 mod tui;
@@ -215,7 +215,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Ping => {
             let h = client.health().await?;
-            println!("{} — {} (v{}, db={})", cfg.server, h.status, h.version, h.db);
+            println!("{}: {} (v{}, db={})", cfg.server, h.status, h.version, h.db);
         }
         Command::Auth { action } => auth(&client, &mut cfg, action).await?,
         Command::Add {
@@ -347,7 +347,7 @@ async fn auth(client: &Client, cfg: &mut CliConfig, action: AuthAction) -> Resul
         AuthAction::Status => match client.me().await {
             Ok(u) => println!("signed in as {} ({})", u.login, u.display_name),
             Err(breadboard_client::Error::Unauthenticated) => {
-                println!("not signed in — run `breadboard auth login`")
+                println!("not signed in: run `breadboard auth login`")
             }
             Err(e) => return Err(e.into()),
         },
@@ -373,7 +373,7 @@ async fn auth(client: &Client, cfg: &mut CliConfig, action: AuthAction) -> Resul
                 match client.device_poll(&start.device_code).await? {
                     DevicePoll::Pending => print!("."),
                     DevicePoll::Approved(t) => break t,
-                    DevicePoll::Expired => bail!("\nthe code expired — run `breadboard auth login` again"),
+                    DevicePoll::Expired => bail!("\nthe code expired: run `breadboard auth login` again"),
                 }
             };
             cfg.token = Some(token);
@@ -653,6 +653,6 @@ fn print_issue(d: &breadboard_client::IssueDetail) {
         println!("\n{}\n", i.body);
     }
     for c in &d.comments {
-        println!("  — {} ({})", c.body, c.created_at);
+        println!("  - {} ({})", c.body, c.created_at);
     }
 }

@@ -1,4 +1,4 @@
-//! breadboard desktop — a thin native shell around https://breadboard.breadway.dev.
+//! breadboard desktop: a thin native shell around https://breadboard.breadway.dev.
 //!
 //! The window loads the live site directly, so session cookies and the Forgejo
 //! OAuth redirect just work. Two global shortcuts:

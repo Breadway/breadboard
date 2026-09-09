@@ -36,7 +36,7 @@ docker compose -f packaging/compose.yaml --project-directory . up -d --build
 curl -s localhost:7280/healthz
 ```
 
-The build compiles Rust in a `rust:1-bookworm` stage — no host toolchain needed.
+The build compiles Rust in a `rust:1-bookworm` stage; no host toolchain needed.
 By default the container binds `127.0.0.1:7280`; set `BREADBOARD_BIND` in `.env`
 to change that (e.g. `0.0.0.0:7280` for another host to reach it).
 
@@ -51,7 +51,7 @@ ssh host 'cd ~/breadboard && docker compose -f packaging/compose.yaml --project-
 ## 4. Reverse proxy
 
 Point a proxy at `127.0.0.1:7280` (see `packaging/caddy/breadboard.caddy`). It
-must not buffer responses — the `/events` SSE stream needs to flow. Caddy handles
+must not buffer responses: the `/events` SSE stream needs to flow. Caddy handles
 this automatically; nginx needs `proxy_buffering off;` for `/events`.
 
 ## 5. Forgejo webhook

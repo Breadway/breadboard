@@ -4,7 +4,7 @@
 //
 // Config, in order of precedence:
 //   BREADBOARD_SERVER / BREADBOARD_TOKEN env vars
-//   ~/.config/breadboard/cli.toml   (server, token — written by `breadboard auth login`)
+//   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -55,7 +55,7 @@ async function run<T>(fn: () => Promise<T>) {
     return ok(await fn());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
-      return fail("not authenticated — run `breadboard auth login` (writes ~/.config/breadboard/cli.toml)");
+      return fail("not authenticated: run `breadboard auth login` (writes ~/.config/breadboard/cli.toml)");
     }
     return fail(e instanceof Error ? e.message : String(e));
   }
@@ -135,7 +135,7 @@ server.tool(
   "create_issue",
   "Create an issue. Only title is required. If the project maps to a synced repo it is also created on Forgejo. " +
     "If you later open a PR that resolves this issue, reference its key with a closing keyword in the PR body " +
-    "(e.g. \"Closes ECO-17\" or \"Closes #17\") — breadboard links the PR to the issue and collapses them into " +
+    "(e.g. \"Closes ECO-17\" or \"Closes #17\"); breadboard links the PR to the issue and collapses them into " +
     "one card instead of showing two unrelated ones.",
   {
     title: z.string(),
@@ -163,7 +163,7 @@ server.tool(
 server.tool(
   "update_issue",
   "Patch an issue. Any omitted field is left unchanged. " +
-    "Workflow: move to doing when you actually start work (not just at the end) — backlog/todo "
+    "Workflow: move to doing when you actually start work (not just at the end); backlog/todo "
     + "→ doing → review (implemented, not yet verified/deployed) → done (verified live). "
     + "Don't jump straight from backlog/todo to review or done.",
   {
@@ -264,4 +264,4 @@ server.tool(
 );
 
 await server.connect(new StdioServerTransport());
-console.error(`breadboard-mcp ready → ${cfg.server}${cfg.token ? "" : " (no token — read-only calls will 401)"}`);
+console.error(`breadboard-mcp ready → ${cfg.server}${cfg.token ? "" : " (no token: read-only calls will 401)"}`);

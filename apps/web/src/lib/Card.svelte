@@ -12,7 +12,7 @@
   const prioClass = $derived(
     issue.priority === "none" ? "" : `prio-${issue.priority}`,
   );
-  // PRs that close this issue don't get their own card (see store.filtered) —
+  // PRs that close this issue don't get their own card (see store.filtered):
   // their state surfaces here instead, so the board shows one thing, not two.
   const closingPrs = $derived(
     issue.links
@@ -85,7 +85,7 @@
     transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
   }
   .card:hover {
-    /* inset only — same reason as .kb below: an outward drop shadow bleeds
+    /* inset only, same reason as .kb below: an outward drop shadow bleeds
        past the card's box and .cards' overflow-y:auto clips it there. */
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent) inset;
@@ -96,7 +96,7 @@
   }
   .card.kb {
     border-color: var(--accent);
-    /* inset, not outline+offset — the parent .cards has overflow-y:auto, which
+    /* inset, not outline+offset: the parent .cards has overflow-y:auto, which
        per spec forces overflow-x to compute as auto too, clipping anything
        that bleeds outside the card's own border box. */
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent) inset;

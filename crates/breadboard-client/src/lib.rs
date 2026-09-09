@@ -17,7 +17,7 @@ pub enum Error {
         status: reqwest::StatusCode,
         body: String,
     },
-    #[error("not authenticated — run `breadboard auth login`")]
+    #[error("not authenticated: run `breadboard auth login`")]
     Unauthenticated,
 }
 

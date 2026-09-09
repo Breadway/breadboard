@@ -342,7 +342,7 @@ pub async fn me(user: AuthUser) -> Json<User> {
     Json(user.0)
 }
 
-/// Tiny CRC32 (dev-login only — not security-sensitive).
+/// Tiny CRC32 (dev-login only; not security-sensitive).
 fn crc32(s: &str) -> u32 {
     let mut crc: u32 = 0xffff_ffff;
     for byte in s.bytes() {

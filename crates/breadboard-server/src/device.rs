@@ -267,7 +267,7 @@ document.getElementById('go').addEventListener('click', async () => {
     document.getElementById('prompt').style.display = 'none';
     msg.className = 'msg ok';
     msg.textContent = j.status === 'already_approved'
-      ? 'Already authorized — return to your terminal.'
+      ? 'Already authorized, return to your terminal.'
       : 'Device authorized. Return to your terminal.';
   } else {
     msg.className = 'msg err';

@@ -1,13 +1,13 @@
 # Contributing
 
-`breadboard` — issue tracker for the bread ecosystem.
+`breadboard`: issue tracker for the bread ecosystem.
 
 Part of the bread ecosystem; this repo follows the same branch/release workflow
 as every other ecosystem product.
 
 ## Branches
 
-One long-lived branch: **`main`**. New work — features and fixes alike — goes on
+One long-lived branch: **`main`**. New work, features and fixes alike, goes on
 a short-lived branch:
 
 ```
@@ -51,7 +51,7 @@ subcommand:
 
 ## CI
 
-`check.yml` — on `feature/**`, `fix/**`, `main`: clippy `-D warnings`,
+`check.yml`: on `feature/**`, `fix/**`, `main`: clippy `-D warnings`,
 `cargo test`, `check-docs`, and the frontend build. Self-hosted runner; nothing
 else runs on plain commits/PRs.
 

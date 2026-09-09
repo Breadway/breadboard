@@ -1,13 +1,13 @@
 # breadboard
 
-Issue tracker for the bread ecosystem — a Linear-lite planning layer that sits on
+Issue tracker for the bread ecosystem: a Linear-lite planning layer that sits on
 top of Forgejo (`git.breadway.dev`).
 
 Forgejo stays the place issues are filed and discussed. breadboard adds what a
 per-repo issue list can't give you:
 
-- **cross-repo epics** — one epic spans `bread`, `breadbar`, `bos`, …
-- **a board that spans every repo** — every in-flight task in one place
+- **cross-repo epics**: one epic spans `bread`, `breadbar`, `bos`, …
+- **a board that spans every repo**: every in-flight task in one place
 - **cycles** (the sprint concept), priorities, estimates
 - **a roadmap** view for native (non-repo) planning items
 
@@ -35,9 +35,9 @@ crates/
   breadboard-core     shared domain types (serde + chrono only)
   breadboard-server   axum service: REST + SSE, Forgejo sync, SQLite (WAL) + Litestream
   breadboard-client   Rust API client (used by the CLI/TUI)
-  breadboard-cli      `breadboard` — CLI + TUI
+  breadboard-cli      `breadboard`: CLI + TUI
 apps/
-  web                 Svelte 5 SPA (Vite) — the primary UI
+  web                 Svelte 5 SPA (Vite): the primary UI
   desktop             Tauri 2 shell wrapping the web build
 packages/
   api-client          generated TypeScript client
@@ -69,8 +69,8 @@ come from `BREADBOARD_*` env vars.
 
 ## Deployment
 
-One container (`packaging/Containerfile`) — a Rust server that also serves its
-built SPA — behind a TLS-terminating reverse proxy. The Rust build runs in a
+One container (`packaging/Containerfile`): a Rust server that also serves its
+built SPA, behind a TLS-terminating reverse proxy. The Rust build runs in a
 `rust:1-bookworm` stage, so the host needs no toolchain. See
 [`packaging/DEPLOY.md`](packaging/DEPLOY.md).
 

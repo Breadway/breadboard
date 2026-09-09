@@ -89,7 +89,7 @@ pub async fn handle(
     if let Err(e) = result {
         tracing::warn!(event = %event, error = %e, "webhook handling failed");
     }
-    // Always 200 once authenticated — the reconcile pass is the safety net.
+    // Always 200 once authenticated; the reconcile pass is the safety net.
     StatusCode::OK
 }
 

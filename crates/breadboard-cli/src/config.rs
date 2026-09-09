@@ -1,4 +1,4 @@
-//! `~/.config/breadboard/cli.toml` — server URL + saved auth token.
+//! `~/.config/breadboard/cli.toml`: server URL + saved auth token.
 
 use std::path::PathBuf;
 

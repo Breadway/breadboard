@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "breadboard web client — Svelte 5 SPA",
+  "description": "breadboard web client: Svelte 5 SPA",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

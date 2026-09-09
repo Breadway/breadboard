@@ -15,7 +15,7 @@ Global shortcuts:
 
 Needs the Tauri Linux deps (`webkit2gtk-4.1`, `libsoup3`, …) and an icon at
 `icons/icon.png` (`npx tauri icon <src.png>` generates the set). Not in the
-Cargo workspace or CI — build it on demand:
+Cargo workspace or CI; build it on demand:
 
 ```sh
 cd apps/desktop

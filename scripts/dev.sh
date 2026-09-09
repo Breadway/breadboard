@@ -4,7 +4,7 @@
 #
 #   BREADBOARD_DEV_LOGIN=1 scripts/dev.sh
 #
-# Open http://127.0.0.1:5280 — the sign-in screen has a "dev login" box when
+# Open http://127.0.0.1:5280: the sign-in screen has a "dev login" box when
 # BREADBOARD_DEV_LOGIN=1, so you don't need to complete the Forgejo OAuth flow.
 set -euo pipefail
 cd "$(dirname "$0")/.."

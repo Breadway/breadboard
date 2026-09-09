@@ -1,6 +1,6 @@
 //! Repo automation. Mirrors the `xtask` pattern in `bread/`.
 //!
-//! `cargo run -p xtask -- check-docs` — fail CI if the API/event contract in
+//! `cargo run -p xtask -- check-docs`: fail CI if the API/event contract in
 //! `Documentation.md` has drifted from the code.
 
 use std::path::Path;

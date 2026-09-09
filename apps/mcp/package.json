@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "MCP server for breadboard — expose the board to Claude and other MCP clients",
+  "description": "MCP server for breadboard: expose the board to Claude and other MCP clients",
   "bin": { "breadboard-mcp": "dist/index.js" },
   "main": "dist/index.js",
   "scripts": {

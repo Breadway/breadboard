@@ -1,4 +1,4 @@
-//! `breadboard tui` — a full-screen terminal board.
+//! `breadboard tui`: a full-screen terminal board.
 //!
 //! Arrows / hjkl move the cursor, `[` `]` move the selected card between
 //! statuses, `enter` shows detail, `r` refreshes, `q` quits. The board also
