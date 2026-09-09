@@ -20,4 +20,5 @@ repos = []                     # e.g. ["Breadway/bread", "Breadway/breadbar"]
 [notifications]
 bread_events = true            # emit bread.board.* via bread-emit when present
 breadbar     = true            # desktop notifications through breadbar
-daily_digest = false
+daily_digest = false           # run the daily digest job (BREADBOARD_NOTIFICATIONS_DAILY_DIGEST)
+digest_hour  = 8               # local hour 0-23 to send it (BREADBOARD_NOTIFICATIONS_DIGEST_HOUR)

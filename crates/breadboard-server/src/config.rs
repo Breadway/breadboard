@@ -54,8 +54,12 @@ pub struct NotificationConfig {
     pub bread_events: bool,
     /// Send desktop notifications through breadbar.
     pub breadbar: bool,
-    /// Send a daily digest instead of per-event pings.
+    /// Run the daily digest job: once a day, users who opted into a digest get
+    /// one summary notification of their unread items instead of per-event
+    /// pings. Off by default.
     pub daily_digest: bool,
+    /// Local hour (0..=23) the daily digest is sent at. Default 8.
+    pub digest_hour: u8,
 }
 
 impl Default for Config {
@@ -91,6 +95,7 @@ impl Default for NotificationConfig {
             bread_events: true,
             breadbar: true,
             daily_digest: false,
+            digest_hour: 8,
         }
     }
 }
@@ -139,6 +144,14 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_RECONCILE_INTERVAL_MINS") {
             if let Ok(n) = v.parse() {
                 self.forgejo.reconcile_interval_mins = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_NOTIFICATIONS_DAILY_DIGEST") {
+            self.notifications.daily_digest = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_NOTIFICATIONS_DIGEST_HOUR") {
+            if let Ok(n) = v.parse::<u8>() {
+                self.notifications.digest_hour = n.min(23);
             }
         }
     }

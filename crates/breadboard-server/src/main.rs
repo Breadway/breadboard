@@ -7,7 +7,7 @@
 use std::net::SocketAddr;
 
 use anyhow::Context;
-use breadboard_server::{auth, config::Config, db, http, store, sync, AppState};
+use breadboard_server::{auth, config::Config, db, http, notify, store, sync, AppState};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -51,6 +51,14 @@ async fn main() -> anyhow::Result<()> {
         );
     } else {
         tracing::info!("forgejo.api_token unset: sync disabled");
+    }
+
+    if state.config.notifications.daily_digest {
+        notify::spawn_daily_digest(state.clone());
+        tracing::info!(
+            hour = state.config.notifications.digest_hour,
+            "daily digest job started"
+        );
     }
 
     let app = http::router(state);

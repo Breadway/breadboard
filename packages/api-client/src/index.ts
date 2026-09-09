@@ -115,7 +115,8 @@ export type NotificationKind =
   | "assigned"
   | "mention"
   | "cycle_started"
-  | "cycle_ended";
+  | "cycle_ended"
+  | "digest";
 
 export interface Notification {
   id: number;
