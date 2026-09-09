@@ -1499,6 +1499,84 @@ pub async fn set_prefs(
     Ok(p)
 }
 
+/// A user who opted into the daily digest, with the timestamp of their last
+/// one (`None` if they have never had one).
+pub struct DigestRecipient {
+    pub user_id: i64,
+    pub last_digest_at: Option<String>,
+}
+
+pub async fn digest_recipients(db: &SqlitePool) -> AppResult<Vec<DigestRecipient>> {
+    let rows: Vec<(i64, Option<String>)> =
+        sqlx::query_as("SELECT user_id, last_digest_at FROM notification_prefs WHERE digest = 1")
+            .fetch_all(db)
+            .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(user_id, last_digest_at)| DigestRecipient {
+            user_id,
+            last_digest_at,
+        })
+        .collect())
+}
+
+/// Unread notifications for a user created strictly after `since` (rfc3339),
+/// oldest first. Digest rows themselves are excluded so a digest never
+/// summarises earlier digests. `since = None` covers every unread item.
+pub async fn unread_notifications_since(
+    db: &SqlitePool,
+    user_id: i64,
+    since: Option<&str>,
+) -> AppResult<Vec<Notification>> {
+    #[derive(FromRow)]
+    struct Row {
+        id: i64,
+        user_id: i64,
+        kind: String,
+        issue_id: Option<i64>,
+        body: String,
+        read: i64,
+        created_at: String,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT id, user_id, kind, issue_id, body, read, created_at FROM notifications
+         WHERE user_id = ?1 AND read = 0 AND kind != 'digest'
+           AND (?2 IS NULL OR created_at > ?2)
+         ORDER BY created_at ASC",
+    )
+    .bind(user_id)
+    .bind(since)
+    .fetch_all(db)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|r| Notification {
+            id: r.id,
+            user_id: r.user_id,
+            kind: NotificationKind::parse(&r.kind).unwrap_or(NotificationKind::Mention),
+            issue_id: r.issue_id,
+            body: r.body,
+            read: r.read != 0,
+            created_at: parse_ts(&r.created_at),
+        })
+        .collect())
+}
+
+/// Record that a digest was just sent to `user_id`. Creates the prefs row if
+/// somehow absent (it should already exist, since only `digest = 1` users get
+/// here).
+pub async fn set_last_digest_at(db: &SqlitePool, user_id: i64, at: &str) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO notification_prefs (user_id, last_digest_at) VALUES (?1, ?2)
+         ON CONFLICT(user_id) DO UPDATE SET last_digest_at = excluded.last_digest_at",
+    )
+    .bind(user_id)
+    .bind(at)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
 pub async fn find_user_by_login(db: &SqlitePool, login: &str) -> AppResult<Option<i64>> {
     Ok(
         sqlx::query_scalar("SELECT id FROM users WHERE login = ?1 COLLATE NOCASE")

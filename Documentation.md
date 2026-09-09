@@ -110,6 +110,13 @@ comment or description, and a cycle you have assigned issues in starting/ending.
 A `notified` SSE event wakes the recipient's clients; the web app also raises a
 browser notification when permission is granted.
 
+**Daily digest** (`kind: "digest"`): when `notifications.daily_digest` is on,
+a background job runs once a day at `notifications.digest_hour` (local, default
+08:00) and sends every user with the `digest` pref one summary notification of
+their still-unread items since their last digest. Users with nothing pending
+get nothing. The last-sent time is tracked per user so each item appears in
+exactly one digest.
+
 ---
 
 ## SSE events

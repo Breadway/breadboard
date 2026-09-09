@@ -2,7 +2,10 @@
 //! best-effort `bread-emit` of `bread.board.*` onto a local bread bus when one
 //! is reachable (self-hosted-on-your-desktop case; a no-op on a headless host).
 
-use breadboard_core::{BoardEvent, Issue, NotificationKind};
+use std::time::Duration;
+
+use breadboard_core::{BoardEvent, Issue, Notification, NotificationKind};
+use chrono::{Datelike, Local, Timelike, Utc};
 
 use crate::{store, AppState};
 
@@ -35,6 +38,7 @@ async fn deliver(
         NotificationKind::Assigned => prefs.assigned,
         NotificationKind::Mention => prefs.mention,
         NotificationKind::CycleStarted | NotificationKind::CycleEnded => prefs.cycle,
+        NotificationKind::Digest => prefs.digest,
     };
     if !wanted {
         return;
@@ -94,6 +98,89 @@ pub async fn cycle(state: &AppState, cycle_id: i64, name: &str, started: bool) {
             deliver(state, uid, kind, None, format!("cycle \u{201c}{name}\u{201d} {verb}")).await;
         }
     }
+}
+
+// --- daily digest ----------------------------------------------------------
+
+/// Spawn the daily digest loop: once a day, at `notifications.digest_hour`
+/// local time, send opted-in users one summary of their unread items. Same
+/// shape as `sync::spawn_reconcile`: a `tokio::time::interval` tick, guarded so
+/// it fires at most once per calendar day.
+pub fn spawn_daily_digest(state: AppState) {
+    let hour = u32::from(state.config.notifications.digest_hour.min(23));
+    tokio::spawn(async move {
+        // Check every 10 minutes so a missed tick (sleep, load) still lands in
+        // the target hour.
+        let mut tick = tokio::time::interval(Duration::from_secs(600));
+        let mut last_run: Option<i32> = None;
+        loop {
+            tick.tick().await;
+            let now = Local::now();
+            let ordinal = now.year() * 366 + now.ordinal() as i32;
+            if now.hour() == hour && last_run != Some(ordinal) {
+                last_run = Some(ordinal);
+                send_daily_digest(&state).await;
+            }
+        }
+    });
+}
+
+/// Send the digest to every opted-in user with pending items. Public for the
+/// scheduled loop and for tests.
+pub async fn send_daily_digest(state: &AppState) {
+    let recipients = match store::digest_recipients(&state.db).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "digest: could not list recipients");
+            return;
+        }
+    };
+    let now = Utc::now().to_rfc3339();
+    let mut sent = 0u32;
+    for r in recipients {
+        let items = store::unread_notifications_since(
+            &state.db,
+            r.user_id,
+            r.last_digest_at.as_deref(),
+        )
+        .await
+        .unwrap_or_default();
+        if items.is_empty() {
+            continue; // no digest when there is nothing pending
+        }
+        let body = render_digest(&items);
+        if store::create_notification(&state.db, r.user_id, NotificationKind::Digest, None, &body)
+            .await
+            .is_ok()
+        {
+            state.bus.publish(BoardEvent::Notified { user_id: r.user_id });
+            emit_bread(state, &BoardEvent::Notified { user_id: r.user_id });
+            // Advance the window only on a real send, so every item lands in
+            // exactly one digest.
+            if let Err(e) = store::set_last_digest_at(&state.db, r.user_id, &now).await {
+                tracing::warn!(user_id = r.user_id, error = %e, "digest: could not record last-sent");
+            }
+            sent += 1;
+        }
+    }
+    if sent > 0 {
+        tracing::info!(users = sent, "daily digest sent");
+    }
+}
+
+/// Render the digest body: a count line plus the first 20 items.
+fn render_digest(items: &[Notification]) -> String {
+    let n = items.len();
+    let plural = if n == 1 { "" } else { "s" };
+    let mut s = format!("Daily digest: {n} unread update{plural}\n");
+    for it in items.iter().take(20) {
+        s.push_str("\n- ");
+        s.push_str(&it.body);
+    }
+    if n > 20 {
+        s.push_str(&format!("\n- and {} more", n - 20));
+    }
+    s
 }
 
 fn parse_mentions(text: &str) -> Vec<String> {

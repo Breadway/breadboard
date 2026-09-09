@@ -310,6 +310,9 @@ pub enum NotificationKind {
     Mention,
     CycleStarted,
     CycleEnded,
+    /// The daily summary of unread items, for users who opted into a digest
+    /// instead of per-event pings.
+    Digest,
 }
 
 impl NotificationKind {
@@ -319,6 +322,7 @@ impl NotificationKind {
             NotificationKind::Mention => "mention",
             NotificationKind::CycleStarted => "cycle_started",
             NotificationKind::CycleEnded => "cycle_ended",
+            NotificationKind::Digest => "digest",
         }
     }
 
@@ -328,6 +332,7 @@ impl NotificationKind {
             "mention" => Some(NotificationKind::Mention),
             "cycle_started" => Some(NotificationKind::CycleStarted),
             "cycle_ended" => Some(NotificationKind::CycleEnded),
+            "digest" => Some(NotificationKind::Digest),
             _ => None,
         }
     }
