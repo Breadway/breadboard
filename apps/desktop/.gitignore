@@ -1,0 +1,5 @@
+# Cargo build output for this standalone crate (root .gitignore only covers /target).
+/target/
+
+# Tauri-generated capability schemas.
+/gen/

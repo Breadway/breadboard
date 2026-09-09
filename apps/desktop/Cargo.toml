@@ -5,7 +5,11 @@ edition = "2021"
 description = "Native shell for breadboard"
 authors = ["Breadway"]
 # Deliberately NOT a workspace member: it needs the Tauri system libs and its
-# own toolchain; `cargo build --workspace` and CI skip it.
+# own toolchain; `cargo build --workspace` and CI skip it. The empty
+# `[workspace]` below makes this an independent crate so `cargo`/`cargo tauri`
+# do not try to attach it to the repo-root workspace.
+
+[workspace]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

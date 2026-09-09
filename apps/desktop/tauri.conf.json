@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "breadboard",
-  "version": "0.1.0",
   "identifier": "dev.breadway.breadboard",
   "build": {
     "beforeBuildCommand": "npm --prefix ../web run build",
@@ -25,10 +24,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage"],
-    "icon": ["icons/icon.png"],
+    "targets": ["appimage", "deb"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
     "category": "DeveloperTool",
-    "shortDescription": "Issue tracker for the bread ecosystem"
+    "copyright": "Copyright 2026 Breadway",
+    "publisher": "Breadway",
+    "homepage": "https://breadboard.breadway.dev",
+    "license": "MIT",
+    "shortDescription": "Issue tracker for the bread ecosystem",
+    "longDescription": "A native desktop shell for breadboard, the bread ecosystem's issue tracker. It wraps breadboard.breadway.dev so Forgejo sign-in and session cookies work unchanged, and adds global shortcuts to toggle the window and jump straight to the new-issue palette."
   },
   "plugins": {
     "global-shortcut": {}
