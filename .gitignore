@@ -39,6 +39,8 @@ logs/
 *.db-wal
 *.db-shm
 /data/
+# default Litestream file-replica dir when BREADBOARD_BACKUP_DIR is unset
+/backups/
 
 # Claude Code local agent state
 .claude/
