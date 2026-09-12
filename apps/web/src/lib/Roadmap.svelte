@@ -6,6 +6,8 @@
   let expanded = $state<number | null>(null);
   let neKey = $state("");
   let neTitle = $state("");
+  let confirmingDelete = $state<number | null>(null);
+  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
 
   async function reload() {
     store.epics = await api.listEpics();
@@ -34,6 +36,17 @@
     run(() => api.updateEpic(e.id, { title }));
 
   const archive = (e: EpicView) => run(() => api.updateEpic(e.id, { archived: !e.archived }));
+
+  function requestDelete(e: EpicView) {
+    if (confirmingDelete === e.id) {
+      clearTimeout(confirmTimer);
+      confirmingDelete = null;
+      void run(() => api.deleteEpic(e.id));
+    } else {
+      confirmingDelete = e.id;
+      confirmTimer = setTimeout(() => (confirmingDelete = null), 3000);
+    }
+  }
 
   function pct(e: EpicView) {
     return e.total ? Math.round(((e.progress.done ?? 0) / e.total) * 100) : 0;
@@ -71,6 +84,9 @@
         </button>
         <button class="ghost" disabled={busy} onclick={() => archive(e)}>
           {e.archived ? "unarchive" : "archive"}
+        </button>
+        <button class="ghost danger" class:confirm={confirmingDelete === e.id} disabled={busy} onclick={() => requestDelete(e)}>
+          {confirmingDelete === e.id ? "confirm delete" : "delete"}
         </button>
       </div>
 
@@ -135,6 +151,9 @@
   button:hover:not(:disabled) { border-color: var(--accent); }
   button:disabled { opacity: 0.5; }
   .ghost { background: transparent; }
+  .ghost.danger { color: #e05252; border-color: transparent; }
+  .ghost.danger:hover { border-color: #e05252; }
+  .ghost.danger.confirm { background: #e05252; border-color: #e05252; color: #fff; }
   input { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 7px; color: var(--ink); font: inherit; }
   .dim { color: var(--ink-dim); }
 </style>

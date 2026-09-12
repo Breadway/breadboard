@@ -39,11 +39,16 @@ or in `.mcp.json`:
 | | |
 |---|---|
 | `whoami` | signed-in user + server |
-| `list_issues` `get_issue` `board` | read the board (filters: project, status, cycle, mine) |
-| `create_issue` `update_issue` `move_issue` `comment` | drive it (epic/cycle by key/name) |
+| `list_issues` `get_issue` `board` | read the board (filters: project, status, cycle, epic, assignee_id, mine) |
+| `create_issue` `update_issue` `move_issue` `delete_issue` `move_issue_project` `comment` | drive it (epic/cycle by key/name; update_issue also takes estimate and add_links/remove_links) |
 | `activity` | an issue's change history |
 | `list_projects` `list_epics` `list_cycles` `list_repos` | metadata |
-| `create_project` `add_repo` `reconcile` | admin |
+| `create_project` `update_project` `add_repo` `remove_repo` `reconcile` | admin (update_project can rename, archive/unarchive, attach/detach forgejo_repo) |
 | `import_markdown` | outline → epics + issues |
+| `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |
+
+`update_issue`'s `add_links`/`remove_links` take `{ kind, target }` pairs
+(`kind` one of `blocks`/`blocked-by`/`relates-to`, `target` an issue key or
+id); synced `closes`/`closed-by` links are never touched.
 
 Mutating tools go through your MCP client's own confirmation flow.

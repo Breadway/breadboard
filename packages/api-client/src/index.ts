@@ -147,6 +147,19 @@ export interface RepoView {
   last_synced_at: string | null;
 }
 
+export interface ImportRequest {
+  /** Project key to file everything under. */
+  project: string;
+  markdown: string;
+  dry_run?: boolean;
+}
+
+export interface ImportResult {
+  epics_created: string[];
+  issues_created: string[];
+  skipped: string[];
+}
+
 export interface NewIssue {
   title: string;
   body?: string;
@@ -252,6 +265,7 @@ export class BreadboardClient {
   me = () => this.req<User>("GET", "/api/me");
 
   listProjects = () => this.req<Project[]>("GET", "/api/projects");
+  getProject = (id: number) => this.req<Project>("GET", `/api/projects/${id}`);
   createProject = (p: { key: string; name: string; forgejo_repo?: string }) =>
     this.req<Project>("POST", "/api/projects", p);
   updateProject = (
@@ -264,6 +278,7 @@ export class BreadboardClient {
     this.req<RepoView>("POST", "/api/repos", { repo, key, name });
   removeRepo = (repo: string) => this.req<void>("DELETE", `/api/repos/${repo}`);
   reconcile = () => this.req<void>("POST", "/api/sync/reconcile");
+  importMarkdown = (req: ImportRequest) => this.req<ImportResult>("POST", "/api/import", req);
 
   inbox = (unread = false) =>
     this.req<Inbox>("GET", `/api/notifications${unread ? "?unread=true" : ""}`);
@@ -274,6 +289,7 @@ export class BreadboardClient {
     this.req<NotificationPrefs>("PUT", "/api/notifications/prefs", p);
 
   listEpics = () => this.req<EpicView[]>("GET", "/api/epics");
+  getEpic = (id: number) => this.req<EpicView>("GET", `/api/epics/${id}`);
   createEpic = (e: { key: string; title: string; description?: string; project_id?: number }) =>
     this.req<Epic>("POST", "/api/epics", e);
   updateEpic = (

@@ -5,6 +5,8 @@
     STATUSES,
     type ActivityEntry,
     type IssueDetail,
+    type IssueLink,
+    type LinkKind,
     type Priority,
     type Status,
   } from "@breadboard/api-client";
@@ -22,6 +24,11 @@
   let confirmingDelete = $state(false);
   let confirmTimer: ReturnType<typeof setTimeout> | undefined;
   let editingBody = $state(false);
+  let linkKindDraft = $state<LinkKind>("blocks");
+  let linkTargetDraft = $state("");
+  let linkBusy = $state(false);
+
+  const manualLinkKinds: LinkKind[] = ["blocks", "blocked-by", "relates-to"];
 
   function requestDelete() {
     if (confirmingDelete) {
@@ -112,6 +119,51 @@
       store.flash(`comment failed: ${e instanceof Error ? e.message : e}`);
     }
   }
+
+  async function resolveTargetId(keyOrId: string): Promise<number | null> {
+    const trimmed = keyOrId.trim();
+    if (!trimmed) return null;
+    const n = Number(trimmed);
+    if (!Number.isNaN(n)) return n;
+    const known = store.issues.find((i) => i.key.toLowerCase() === trimmed.toLowerCase());
+    if (known) return known.id;
+    try {
+      const fetched = await api.getIssue(trimmed);
+      return fetched.id;
+    } catch {
+      return null;
+    }
+  }
+
+  async function addLink() {
+    if (!detail || !linkTargetDraft.trim()) return;
+    linkBusy = true;
+    try {
+      const targetId = await resolveTargetId(linkTargetDraft);
+      if (targetId === null) {
+        store.flash(`couldn't find issue "${linkTargetDraft.trim()}"`);
+        return;
+      }
+      if (targetId === detail.id) {
+        store.flash("an issue can't link to itself");
+        return;
+      }
+      const exists = detail.links.some((l) => l.kind === linkKindDraft && l.target_id === targetId);
+      if (!exists) {
+        const links: IssueLink[] = [...detail.links, { kind: linkKindDraft, target_id: targetId }];
+        await save({ links });
+      }
+      linkTargetDraft = "";
+    } finally {
+      linkBusy = false;
+    }
+  }
+
+  async function removeLink(link: IssueLink) {
+    if (!detail) return;
+    const links = detail.links.filter((l) => !(l.kind === link.kind && l.target_id === link.target_id));
+    await save({ links });
+  }
 </script>
 
 {#if store.selectedKey}
@@ -143,12 +195,31 @@
           <div class="links">
             {#each detail.links as l (l.kind + l.target_id)}
               {@const t = store.findIssue(l.target_id)}
-              <button class="link-chip" onclick={() => t && (store.selectedKey = t.key)}>
-                {linkLabels[l.kind] ?? l.kind} {t?.key ?? `#${l.target_id}`}{t ? ` · ${t.title}` : ""}
-              </button>
+              <span class="link-chip">
+                <button class="link-chip-btn" onclick={() => t && (store.selectedKey = t.key)}>
+                  {linkLabels[l.kind] ?? l.kind} {t?.key ?? `#${l.target_id}`}{t ? ` · ${t.title}` : ""}
+                </button>
+                {#if manualLinkKinds.includes(l.kind)}
+                  <button class="link-chip-x" title="Remove link" onclick={() => removeLink(l)}>×</button>
+                {/if}
+              </span>
             {/each}
           </div>
         {/if}
+
+        <div class="row link-add">
+          <select bind:value={linkKindDraft}>
+            {#each manualLinkKinds as k (k)}<option value={k}>{linkLabels[k] ?? k}</option>{/each}
+          </select>
+          <input
+            placeholder="issue key, e.g. BB-12"
+            bind:value={linkTargetDraft}
+            onkeydown={(e) => e.key === "Enter" && addLink()}
+          />
+          <button class="btn" disabled={linkBusy || !linkTargetDraft.trim()} onclick={addLink}>
+            Add link
+          </button>
+        </div>
 
         <div class="row">
           <label>
@@ -370,17 +441,47 @@
     flex-wrap: wrap;
   }
   .link-chip {
+    display: inline-flex;
+    align-items: stretch;
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 999px;
+    overflow: hidden;
+  }
+  .link-chip-btn {
+    background: none;
+    border: none;
     padding: 3px 10px;
     color: var(--ink-dim);
     font-size: 12px;
     cursor: pointer;
+    font: inherit;
+  }
+  .link-chip-btn:hover {
+    color: var(--ink);
   }
   .link-chip:hover {
     border-color: var(--accent);
-    color: var(--ink);
+  }
+  .link-chip-x {
+    background: none;
+    border: none;
+    border-left: 1px solid var(--border);
+    padding: 3px 8px;
+    color: var(--ink-dim);
+    cursor: pointer;
+    font-size: 12px;
+    line-height: 1;
+  }
+  .link-chip-x:hover {
+    color: #e05252;
+  }
+  .link-add select,
+  .link-add input {
+    font-size: 12px;
+  }
+  .link-add input {
+    flex: 1;
   }
   label {
     display: flex;

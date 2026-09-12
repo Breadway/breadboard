@@ -43,6 +43,8 @@ class Store {
   paletteOpen = $state(false);
   filterProject = $state<string>("");
   filterCycle = $state<number | 0>(0);
+  filterEpic = $state<number | 0>(0);
+  filterAssignee = $state<number | 0>(0);
   filterMine = $state(false);
 
   #unsub: (() => void) | null = null;
@@ -73,6 +75,8 @@ class Store {
         if (!p || p.key !== this.filterProject) return false;
       }
       if (this.filterCycle && i.cycle_id !== this.filterCycle) return false;
+      if (this.filterEpic && i.epic_id !== this.filterEpic) return false;
+      if (this.filterAssignee && i.assignee_id !== this.filterAssignee) return false;
       if (this.filterMine && i.assignee_id !== this.me?.id) return false;
       return true;
     });

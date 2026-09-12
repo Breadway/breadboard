@@ -1,10 +1,22 @@
 <script lang="ts">
   import { fade, fly } from "svelte/transition";
+  import { PRIORITIES, type NewIssue, type Priority } from "@breadboard/api-client";
   import { store } from "./store.svelte";
 
   let query = $state("");
   let cursor = $state(0);
   let inputEl = $state<HTMLInputElement | null>(null);
+
+  // Optional extra fields for issue creation, collapsed by default; the
+  // command palette otherwise only ever sets a title.
+  let showOptions = $state(false);
+  let optBody = $state("");
+  let optPriority = $state<Priority | "">("");
+  let optLabels = $state("");
+  let optProject = $state("");
+  let optEpic = $state<number | 0>(0);
+  let optCycle = $state<number | 0>(0);
+  let optEstimate = $state<number | "">("");
 
   type Item =
     | { kind: "create"; label: string }
@@ -35,10 +47,20 @@
     return out;
   });
 
+  const hasCreate = $derived(items.some((i) => i.kind === "create"));
+
   $effect(() => {
     if (store.paletteOpen) {
       query = "";
       cursor = 0;
+      showOptions = false;
+      optBody = "";
+      optPriority = "";
+      optLabels = "";
+      optProject = "";
+      optEpic = 0;
+      optCycle = 0;
+      optEstimate = "";
       queueMicrotask(() => inputEl?.focus());
     }
   });
@@ -50,7 +72,19 @@
 
   async function run(item: Item) {
     if (item.kind === "create") {
-      const issue = await store.create({ title: query.trim() });
+      const input: NewIssue = { title: query.trim() };
+      if (optBody.trim()) input.body = optBody.trim();
+      if (optPriority) input.priority = optPriority;
+      if (optProject) input.project = optProject;
+      if (optEpic) input.epic_id = optEpic;
+      if (optCycle) input.cycle_id = optCycle;
+      if (optEstimate !== "") input.estimate = optEstimate;
+      const labels = optLabels
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (labels.length) input.labels = labels;
+      const issue = await store.create(input);
       if (issue) store.selectedKey = issue.key;
     } else if (item.kind === "issue") {
       store.selectedKey = item.key;
@@ -91,12 +125,54 @@
       tabindex="-1"
       transition:fly={{ y: -8, duration: 140 }}
     >
-      <input
-        bind:this={inputEl}
-        bind:value={query}
-        onkeydown={onKey}
-        placeholder="Search issues, or type to create…"
-      />
+      <div class="input-row">
+        <input
+          class="search-input"
+          bind:this={inputEl}
+          bind:value={query}
+          onkeydown={onKey}
+          placeholder="Search issues, or type to create…"
+        />
+        {#if hasCreate}
+          <button class="opts-toggle" onclick={() => (showOptions = !showOptions)}>
+            {showOptions ? "fewer options" : "more options"}
+          </button>
+        {/if}
+      </div>
+
+      {#if hasCreate && showOptions}
+        <div class="options">
+          <div class="opt-row">
+            <select bind:value={optPriority}>
+              <option value="">Priority…</option>
+              {#each PRIORITIES as p (p)}<option value={p}>{p}</option>{/each}
+            </select>
+            <select bind:value={optProject}>
+              <option value="">Project…</option>
+              {#each store.projects as p (p.id)}<option value={p.key}>{p.key}</option>{/each}
+            </select>
+            <select bind:value={optCycle}>
+              <option value={0}>Cycle…</option>
+              {#each store.cycles as c (c.id)}<option value={c.id}>{c.name}</option>{/each}
+            </select>
+            <select bind:value={optEpic}>
+              <option value={0}>Epic…</option>
+              {#each store.epics as ep (ep.id)}<option value={ep.id}>{ep.key}</option>{/each}
+            </select>
+            <input
+              class="estimate"
+              type="number"
+              min="0"
+              placeholder="Est."
+              value={optEstimate}
+              oninput={(e) => (optEstimate = e.currentTarget.value === "" ? "" : Number(e.currentTarget.value))}
+            />
+          </div>
+          <input placeholder="Labels, comma separated" bind:value={optLabels} />
+          <textarea rows="3" placeholder="Description (markdown)" bind:value={optBody}></textarea>
+        </div>
+      {/if}
+
       <ul>
         {#each items as item, i (item.kind + item.label)}
           <li>
@@ -137,18 +213,67 @@
     overflow: hidden;
     box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
   }
-  input {
+  .input-row {
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+  }
+  .search-input {
+    flex: 1;
     width: 100%;
     border: none;
-    border-bottom: 1px solid var(--border);
     background: var(--bg);
     color: var(--ink);
     padding: 12px 14px;
     font: inherit;
     font-size: 14px;
   }
-  input:focus {
+  .search-input:focus {
     outline: none;
+  }
+  .opts-toggle {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    font-size: 11px;
+    white-space: nowrap;
+    padding: 0 14px;
+    cursor: pointer;
+  }
+  .opts-toggle:hover {
+    color: var(--accent);
+  }
+  .options {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .opt-row {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .options select,
+  .options input,
+  .options textarea {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 5px 7px;
+    color: var(--ink);
+    font: inherit;
+    font-size: 12px;
+  }
+  .options textarea {
+    resize: vertical;
+    width: 100%;
+    box-sizing: border-box;
+  }
+  .options .estimate {
+    width: 64px;
   }
   ul {
     list-style: none;

@@ -88,6 +88,20 @@
         {#each store.cycles as c (c.id)}<option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>{/each}
       </select>
 
+      {#if store.epics.length}
+        <select bind:value={store.filterEpic} title="Filter by epic">
+          <option value={0}>All epics</option>
+          {#each store.epics as ep (ep.id)}<option value={ep.id}>{ep.key} · {ep.title}</option>{/each}
+        </select>
+      {/if}
+
+      {#if store.me}
+        <select bind:value={store.filterAssignee} title="Filter by assignee">
+          <option value={0}>All assignees</option>
+          <option value={store.me.id}>Me ({store.me.login})</option>
+        </select>
+      {/if}
+
       <button class:on={store.filterMine} onclick={() => (store.filterMine = !store.filterMine)}>Mine</button>
       <button class="new" onclick={() => (store.paletteOpen = true)}>+ New <kbd>C</kbd></button>
     {/if}

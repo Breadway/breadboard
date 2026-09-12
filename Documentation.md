@@ -251,10 +251,14 @@ demand, not in CI. See `apps/desktop/README.md`.
 `apps/mcp/`: a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
 `@breadboard/api-client`, so an MCP client (Claude, …) can read and drive the
 board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
-`BREADBOARD_TOKEN`. Tools: `whoami`, `list_issues` / `get_issue` / `board`,
-`create_issue` / `update_issue` / `move_issue` / `comment`, `activity`,
-`list_{projects,epics,cycles,repos}`, `create_project`, `add_repo`, `reconcile`,
-`import_markdown`. See `apps/mcp/README.md`.
+`BREADBOARD_TOKEN`. Tools: `whoami`, `list_issues` / `get_issue` / `board`
+(filters: project, status, cycle, epic, assignee_id, mine),
+`create_issue` / `update_issue` / `move_issue` / `delete_issue` /
+`move_issue_project` / `comment`, `activity`,
+`list_{projects,epics,cycles,repos}`, `create_project` / `update_project`,
+`add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
+`inbox` / `mark_notification_read` / `mark_all_notifications_read` /
+`get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
 
 ## Operations
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import type { NotificationPrefs } from "@breadboard/api-client";
+  import type { ImportResult, NotificationPrefs } from "@breadboard/api-client";
   import { api, store } from "./store.svelte";
 
   let loading = $state(true);
@@ -31,6 +31,7 @@
   // new project form
   let npKey = $state("");
   let npName = $state("");
+  let npRepo = $state("");
 
   // add repo form
   let arRepo = $state("");
@@ -41,6 +42,13 @@
   let ncName = $state("");
   let ncStart = $state("");
   let ncEnd = $state("");
+
+  // markdown import
+  let imProject = $state("");
+  let imMarkdown = $state("");
+  let imBusy = $state(false);
+  let imResult = $state<ImportResult | null>(null);
+  let imError = $state<string | null>(null);
 
   function cycleCounts(id: number) {
     const all = store.issues.filter((i) => i.cycle_id === id);
@@ -77,9 +85,14 @@
 
   const createProject = () =>
     run(async () => {
-      await api.createProject({ key: npKey.trim().toUpperCase(), name: npName.trim() });
+      await api.createProject({
+        key: npKey.trim().toUpperCase(),
+        name: npName.trim(),
+        forgejo_repo: npRepo.trim() || undefined,
+      });
       npKey = "";
       npName = "";
+      npRepo = "";
     });
 
   const rename = (id: number, name: string) =>
@@ -87,6 +100,9 @@
 
   const toggleArchive = (id: number, archived: boolean) =>
     run(() => api.updateProject(id, { archived }));
+
+  const setProjectRepo = (id: number, forgejo_repo: string) =>
+    run(() => api.updateProject(id, { forgejo_repo: forgejo_repo.trim() || null }));
 
   const addRepo = () =>
     run(async () => {
@@ -115,6 +131,24 @@
 
   const toggleCycle = (id: number, closed: boolean) =>
     run(() => (closed ? api.startCycle(id) : api.endCycle(id)));
+
+  async function runImport(dryRun: boolean) {
+    if (!imProject || !imMarkdown.trim()) return;
+    imBusy = true;
+    imError = null;
+    try {
+      imResult = await api.importMarkdown({ project: imProject, markdown: imMarkdown, dry_run: dryRun });
+      if (!dryRun) {
+        imMarkdown = "";
+        await store.loadAll();
+      }
+    } catch (e) {
+      imError = e instanceof Error ? e.message : String(e);
+      imResult = null;
+    } finally {
+      imBusy = false;
+    }
+  }
 </script>
 
 <div class="wrap">
@@ -146,7 +180,14 @@
                   onblur={(e) => e.currentTarget.value.trim() && e.currentTarget.value !== p.name && rename(p.id, e.currentTarget.value.trim())}
                 />
               </td>
-              <td class="dim mono">{p.forgejo_repo ?? "—"}</td>
+              <td class="mono">
+                <input
+                  class="repo-input"
+                  value={p.forgejo_repo ?? ""}
+                  placeholder="owner/name"
+                  onblur={(e) => e.currentTarget.value.trim() !== (p.forgejo_repo ?? "") && setProjectRepo(p.id, e.currentTarget.value)}
+                />
+              </td>
               <td class="right">
                 <span class="badge" class:on={!p.archived} class:off={p.archived}>
                   {p.archived ? "archived" : "active"}
@@ -166,11 +207,15 @@
         <div class="add-row">
           <input placeholder="KEY" bind:value={npKey} maxlength="8" style="width:80px" />
           <input placeholder="Name" bind:value={npName} />
+          <input placeholder="owner/name (optional)" bind:value={npRepo} style="width:180px" />
           <button class="primary" disabled={busy || !npKey.trim() || !npName.trim()} onclick={createProject}>
             Add project
           </button>
         </div>
-        <p class="hint">Repo-less projects are for planning / roadmap items. To sync a Forgejo repo, add it below.</p>
+        <p class="hint">
+          Repo-less projects are for planning / roadmap items. Setting a repo here just attaches the
+          mapping; use "Add &amp; sync a repo" below to also enable sync and import its issues.
+        </p>
       </div>
     </section>
 
@@ -273,6 +318,50 @@
       </div>
     </section>
 
+    <section class="card">
+      <h2>Import markdown outline</h2>
+      <p class="hint">
+        Paste an outline; "##" headings become epics and "- [ ]" / "- [x]" items become issues,
+        filed under the project you pick.
+      </p>
+      <div class="add-row">
+        <select bind:value={imProject}>
+          <option value="">Select project…</option>
+          {#each store.projects as p (p.id)}<option value={p.key}>{p.key} · {p.name}</option>{/each}
+        </select>
+      </div>
+      <textarea
+        class="import-area"
+        rows="8"
+        bind:value={imMarkdown}
+        placeholder={"## Epic title\n- [ ] An issue\n- [x] A done issue"}
+      ></textarea>
+      <div class="add-row">
+        <button disabled={imBusy || !imProject || !imMarkdown.trim()} onclick={() => runImport(true)}>
+          Preview (dry run)
+        </button>
+        <button
+          class="primary"
+          disabled={imBusy || !imProject || !imMarkdown.trim()}
+          onclick={() => runImport(false)}
+        >
+          Import
+        </button>
+      </div>
+      {#if imError}
+        <p class="err">{imError}</p>
+      {/if}
+      {#if imResult}
+        <p class="hint">
+          {imResult.epics_created.length} epic(s), {imResult.issues_created.length} issue(s)
+          {imResult.skipped.length ? `, ${imResult.skipped.length} skipped` : ""}
+        </p>
+        {#if imResult.epics_created.length}<p class="hint">Epics: {imResult.epics_created.join(", ")}</p>{/if}
+        {#if imResult.issues_created.length}<p class="hint">Issues: {imResult.issues_created.join(", ")}</p>{/if}
+        {#if imResult.skipped.length}<p class="hint">Skipped: {imResult.skipped.join(", ")}</p>{/if}
+      {/if}
+    </section>
+
     {#if prefs}
       <section class="card">
         <h2>Notifications</h2>
@@ -354,6 +443,12 @@
     font-family: ui-monospace, monospace;
     font-size: 12px;
   }
+  .repo-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+  }
   .dim {
     color: var(--ink-dim);
   }
@@ -380,7 +475,9 @@
     color: var(--ink-dim);
     border-color: var(--border);
   }
-  input {
+  input,
+  select,
+  textarea {
     background: var(--bg);
     border: 1px solid var(--border);
     border-radius: 5px;
@@ -461,6 +558,19 @@
     font-size: 12px;
     color: var(--ink-dim);
     margin-top: 8px;
+  }
+  .err {
+    font-size: 12px;
+    color: #e05252;
+    margin-top: 8px;
+  }
+  .import-area {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    resize: vertical;
+    margin-top: 10px;
   }
   code {
     background: var(--surface);
