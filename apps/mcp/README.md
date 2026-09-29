@@ -44,7 +44,7 @@ or in `.mcp.json`:
 | `activity` | an issue's change history |
 | `list_projects` `list_epics` `list_cycles` `list_repos` | metadata |
 | `get_epic` `create_epic` `update_epic` `delete_epic` | read and manage epics by key or id; `get_epic` includes child issues, progress, and counts; deleting an epic keeps and unlinks its child issues |
-| `create_project` `update_project` `add_repo` `remove_repo` `reconcile` | admin (update_project can rename, archive/unarchive, attach/detach forgejo_repo) |
+| `create_project` `update_project` `create_cycle` `start_cycle` `end_cycle` `add_repo` `remove_repo` `reconcile` | admin (cycles can be created with ISO dates and started/ended by name or id; update_project can rename, archive/unarchive, attach/detach forgejo_repo) |
 | `import_markdown` | outline → epics + issues |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |
 

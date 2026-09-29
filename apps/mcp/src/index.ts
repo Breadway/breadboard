@@ -377,6 +377,41 @@ server.tool(
     }),
 );
 
+server.tool(
+  "create_cycle",
+  "Create a cycle with inclusive ISO dates.",
+  {
+    name: z.string(),
+    starts_on: z.string().describe("cycle start date in YYYY-MM-DD form"),
+    ends_on: z.string().describe("cycle end date in YYYY-MM-DD form"),
+  },
+  ({ name, starts_on, ends_on }) => run(() => client.createCycle({ name, starts_on, ends_on })),
+);
+
+server.tool(
+  "start_cycle",
+  "Start a cycle by name or id.",
+  { cycle: z.string().describe("cycle name or id") },
+  ({ cycle }) =>
+    run(async () => {
+      const id = await resolveCycleId(cycle);
+      if (id === undefined) throw new Error("cycle name or id is required");
+      return client.startCycle(id);
+    }),
+);
+
+server.tool(
+  "end_cycle",
+  "End a cycle by name or id.",
+  { cycle: z.string().describe("cycle name or id") },
+  ({ cycle }) =>
+    run(async () => {
+      const id = await resolveCycleId(cycle);
+      if (id === undefined) throw new Error("cycle name or id is required");
+      return client.endCycle(id);
+    }),
+);
+
 server.tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => client.listRepos()));
 
 server.tool(

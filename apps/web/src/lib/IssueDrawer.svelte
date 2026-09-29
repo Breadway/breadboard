@@ -29,6 +29,7 @@
   let linkBusy = $state(false);
 
   const manualLinkKinds: LinkKind[] = ["blocks", "blocked-by", "relates-to"];
+  let selectedEpic = $derived(store.epics.find((ep) => ep.id === detail?.epic_id));
 
   function requestDelete() {
     if (confirmingDelete) {
@@ -301,6 +302,9 @@
               <option value="">—</option>
               {#each store.epics as ep (ep.id)}<option value={ep.id}>{ep.key} · {ep.title}</option>{/each}
             </select>
+            {#if selectedEpic?.description?.trim()}
+              <p class="epic-description">{selectedEpic.description}</p>
+            {/if}
           </label>
         {/if}
 
@@ -494,6 +498,14 @@
   }
   .block {
     width: 100%;
+  }
+  .epic-description {
+    margin: 3px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    letter-spacing: normal;
+    text-transform: none;
+    white-space: pre-wrap;
   }
   .field-head {
     display: flex;

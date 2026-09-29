@@ -90,6 +90,10 @@
         </button>
       </div>
 
+      {#if e.description?.trim()}
+        <p class="epic-description">{e.description}</p>
+      {/if}
+
       <div class="bar" title="{pct(e)}% done">
         {#each STATUSES as s (s)}
           {@const n = e.progress[s] ?? 0}
@@ -131,6 +135,7 @@
   .title { flex: 1; background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 4px 6px; color: var(--ink); font: 600 14px/1.2 inherit; }
   .title:hover, .title:focus { border-color: var(--border); background: var(--bg); }
   .count { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 12px; }
+  .epic-description { margin: 8px 0 0; color: var(--ink-dim); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
   .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 10px; background: var(--bg); }
   .seg { min-width: 2px; }
   .seg.s-backlog { background: var(--status-backlog); }
