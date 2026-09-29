@@ -310,6 +310,73 @@ server.tool("activity", "An issue's change history.", { key: z.string() }, ({ ke
 server.tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));
 server.tool("list_epics", "All epics with done/total progress.", {}, () => run(() => client.listEpics()));
 server.tool("list_cycles", "All cycles.", {}, () => run(() => client.listCycles()));
+
+server.tool(
+  "get_epic",
+  "Get an epic by key or id, including its progress and child issues.",
+  { epic: z.string().describe("epic key or id") },
+  ({ epic }) =>
+    run(async () => {
+      const id = await resolveEpicId(epic);
+      if (id === undefined) throw new Error("epic key or id is required");
+      const [details, issues] = await Promise.all([
+        client.getEpic(id),
+        client.listIssues({ epic_id: id }),
+      ]);
+      return { ...details, issues };
+    }),
+);
+
+server.tool(
+  "create_epic",
+  "Create an epic, optionally scoped to a project.",
+  {
+    key: z.string().describe("epic key"),
+    title: z.string(),
+    description: z.string().optional(),
+    project: z.string().optional().describe("project key or id"),
+  },
+  ({ key, title, description, project }) =>
+    run(async () =>
+      client.createEpic({
+        key: key.toUpperCase(),
+        title,
+        description,
+        project_id: project === undefined ? undefined : await resolveProjectId(project),
+      }),
+    ),
+);
+
+server.tool(
+  "update_epic",
+  "Update an epic by key or id. Omitted fields are left unchanged; description may be null to clear it.",
+  {
+    epic: z.string().describe("epic key or id"),
+    title: z.string().optional(),
+    description: z.string().nullable().optional(),
+    archived: z.boolean().optional(),
+  },
+  ({ epic, title, description, archived }) =>
+    run(async () => {
+      const id = await resolveEpicId(epic);
+      if (id === undefined) throw new Error("epic key or id is required");
+      return client.updateEpic(id, { title, description, archived });
+    }),
+);
+
+server.tool(
+  "delete_epic",
+  "Delete an epic by key or id. Child issues are kept and unlinked from the epic.",
+  { epic: z.string().describe("epic key or id") },
+  ({ epic }) =>
+    run(async () => {
+      const id = await resolveEpicId(epic);
+      if (id === undefined) throw new Error("epic key or id is required");
+      await client.deleteEpic(id);
+      return `deleted epic ${epic}; child issues were kept and unlinked`;
+    }),
+);
+
 server.tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => client.listRepos()));
 
 server.tool(

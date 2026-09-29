@@ -43,6 +43,7 @@ or in `.mcp.json`:
 | `create_issue` `update_issue` `move_issue` `delete_issue` `move_issue_project` `comment` | drive it (epic/cycle by key/name; update_issue also takes estimate and add_links/remove_links) |
 | `activity` | an issue's change history |
 | `list_projects` `list_epics` `list_cycles` `list_repos` | metadata |
+| `get_epic` `create_epic` `update_epic` `delete_epic` | read and manage epics by key or id; `get_epic` includes child issues, progress, and counts; deleting an epic keeps and unlinks its child issues |
 | `create_project` `update_project` `add_repo` `remove_repo` `reconcile` | admin (update_project can rename, archive/unarchive, attach/detach forgejo_repo) |
 | `import_markdown` | outline → epics + issues |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |

@@ -255,7 +255,9 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 (filters: project, status, cycle, epic, assignee_id, mine),
 `create_issue` / `update_issue` / `move_issue` / `delete_issue` /
 `move_issue_project` / `comment`, `activity`,
-`list_{projects,epics,cycles,repos}`, `create_project` / `update_project`,
+`list_{projects,epics,cycles,repos}`, `get_epic` / `create_epic` /
+`update_epic` / `delete_epic` (delete keeps and unlinks child issues),
+`create_project` / `update_project`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
