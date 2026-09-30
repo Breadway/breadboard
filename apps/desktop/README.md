@@ -47,5 +47,7 @@ favicon) is the standard Tauri set. Regenerate it from a square source with:
 cargo tauri icon path/to/source.png   # then delete icons/android, icons/ios
 ```
 
-Distribute via bakery alongside `breadboard-cli` once release secrets are set up
-(separate issue).
+The gated bakery workflows build the deb bundle and distribute its native
+binary as `breadboard-desktop`, alongside the separate `breadboard-cli`
+package. See `packaging/BAKERY.md` at the repository root for activation and
+signing requirements. Neither building nor staging starts the desktop app.

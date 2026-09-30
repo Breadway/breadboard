@@ -18,9 +18,10 @@ fix/<issue-number-or-short-name>
 Branch off `main`, push back into `main` when ready. Short-lived branches are
 deleted on merge. Push to `origin` (Forgejo).
 
-The server is deployed as a container from `main` (`packaging/`). Bakery-track
-distribution of the CLI (dev / `vX.Y.Z-rc.N` / `vX.Y.Z`) will follow the sibling
-repos' workflow once the release secrets are in place.
+The server is deployed as a container from `main` (`packaging/`). Gated bakery
+workflows prepare CLI and desktop packages from main (dev), `vX.Y.Z-rc.N`
+(beta), and `vX.Y.Z` (stable). Activation requirements and the two manifests are
+documented in `packaging/BAKERY.md`.
 
 ## Local development
 

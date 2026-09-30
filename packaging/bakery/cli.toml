@@ -1,0 +1,10 @@
+name = "breadboard-cli"
+description = "Command line and terminal UI for breadboard"
+binaries = ["breadboard"]
+system_deps = ["openssl"]
+optional_system_deps = []
+bread_deps = []
+license_file = "LICENSE"
+
+[install]
+post_install = []

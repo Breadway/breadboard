@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    if: ${{ vars.BREADBOARD_BAKERY_ENABLED == 'true' && !contains(github.ref_name, '-rc.') }}
+    runs-on: [self-hosted, hestia]
+    steps:
+      - name: checkout exact revision
+        run: |
+          set -euo pipefail
+          RELEASE_SOURCE="$(mktemp -d "${RUNNER_TEMP:-/tmp}/breadboard-release.XXXXXX")"
+          echo "BREADBOARD_RELEASE_SOURCE=$RELEASE_SOURCE" >> "$GITHUB_ENV"
+          git init "$RELEASE_SOURCE"
+          git -C "$RELEASE_SOURCE" remote add origin "https://git.breadway.dev/${GITHUB_REPOSITORY}.git"
+          git -C "$RELEASE_SOURCE" fetch --depth 1 origin "${GITHUB_SHA}"
+          git -C "$RELEASE_SOURCE" checkout --detach FETCH_HEAD
+      - name: build and publish signed stable clients
+        env:
+          MINISIGN_SEC_KEY: ${{ secrets.BAKERY_MINISIGN_SEC_KEY_PATH }}
+          MINISIGN_SEC_KEY_PASSWORD: ${{ secrets.BAKERY_MINISIGN_SEC_KEY_PASSWORD }}
+        run: bash "$BREADBOARD_RELEASE_SOURCE/scripts/ci-bakery-release.sh" stable
+      - name: clean isolated source
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          if [ -n "${BREADBOARD_RELEASE_SOURCE:-}" ]; then
+            rm -rf "$BREADBOARD_RELEASE_SOURCE"
+          fi
