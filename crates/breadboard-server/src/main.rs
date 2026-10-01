@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let shutdown = state.shutdown.clone();
     let app = http::router(state);
 
     let addr: SocketAddr = listen.parse().context("parsing listen address")?;
@@ -70,14 +71,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(%addr, "listening");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .context("server error")?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+async fn shutdown_signal(shutdown: tokio::sync::watch::Sender<bool>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut terminate = signal(SignalKind::terminate()).expect("register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.ok();
+
     tracing::info!("shutdown signal received");
+    shutdown.send_replace(true);
 }

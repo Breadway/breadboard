@@ -119,7 +119,13 @@ async fn events(
     State(state): State<AppState>,
     _user: auth::AuthUser,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = event_stream(state.bus.subscribe());
+    let mut shutdown = state.shutdown.subscribe();
+    let shutdown = async move {
+        if !*shutdown.borrow() {
+            let _ = shutdown.changed().await;
+        }
+    };
+    let stream = futures::StreamExt::take_until(event_stream(state.bus.subscribe()), shutdown);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
 }
