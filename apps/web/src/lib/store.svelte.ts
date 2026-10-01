@@ -6,7 +6,6 @@ import {
   BreadboardClient,
   type BoardEvent,
   type Cycle,
-  type Epic,
   type EpicView,
   type Notification,
   type Issue,
@@ -20,34 +19,51 @@ import {
 
 export const api = new BreadboardClient();
 
-type AuthState = "loading" | "in" | "out";
+type AuthState = "loading" | "in" | "out" | "error";
+export type View = "board" | "backlog" | "roadmap" | "inbox" | "settings";
+
+export interface Toast {
+  id: number;
+  msg: string;
+  kind: "info" | "error";
+  undo?: () => void;
+}
 
 class Store {
   me = $state<User | null>(null);
   auth = $state<AuthState>("loading");
+  authError = $state<string | null>(null);
   issues = $state<Issue[]>([]);
   projects = $state<Project[]>([]);
   cycles = $state<Cycle[]>([]);
   epics = $state<EpicView[]>([]);
   connected = $state(false);
-  toast = $state<string | null>(null);
+  toast = $state<Toast | null>(null);
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
   unread = $state(0);
-  bellOpen = $state(false);
+
+  // Bumped whenever a live event touches an issue, so the open issue panel
+  // knows to refetch its comments and activity.
+  issueTick = $state<{ key: string; n: number }>({ key: "", n: 0 });
 
   // UI state
-  view = $state<"board" | "backlog" | "roadmap" | "settings">("board");
+  view = $state<View>("board");
   selectedKey = $state<string | null>(null);
   paletteOpen = $state(false);
+  paletteStatus = $state<Status | null>(null);
   filterProject = $state<string>("");
   filterCycle = $state<number | 0>(0);
   filterEpic = $state<number | 0>(0);
-  filterAssignee = $state<number | 0>(0);
   filterMine = $state(false);
 
   #unsub: (() => void) | null = null;
+  #everLive = false;
+  #retry: ReturnType<typeof setTimeout> | undefined;
+  #retryDelay = 1000;
+  #toastTimer: ReturnType<typeof setTimeout> | undefined;
+  #toastSeq = 0;
 
   get isDev() {
     return import.meta.env.DEV;
@@ -76,7 +92,6 @@ class Store {
       }
       if (this.filterCycle && i.cycle_id !== this.filterCycle) return false;
       if (this.filterEpic && i.epic_id !== this.filterEpic) return false;
-      if (this.filterAssignee && i.assignee_id !== this.filterAssignee) return false;
       if (this.filterMine && i.assignee_id !== this.me?.id) return false;
       return true;
     });
@@ -92,27 +107,64 @@ class Store {
     return this.projects.find((p) => p.id === id)?.key ?? "?";
   }
 
+  project(id: number): Project | undefined {
+    return this.projects.find((p) => p.id === id);
+  }
+
   findIssue(id: number): Issue | undefined {
     return this.issues.find((i) => i.id === id);
   }
 
+  issueByKey(key: string | null): Issue | undefined {
+    return key ? this.issues.find((i) => i.key === key) : undefined;
+  }
+
+  /** The open cycle running today, else the next open one to start. */
+  get activeCycle(): Cycle | undefined {
+    const today = new Date().toISOString().slice(0, 10);
+    const open = this.cycles.filter((c) => !c.closed).sort((a, b) => a.starts_on.localeCompare(b.starts_on));
+    return open.find((c) => c.starts_on <= today && today <= c.ends_on) ?? open.find((c) => c.starts_on > today) ?? open[0];
+  }
+
   async init() {
+    clearTimeout(this.#retry);
     try {
       this.me = await api.me();
-      this.auth = "in";
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
         this.auth = "out";
         return;
       }
-      throw e;
+      // Network error, 502 mid-deploy, etc: say so and keep retrying with
+      // backoff instead of sitting on "connecting…" forever.
+      this.auth = "error";
+      this.authError = errMsg(e);
+      this.#retry = setTimeout(() => void this.init(), this.#retryDelay);
+      this.#retryDelay = Math.min(this.#retryDelay * 2, 30_000);
+      return;
     }
-    await this.loadAll();
+    this.#retryDelay = 1000;
+    this.authError = null;
+    try {
+      await this.loadAll();
+    } catch (e) {
+      this.auth = "error";
+      this.authError = errMsg(e);
+      this.#retry = setTimeout(() => void this.init(), this.#retryDelay);
+      return;
+    }
+    this.auth = "in";
     await this.loadInbox();
     this.#connect();
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
     }
+  }
+
+  retryNow() {
+    this.#retryDelay = 1000;
+    this.auth = "loading";
+    void this.init();
   }
 
   async loadInbox() {
@@ -167,7 +219,16 @@ class Store {
     this.#unsub?.();
     this.#unsub = api.subscribe(
       (ev) => void this.#onEvent(ev),
-      (live) => (this.connected = live),
+      (live) => {
+        // The server's bus has no replay, so anything broadcast while the
+        // stream was down is gone: reload everything when it comes back.
+        if (live && !this.connected && this.#everLive) {
+          void this.loadAll().catch(() => {});
+          void this.loadInbox();
+        }
+        if (live) this.#everLive = true;
+        this.connected = live;
+      },
     );
   }
 
@@ -180,6 +241,7 @@ class Store {
         try {
           const fresh = await api.getIssue(ev.key);
           this.#upsert(fresh);
+          this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         } catch {
           /* deleted between event and fetch */
         }
@@ -194,7 +256,7 @@ class Store {
         this.cycles = await api.listCycles();
         break;
       case "sync.drift":
-        this.flash(`sync drift on ${ev.key}: ${ev.field} (${ev.winner} won)`);
+        this.flash(`Sync drift on ${ev.key}: ${ev.field} (${ev.winner} won)`, "info");
         break;
       case "notified":
         if (ev.user_id === this.me?.id) {
@@ -219,16 +281,27 @@ class Store {
     else this.issues[idx] = issue;
   }
 
-  flash(msg: string) {
-    this.toast = msg;
-    setTimeout(() => {
-      if (this.toast === msg) this.toast = null;
-    }, 3000);
+  flash(msg: string, kind: Toast["kind"] = "error", undo?: () => void) {
+    const t: Toast = { id: ++this.#toastSeq, msg, kind, undo };
+    this.toast = t;
+    clearTimeout(this.#toastTimer);
+    this.#toastTimer = setTimeout(() => {
+      if (this.toast?.id === t.id) this.toast = null;
+    }, undo ? 5000 : 3200);
+  }
+
+  info(msg: string, undo?: () => void) {
+    this.flash(msg, "info", undo);
+  }
+
+  openPalette(status: Status | null = null) {
+    this.paletteStatus = status;
+    this.paletteOpen = true;
   }
 
   // --- mutations (optimistic) ------------------------------------------
 
-  async move(key: string, status: Status) {
+  async move(key: string, status: Status, opts: { undoable?: boolean } = {}) {
     const issue = this.issues.find((i) => i.key === key);
     if (!issue || issue.status === status) return;
     const prev = issue.status;
@@ -236,32 +309,39 @@ class Store {
     try {
       const updated = await api.patchIssue(key, { status });
       this.#upsert(updated);
+      if (opts.undoable !== false) {
+        this.info(`Moved ${key} to ${statusName(status)}`, () => void this.move(key, prev, { undoable: false }));
+      }
     } catch (e) {
       issue.status = prev; // revert
-      this.flash(`couldn't move ${key}: ${errMsg(e)}`);
+      this.flash(`Couldn't move ${key}: ${errMsg(e)}`);
     }
   }
 
-  async patch(key: string, patch: IssuePatch) {
+  /** Patch an issue. Resolves to the updated issue, or null on failure (the
+   *  toast has already explained it); never rejects. */
+  async patch(key: string, patch: IssuePatch): Promise<Issue | null> {
     try {
       const updated = await api.patchIssue(key, patch);
       this.#upsert(updated);
       return updated;
     } catch (e) {
-      this.flash(`update failed: ${errMsg(e)}`);
-      throw e;
+      this.flash(`Couldn't update ${key}: ${errMsg(e)}`);
+      return null;
     }
   }
 
   async moveProject(key: string, project: string) {
     try {
       const updated = await api.moveIssueProject(key, project);
+      this.issues = this.issues.filter((i) => i.key !== key);
       this.#upsert(updated);
       if (this.selectedKey === key) this.selectedKey = updated.key;
+      this.info(`${key} is now ${updated.key}`);
       return updated;
     } catch (e) {
-      this.flash(`move failed: ${errMsg(e)}`);
-      throw e;
+      this.flash(`Couldn't move ${key}: ${errMsg(e)}`);
+      return null;
     }
   }
 
@@ -269,9 +349,10 @@ class Store {
     try {
       const issue = await api.createIssue(input);
       this.#upsert(issue);
+      this.info(`Created ${issue.key}`);
       return issue;
     } catch (e) {
-      this.flash(`create failed: ${errMsg(e)}`);
+      this.flash(`Couldn't create the issue: ${errMsg(e)}`);
       return null;
     }
   }
@@ -282,9 +363,10 @@ class Store {
     if (this.selectedKey === key) this.selectedKey = null;
     try {
       await api.deleteIssue(key);
+      this.info(`Deleted ${key}`);
     } catch (e) {
       this.issues = snapshot;
-      this.flash(`delete failed: ${errMsg(e)}`);
+      this.flash(`Couldn't delete ${key}: ${errMsg(e)}`);
     }
   }
 
@@ -300,13 +382,29 @@ class Store {
   }
 
   async logout() {
-    await fetch("/auth/logout", { method: "POST", credentials: "include" });
+    await fetch("/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
     location.reload();
   }
 }
 
-function errMsg(e: unknown): string {
+export function statusName(s: string): string {
+  return s[0].toUpperCase() + s.slice(1);
+}
+
+export function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** True when the key event came from something you can type into. */
+export function isTyping(e: KeyboardEvent): boolean {
+  const t = e.target as HTMLElement | null;
+  return !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable);
+}
+
+/** True for a bare key press: no Ctrl, Alt or Meta held. Shift is allowed
+ *  since it's part of characters like `?` and `[`. */
+export function bare(e: KeyboardEvent): boolean {
+  return !e.ctrlKey && !e.metaKey && !e.altKey;
 }
 
 export const store = new Store();

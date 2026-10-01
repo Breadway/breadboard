@@ -118,7 +118,7 @@
   const syncNow = () =>
     run(async () => {
       await api.reconcile();
-      store.flash("reconcile queued");
+      store.info("Sync queued. Changes from Forgejo will appear shortly.");
     });
 
   const createCycle = () =>
@@ -391,27 +391,28 @@
 
 <style>
   .wrap {
-    height: calc(100vh - 46px);
+    height: 100%;
     overflow-y: auto;
-    padding: 20px 24px;
-    max-width: 900px;
-    margin: 0 auto;
+    padding: 20px 24px 40px;
+  }
+  .wrap > * {
+    max-width: 920px;
+    margin-left: auto;
+    margin-right: auto;
   }
   .card {
     background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 10px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
     padding: 16px 18px;
-    margin-bottom: 20px;
+    margin-bottom: 18px;
   }
   h2 {
     margin: 0 0 4px;
-    font-size: 13px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--ink-dim);
-    border-bottom: 1px solid var(--border);
+    font: 700 16px/1.2 var(--font-display);
+    letter-spacing: -0.01em;
+    color: var(--ink);
+    border-bottom: 1px solid var(--line);
     padding-bottom: 10px;
     margin-bottom: 8px;
     display: flex;
@@ -440,13 +441,13 @@
     background: color-mix(in srgb, var(--bg) 50%, transparent);
   }
   .mono {
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
   }
   .repo-input {
     width: 100%;
     box-sizing: border-box;
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
   }
   .dim {
@@ -479,18 +480,29 @@
   select,
   textarea {
     background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 7px;
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 6px 9px;
     color: var(--ink);
     font: inherit;
+    font-size: 13px;
+    outline: none;
+  }
+  input:focus,
+  select:focus,
+  textarea:focus {
+    border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+  input::placeholder,
+  textarea::placeholder {
+    color: var(--ink-3);
   }
   .add-form {
     margin-top: 14px;
     padding: 12px 14px;
     background: var(--bg);
-    border: 1px dashed var(--border);
-    border-radius: 8px;
+    border: 1px dashed var(--line-2);
+    border-radius: 10px;
   }
   .add-label {
     display: block;
@@ -507,10 +519,10 @@
     align-items: center;
   }
   button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 12px;
+    background: var(--raise);
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 6px 12px;
     color: var(--ink);
     font: inherit;
     font-size: 12px;
@@ -543,7 +555,7 @@
   button.primary {
     background: var(--accent);
     border-color: var(--accent);
-    color: #000;
+    color: var(--on-accent);
     font-weight: 600;
   }
   button.primary:hover:not(:disabled) {
@@ -567,7 +579,7 @@
   .import-area {
     width: 100%;
     box-sizing: border-box;
-    font-family: ui-monospace, monospace;
+    font-family: var(--font-mono);
     font-size: 12px;
     resize: vertical;
     margin-top: 10px;
@@ -598,7 +610,7 @@
     flex-shrink: 0;
     border-radius: 999px;
     background: var(--bg);
-    border: 1px solid var(--border);
+    border: 1px solid var(--line-2);
     transition: background 0.15s, border-color 0.15s;
   }
   .toggle .thumb {
@@ -610,6 +622,10 @@
     border-radius: 50%;
     background: var(--ink-dim);
     transition: transform 0.15s, background 0.15s;
+  }
+  .toggle input:focus-visible + .track {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
   }
   .toggle input:checked + .track {
     background: color-mix(in srgb, var(--accent) 30%, var(--bg));

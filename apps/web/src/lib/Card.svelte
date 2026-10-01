@@ -1,17 +1,20 @@
 <script lang="ts">
   import type { Issue } from "@breadboard/api-client";
   import { store } from "./store.svelte";
+  import PriorityGlyph from "./ui/PriorityGlyph.svelte";
+  import Avatar from "./ui/Avatar.svelte";
+  import { labelColor, projectColor } from "./ui/colors";
 
   let { issue, keyboardSelected = false }: { issue: Issue; keyboardSelected?: boolean } = $props();
 
+  const MAX_LABELS = 3;
+
   let el: HTMLButtonElement | undefined = $state();
+  let dragging = $state(false);
   $effect(() => {
     if (keyboardSelected) el?.scrollIntoView({ block: "nearest" });
   });
 
-  const prioClass = $derived(
-    issue.priority === "none" ? "" : `prio-${issue.priority}`,
-  );
   // PRs that close this issue don't get their own card (see store.filtered):
   // their state surfaces here instead, so the board shows one thing, not two.
   const closingPrs = $derived(
@@ -20,175 +23,184 @@
       .map((l) => store.findIssue(l.target_id))
       .filter((t): t is Issue => !!t && t.type === "pr"),
   );
+  const pkey = $derived(store.projectKey(issue.project_id));
 </script>
 
 <button
   bind:this={el}
   class="card"
+  class:done={issue.status === "done"}
   class:selected={store.selectedKey === issue.key}
   class:kb={keyboardSelected}
+  class:dragging
   draggable="true"
-  ondragstart={(e) => e.dataTransfer?.setData("text/plain", issue.key)}
+  ondragstart={(e) => {
+    e.dataTransfer?.setData("text/plain", issue.key);
+    dragging = true;
+  }}
+  ondragend={() => (dragging = false)}
   onclick={() => (store.selectedKey = issue.key)}
 >
-  <div class="card-top">
+  <div class="top">
+    <span class="tick" style="background:{projectColor(pkey)}"></span>
     <span class="key">{issue.key}</span>
-    {#if issue.priority !== "none"}
-      <span class="prio {prioClass}" title={issue.priority}>{issue.priority}</span>
-    {/if}
-    {#if issue.forgejo_ref}
-      <span class="fg" title="synced with {issue.forgejo_ref.repo}#{issue.forgejo_ref.number}">⇄</span>
-    {/if}
+    {#if issue.type === "pr"}<span class="pr-tag">PR</span>{/if}
+    <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
   <div class="title">{issue.title}</div>
-  {#if closingPrs.length}
-    <div class="pr-badges">
+  {#if issue.labels.length || closingPrs.length || issue.estimate != null || issue.assignee_id || issue.forgejo_ref}
+    <div class="bot">
+      {#each issue.labels.slice(0, MAX_LABELS) as label (label)}
+        <span class="chip-label"><i style="background:{labelColor(label)}"></i>{label}</span>
+      {/each}
+      {#if issue.labels.length > MAX_LABELS}
+        <span class="more" title={issue.labels.slice(MAX_LABELS).join(", ")}>+{issue.labels.length - MAX_LABELS}</span>
+      {/if}
       {#each closingPrs as pr (pr.id)}
-        <span class="pr-badge" class:merged={pr.status === "done"} title={pr.title}>
-          {pr.status === "done" ? "✓" : "⇢"} PR #{pr.forgejo_ref?.number ?? pr.id}
+        <span class="prc" class:merged={pr.status === "done"} title="{pr.status === 'done' ? 'Merged' : 'Open'} pull request: {pr.title}">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5" /><circle cx="4" cy="12.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5" /><circle cx="12" cy="12.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.5" /><path d="M4 5.3v5.4M12 10.7V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          #{pr.forgejo_ref?.number ?? pr.id}
         </span>
       {/each}
-    </div>
-  {/if}
-  {#if issue.labels.length || issue.estimate != null || issue.assignee_id}
-    <div class="card-bot">
-      {#each issue.labels as label (label)}
-        <span class="label">{label}</span>
-      {/each}
-      {#if issue.estimate != null}<span class="est">{issue.estimate}</span>{/if}
-      {#if issue.assignee_id === store.me?.id}
-        {#if store.me?.avatar_url}
-          <img class="avatar" src={store.me.avatar_url} alt="" title="assigned to you" width="14" height="14" />
-        {:else}
-          <span class="me" title="assigned to you">●</span>
-        {/if}
-      {:else if issue.assignee_id}
-        <span class="assignee" title="assigned">◐</span>
+      {#if issue.estimate != null}<span class="est" title="{issue.estimate} points"><i></i>{issue.estimate}</span>{/if}
+      <span class="grow"></span>
+      {#if issue.forgejo_ref}
+        <span class="sync" title="Synced with {issue.forgejo_ref.repo}#{issue.forgejo_ref.number}">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5A5 5 0 0 1 12.2 4.5M13 9.5A5 5 0 0 1 3.8 11.5M12.5 2v2.8H9.7M3.5 14v-2.8h2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        </span>
       {/if}
+      <Avatar userId={issue.assignee_id} size={20} />
     </div>
   {/if}
 </button>
 
 <style>
   .card {
-    display: block;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
     width: 100%;
+    padding: 11px 12px 10px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
     text-align: left;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 9px;
-    margin-bottom: 6px;
     cursor: grab;
-    color: var(--ink);
-    font: inherit;
-    transition: border-color 0.12s, transform 0.12s, box-shadow 0.12s;
+    transition:
+      transform 0.16s var(--ease),
+      border-color 0.15s,
+      box-shadow 0.16s,
+      background-color 0.15s;
   }
   .card:hover {
-    /* inset only, same reason as .kb below: an outward drop shadow bleeds
-       past the card's box and .cards' overflow-y:auto clips it there. */
-    border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent) inset;
+    border-color: var(--line-2);
+    background: var(--raise);
+    transform: translateY(-1px);
+    box-shadow: 0 8px 22px rgba(0, 0, 0, 0.35);
   }
   .card.selected {
     border-color: var(--accent);
-    box-shadow: 0 0 0 1px var(--accent) inset;
+    box-shadow: 0 0 0 1px var(--accent);
   }
   .card.kb {
     border-color: var(--accent);
-    /* inset, not outline+offset: the parent .cards has overflow-y:auto, which
-       per spec forces overflow-x to compute as auto too, clipping anything
-       that bleeds outside the card's own border box. */
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent) inset;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .card.dragging {
+    opacity: 0.4;
   }
   .card:active {
     cursor: grabbing;
   }
-  .card-top {
+  .card.done .title {
+    color: var(--ink-dim);
+  }
+  .top {
     display: flex;
     align-items: center;
-    gap: 6px;
-    margin-bottom: 3px;
+    gap: 7px;
+  }
+  .tick {
+    width: 3px;
+    height: 11px;
+    border-radius: 2px;
+    flex: none;
   }
   .key {
-    font-size: 11px;
-    color: var(--ink-dim);
-    font-variant-numeric: tabular-nums;
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-3);
   }
-  .title {
-    font-size: 13px;
-    font-weight: 500;
-    line-height: 1.35;
-  }
-  .pr-badges {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 4px;
-  }
-  .pr-badge {
-    font-size: 10px;
-    padding: 1px 6px;
-    border-radius: 999px;
-    border: 1px solid var(--accent);
-    color: var(--accent);
-  }
-  .pr-badge.merged {
-    border-color: var(--status-done);
-    color: var(--status-done);
-  }
-  .card-bot {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px;
-    margin-top: 6px;
-  }
-  .label {
-    font-size: 10px;
-    padding: 1px 5px;
-    border-radius: 999px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--ink-dim);
+  .pr-tag {
+    font: 600 9px/1 var(--font-mono);
+    letter-spacing: 0.06em;
+    padding: 2px 4px;
+    border-radius: 3px;
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 14%, transparent);
   }
   .prio {
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ink-dim);
     margin-left: auto;
   }
-  .prio-high {
-    color: #e0a052;
+  .title {
+    font-size: 13.5px;
+    font-weight: 500;
+    line-height: 1.38;
+    overflow-wrap: anywhere;
+    text-wrap: pretty;
   }
-  .prio-urgent {
-    color: #e05252;
-    font-weight: 600;
+  .bot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-height: 20px;
   }
-  .fg {
-    color: var(--ink-dim);
-    font-size: 11px;
+  .grow {
+    flex: 1;
+  }
+  .more {
+    font: 500 10.5px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .prc {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: 500 10.5px/1 var(--font-mono);
+    padding: 3px 6px;
+    border-radius: 5px;
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 12%, transparent);
+  }
+  .prc.merged {
+    color: var(--status-done);
+    background: color-mix(in srgb, var(--status-done) 12%, transparent);
+  }
+  .prc svg {
+    width: 11px;
+    height: 11px;
   }
   .est {
-    font-size: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font: 500 10.5px/1 var(--font-mono);
     color: var(--ink-dim);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0 4px;
   }
-  .me {
-    color: #4caf50;
-    margin-left: auto;
-  }
-  .avatar {
+  .est i {
+    width: 4px;
+    height: 4px;
     border-radius: 50%;
-    object-fit: cover;
-    margin-left: auto;
-    display: block;
+    background: var(--ink-3);
   }
-  .assignee {
-    color: var(--ink-dim);
-    margin-left: auto;
+  .sync {
+    display: grid;
+    place-items: center;
+    color: var(--ink-3);
+  }
+  .sync svg {
+    width: 12px;
+    height: 12px;
   }
 </style>

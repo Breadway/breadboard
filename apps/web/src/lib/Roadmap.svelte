@@ -1,25 +1,48 @@
 <script lang="ts">
-  import { STATUSES, type EpicView } from "@breadboard/api-client";
-  import { api, store } from "./store.svelte";
+  import { STATUSES, type Cycle, type EpicView, type Issue } from "@breadboard/api-client";
+  import { api, errMsg, store } from "./store.svelte";
+  import Menu, { type MenuItem } from "./ui/Menu.svelte";
+  import StatusGlyph from "./ui/StatusGlyph.svelte";
+
+  // Epics are rows, cycles are columns: the last couple of shipped cycles,
+  // every open one, then a column for work not in any cycle.
+  const SHIPPED_SHOWN = 2;
+  const CELL_MAX = 6;
 
   let busy = $state(false);
-  let expanded = $state<number | null>(null);
   let neKey = $state("");
   let neTitle = $state("");
-  let confirmingDelete = $state<number | null>(null);
-  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+  let showArchived = $state(false);
+  let confirming = $state<number | null>(null);
 
-  async function reload() {
-    store.epics = await api.listEpics();
+  const columns = $derived.by(() => {
+    const shipped = store.cycles
+      .filter((c) => c.closed)
+      .sort((a, b) => b.ends_on.localeCompare(a.ends_on))
+      .slice(0, SHIPPED_SHOWN)
+      .reverse();
+    const open = store.cycles.filter((c) => !c.closed).sort((a, b) => a.starts_on.localeCompare(b.starts_on));
+    return [...shipped, ...open, null] as (Cycle | null)[];
+  });
+  const active = $derived(store.activeCycle);
+  const epics = $derived(store.epics.filter((e) => showArchived || !e.archived));
+  const archivedCount = $derived(store.epics.filter((e) => e.archived).length);
+
+  function cell(epicId: number, cycle: Cycle | null): Issue[] {
+    return store.issues
+      .filter((i) => i.epic_id === epicId && i.type !== "pr" && (cycle ? i.cycle_id === cycle.id : !i.cycle_id || !columns.some((c) => c?.id === i.cycle_id)))
+      .sort((a, b) => STATUSES.indexOf(b.status) - STATUSES.indexOf(a.status));
   }
+
+  const fmt = (d: string) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
 
   async function run(fn: () => Promise<unknown>) {
     busy = true;
     try {
       await fn();
-      await reload();
+      store.epics = await api.listEpics();
     } catch (e) {
-      store.flash(e instanceof Error ? e.message : String(e));
+      store.flash(errMsg(e));
     } finally {
       busy = false;
     }
@@ -28,137 +51,345 @@
   const create = () =>
     run(async () => {
       await api.createEpic({ key: neKey.trim().toUpperCase(), title: neTitle.trim() });
+      store.info(`Created epic ${neKey.trim().toUpperCase()}`);
       neKey = "";
       neTitle = "";
     });
 
-  const rename = (e: EpicView, title: string) =>
-    run(() => api.updateEpic(e.id, { title }));
-
-  const archive = (e: EpicView) => run(() => api.updateEpic(e.id, { archived: !e.archived }));
-
-  function requestDelete(e: EpicView) {
-    if (confirmingDelete === e.id) {
-      clearTimeout(confirmTimer);
-      confirmingDelete = null;
-      void run(() => api.deleteEpic(e.id));
-    } else {
-      confirmingDelete = e.id;
-      confirmTimer = setTimeout(() => (confirmingDelete = null), 3000);
-    }
+  function rename(e: EpicView, title: string) {
+    const t = title.trim();
+    if (t && t !== e.title) void run(() => api.updateEpic(e.id, { title: t }));
   }
 
-  function pct(e: EpicView) {
-    return e.total ? Math.round(((e.progress.done ?? 0) / e.total) * 100) : 0;
-  }
-
-  function childIssues(epicId: number) {
-    return store.issues
-      .filter((i) => i.epic_id === epicId)
-      .sort((a, b) => STATUSES.indexOf(a.status) - STATUSES.indexOf(b.status));
+  function epicMenu(e: EpicView): MenuItem[] {
+    return [
+      { label: "Show its issues on the board", run: () => { store.filterEpic = e.id; store.view = "board"; } },
+      { label: e.archived ? "Unarchive" : "Archive", run: () => void run(() => api.updateEpic(e.id, { archived: !e.archived })) },
+      { label: "Delete epic…", danger: true, run: () => (confirming = e.id) },
+    ];
   }
 </script>
 
 <div class="wrap">
   <div class="head">
-    <h1>Roadmap</h1>
+    <p class="lede">Each row is an epic; each column is a cycle. Issues sit where they're scheduled.</p>
     <div class="new">
-      <input placeholder="KEY" bind:value={neKey} maxlength="12" style="width:90px" />
-      <input placeholder="Epic title" bind:value={neTitle} />
-      <button disabled={busy || !neKey.trim() || !neTitle.trim()} onclick={create}>New epic</button>
+      <input class="field" placeholder="KEY" bind:value={neKey} maxlength="12" style="width:90px" aria-label="New epic key" />
+      <input class="field" placeholder="Epic title" bind:value={neTitle} aria-label="New epic title" onkeydown={(e) => e.key === "Enter" && neKey.trim() && neTitle.trim() && create()} />
+      <button class="btn" disabled={busy || !neKey.trim() || !neTitle.trim()} onclick={create}>New epic</button>
     </div>
   </div>
 
-  {#each store.epics as e (e.id)}
-    <section class="epic" class:archived={e.archived}>
-      <div class="epic-head">
-        <span class="key">{e.key}</span>
-        <input
-          class="title"
-          value={e.title}
-          onblur={(ev) => ev.currentTarget.value.trim() && ev.currentTarget.value !== e.title && rename(e, ev.currentTarget.value.trim())}
-        />
-        <span class="count">{e.progress.done ?? 0}/{e.total}</span>
-        <button class="ghost" onclick={() => (expanded = expanded === e.id ? null : e.id)}>
-          {expanded === e.id ? "hide" : "issues"}
-        </button>
-        <button class="ghost" disabled={busy} onclick={() => archive(e)}>
-          {e.archived ? "unarchive" : "archive"}
-        </button>
-        <button class="ghost danger" class:confirm={confirmingDelete === e.id} disabled={busy} onclick={() => requestDelete(e)}>
-          {confirmingDelete === e.id ? "confirm delete" : "delete"}
-        </button>
-      </div>
-
-      {#if e.description?.trim()}
-        <p class="epic-description">{e.description}</p>
-      {/if}
-
-      <div class="bar" title="{pct(e)}% done">
-        {#each STATUSES as s (s)}
-          {@const n = e.progress[s] ?? 0}
-          {#if n > 0}
-            <div class="seg s-{s}" style="flex: {n}" title="{n} {s}"></div>
-          {/if}
+  {#if epics.length}
+    <div class="scroll">
+      <div class="grid" style="grid-template-columns: 260px repeat({columns.length}, minmax(190px, 1fr))">
+        <div class="ch corner">Epic</div>
+        {#each columns as c (c?.id ?? "none")}
+          <div class="ch" class:now={c && c.id === active?.id}>
+            <span class="kind">{c ? (c.closed ? "Shipped" : c.id === active?.id ? "Current" : "Planned") : "Unscheduled"}</span>
+            <b>{c ? c.name : "Not in a cycle"}</b>
+            <span class="dates">{c ? `${fmt(c.starts_on)} → ${fmt(c.ends_on)}` : " "}</span>
+          </div>
         {/each}
-        {#if e.total === 0}<div class="seg empty" style="flex:1"></div>{/if}
-      </div>
 
-      {#if expanded === e.id}
-        <div class="children">
-          {#each childIssues(e.id) as i (i.id)}
-            <button class="child" onclick={() => (store.selectedKey = i.key)}>
-              <span class="pill s-{i.status}">{i.status}</span>
-              <span class="ckey">{i.key}</span>
-              {i.title}
-            </button>
-          {:else}
-            <p class="dim">No issues in this epic yet.</p>
+        {#each epics as e (e.id)}
+          {@const done = e.progress.done ?? 0}
+          <div class="epic" class:archived={e.archived}>
+            <div class="ek-row">
+              <span class="ek">{e.key}</span>
+              {#if e.archived}<span class="arch">archived</span>{/if}
+              <span class="grow"></span>
+              <Menu items={epicMenu(e)} triggerClass="ib" title="Epic actions" align="right">
+                {#snippet trigger()}<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3" fill="currentColor" /><circle cx="8" cy="8" r="1.3" fill="currentColor" /><circle cx="12.5" cy="8" r="1.3" fill="currentColor" /></svg>{/snippet}
+              </Menu>
+            </div>
+            <input class="et" value={e.title} aria-label="Epic title" onblur={(ev) => rename(e, ev.currentTarget.value)} onkeydown={(ev) => ev.key === "Enter" && ev.currentTarget.blur()} />
+            {#if e.description?.trim()}<p class="ed">{e.description}</p>{/if}
+            <div class="sbar" title="{done} of {e.total} done">
+              {#each STATUSES as s (s)}
+                {#if e.progress[s]}<i style="flex:{e.progress[s]};background:var(--status-{s})"></i>{/if}
+              {/each}
+              {#if !e.total}<i class="none"></i>{/if}
+            </div>
+            <span class="pct">{done}/{e.total} done</span>
+            {#if confirming === e.id}
+              <div class="confirm">
+                <span>Delete {e.key}? Its issues stay, unlinked.</span>
+                <button class="btn ghost" onclick={() => (confirming = null)}>Cancel</button>
+                <button class="btn danger confirm" onclick={() => { confirming = null; void run(() => api.deleteEpic(e.id)); }}>Delete</button>
+              </div>
+            {/if}
+          </div>
+          {#each columns as c (c?.id ?? "none")}
+            {@const list = cell(e.id, c)}
+            <div class="cell" class:now={c && c.id === active?.id}>
+              {#if list.length}
+                <div class="sbar thin">
+                  {#each STATUSES as s (s)}
+                    {@const n = list.filter((i) => i.status === s).length}
+                    {#if n}<i style="flex:{n};background:var(--status-{s})"></i>{/if}
+                  {/each}
+                </div>
+                {#each list.slice(0, CELL_MAX) as i (i.id)}
+                  <button class="mini" onclick={() => (store.selectedKey = i.key)} title="{i.key}: {i.title}">
+                    <StatusGlyph status={i.status} size={12} /><span>{i.title}</span>
+                  </button>
+                {/each}
+                {#if list.length > CELL_MAX}
+                  <button class="more" onclick={() => { store.filterEpic = e.id; store.filterCycle = c?.id ?? 0; store.view = "backlog"; }}>{list.length - CELL_MAX} more</button>
+                {/if}
+              {:else}
+                <span class="empty">·</span>
+              {/if}
+            </div>
           {/each}
-        </div>
-      {/if}
-    </section>
+        {/each}
+      </div>
+    </div>
   {:else}
-    <p class="dim">No epics yet. Create one above, then set an issue's epic from its detail panel.</p>
-  {/each}
+    <div class="blank">
+      <p>No epics yet. Create one above, then set an issue's epic from its panel.</p>
+    </div>
+  {/if}
+
+  {#if archivedCount}
+    <button class="btn ghost toggle" onclick={() => (showArchived = !showArchived)}>
+      {showArchived ? "Hide" : "Show"} {archivedCount} archived {archivedCount === 1 ? "epic" : "epics"}
+    </button>
+  {/if}
 </div>
 
 <style>
-  .wrap { height: calc(100vh - 46px); overflow-y: auto; padding: 18px 22px; max-width: 900px; }
-  .head { display: flex; align-items: baseline; gap: 16px; margin-bottom: 14px; }
-  h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
-  .new { display: flex; gap: 6px; margin-left: auto; }
-  .epic { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--surface); }
-  .epic.archived { opacity: 0.55; }
-  .epic-head { display: flex; align-items: center; gap: 10px; }
-  .key { font: 600 12px/1 ui-monospace, monospace; color: var(--ink-dim); }
-  .title { flex: 1; background: transparent; border: 1px solid transparent; border-radius: 5px; padding: 4px 6px; color: var(--ink); font: 600 14px/1.2 inherit; }
-  .title:hover, .title:focus { border-color: var(--border); background: var(--bg); }
-  .count { font-variant-numeric: tabular-nums; color: var(--ink-dim); font-size: 12px; }
-  .epic-description { margin: 8px 0 0; color: var(--ink-dim); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
-  .bar { display: flex; height: 6px; border-radius: 3px; overflow: hidden; margin-top: 10px; background: var(--bg); }
-  .seg { min-width: 2px; }
-  .seg.s-backlog { background: var(--status-backlog); }
-  .seg.s-todo { background: var(--status-todo); }
-  .seg.s-doing { background: var(--status-doing); }
-  .seg.s-review { background: var(--status-review); }
-  .seg.s-done { background: var(--status-done); }
-  .seg.empty { background: var(--border); }
-  .children { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
-  .child { text-align: left; background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 8px; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; display: flex; gap: 8px; align-items: center; }
-  .child:hover { border-color: var(--accent); }
-  .ckey { color: var(--ink-dim); font-family: ui-monospace, monospace; }
-  .pill { font-size: 10px; padding: 0 6px; border-radius: 999px; border: 1px solid var(--border); text-transform: capitalize; }
-  .s-backlog { color: var(--status-backlog); } .s-todo { color: var(--status-todo); }
-  .s-doing { color: var(--status-doing); } .s-review { color: var(--status-review); }
-  .s-done { color: var(--status-done); }
-  button { background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
-  button:hover:not(:disabled) { border-color: var(--accent); }
-  button:disabled { opacity: 0.5; }
-  .ghost { background: transparent; }
-  .ghost.danger { color: #e05252; border-color: transparent; }
-  .ghost.danger:hover { border-color: #e05252; }
-  .ghost.danger.confirm { background: #e05252; border-color: #e05252; color: #fff; }
-  input { background: var(--bg); border: 1px solid var(--border); border-radius: 5px; padding: 5px 7px; color: var(--ink); font: inherit; }
-  .dim { color: var(--ink-dim); }
+  .wrap {
+    height: 100%;
+    overflow-y: auto;
+    padding: 16px 20px 32px;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .lede {
+    margin: 0;
+    color: var(--ink-3);
+    font-size: 13px;
+  }
+  .new {
+    display: flex;
+    gap: 6px;
+    margin-left: auto;
+    flex-wrap: wrap;
+  }
+  .scroll {
+    overflow-x: auto;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+  }
+  .grid {
+    display: grid;
+    min-width: max-content;
+  }
+  .grid > div {
+    padding: 12px 14px;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    min-width: 0;
+  }
+  .ch {
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .ch.corner {
+    font: 500 10px/1 var(--font-mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    justify-content: flex-end;
+  }
+  .ch.now {
+    background: linear-gradient(var(--accent-soft), var(--surface));
+  }
+  .kind {
+    font: 500 10px/1 var(--font-mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .now .kind {
+    color: var(--accent);
+  }
+  .ch b {
+    font: 700 14px/1.2 var(--font-display);
+    letter-spacing: -0.01em;
+  }
+  .dates {
+    font: 400 11px/1 var(--font-mono);
+    color: var(--ink-3);
+    white-space: pre;
+  }
+  .epic {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .epic.archived {
+    opacity: 0.55;
+  }
+  .ek-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: -4px;
+  }
+  .ek {
+    font: 500 10.5px/1 var(--font-mono);
+    letter-spacing: 0.06em;
+    color: var(--accent);
+  }
+  .arch {
+    font: 400 10px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .grow {
+    flex: 1;
+  }
+  .ek-row :global(.ib) {
+    width: 24px;
+    height: 24px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    display: grid;
+    place-items: center;
+    color: var(--ink-3);
+  }
+  .ek-row :global(.ib:hover) {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .ek-row :global(.ib svg) {
+    width: 14px;
+    height: 14px;
+  }
+  .et {
+    margin-left: -6px;
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    font: 700 15px/1.25 var(--font-display);
+    letter-spacing: -0.01em;
+    outline: none;
+  }
+  .et:hover {
+    border-color: var(--line);
+  }
+  .et:focus {
+    border-color: var(--line-2);
+    background: var(--bg);
+  }
+  .ed {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink-3);
+  }
+  .sbar {
+    display: flex;
+    gap: 2px;
+    height: 6px;
+    border-radius: 3px;
+    overflow: hidden;
+    background: var(--sunk);
+    margin-top: 2px;
+  }
+  .sbar.thin {
+    height: 5px;
+    margin: 0 0 4px;
+  }
+  .sbar i {
+    display: block;
+    min-width: 2px;
+  }
+  .sbar .none {
+    flex: 1;
+    background: var(--line);
+  }
+  .pct {
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-dim);
+  }
+  .confirm {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+    padding: 8px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--danger) 8%, var(--bg));
+    font-size: 12px;
+  }
+  .confirm span {
+    flex-basis: 100%;
+  }
+  .cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .cell.now {
+    background: color-mix(in srgb, var(--accent) 3%, transparent);
+  }
+  .mini {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 3px 4px;
+    margin: 0 -4px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    text-align: left;
+  }
+  .mini span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mini:hover {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .more {
+    align-self: flex-start;
+    border: 0;
+    background: none;
+    padding: 3px 0;
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .more:hover {
+    color: var(--accent);
+  }
+  .empty {
+    color: var(--ink-3);
+    opacity: 0.5;
+  }
+  .blank {
+    padding: 60px 0;
+    text-align: center;
+    color: var(--ink-3);
+  }
+  .toggle {
+    margin-top: 12px;
+  }
 </style>

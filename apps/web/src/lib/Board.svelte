@@ -1,33 +1,28 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { STATUSES, type Status } from "@breadboard/api-client";
-  import { store } from "./store.svelte";
+  import { bare, isTyping, store, statusName } from "./store.svelte";
   import Card from "./Card.svelte";
-
-  const labels: Record<Status, string> = {
-    backlog: "Backlog",
-    todo: "Todo",
-    doing: "Doing",
-    review: "Review",
-    done: "Done",
-  };
+  import CycleStrip from "./CycleStrip.svelte";
+  import StatusGlyph from "./ui/StatusGlyph.svelte";
 
   const DONE_LIMIT = 20;
 
   let dragOver = $state<Status | null>(null);
   let col = $state(0);
   let row = $state(0);
+  // The keyboard cursor only shows once you've used the keys, and hides
+  // again on a mouse click, so it doesn't read as a selection.
+  let kbActive = $state(false);
 
   // byStatus() is sorted most-recently-updated first, so this keeps the
   // freshest completions visible. Done otherwise grows without bound since
   // issues never leave it; the full history is still one click away in Backlog.
-  const totalCounts = $derived(STATUSES.map((s) => store.byStatus(s).length));
-  const columns = $derived(
-    STATUSES.map((s) => {
-      const all = store.byStatus(s);
-      return s === "done" ? all.slice(0, DONE_LIMIT) : all;
-    }),
-  );
+  const all = $derived(STATUSES.map((s) => store.byStatus(s)));
+  const columns = $derived(all.map((list, i) => (STATUSES[i] === "done" ? list.slice(0, DONE_LIMIT) : list)));
+  const points = $derived(all.map((list) => list.reduce((a, i) => a + (i.estimate ?? 0), 0)));
+
+  const stripCycle = $derived(store.cycles.find((c) => c.id === store.filterCycle) ?? store.activeCycle);
 
   function clamp() {
     col = Math.max(0, Math.min(col, 4));
@@ -48,19 +43,17 @@
     if (!selected) return;
     const target = Math.max(0, Math.min(col + delta, 4));
     if (target === col) return;
-    await store.move(selected.key, STATUSES[target]);
+    const key = selected.key;
+    await store.move(key, STATUSES[target]);
     col = target;
-    row = 0;
-  }
-
-  function isTyping(e: KeyboardEvent) {
-    const t = e.target as HTMLElement;
-    return !!t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+    row = Math.max(0, columns[target].findIndex((i) => i.key === key));
   }
 
   onMount(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (store.paletteOpen || store.selectedKey || isTyping(e)) return;
+      // Bare keys only: Ctrl+K, Ctrl+L and friends belong to the browser and
+      // the palette, not the board cursor.
+      if (!bare(e) || store.paletteOpen || store.selectedKey || isTyping(e)) return;
       switch (e.key) {
         case "ArrowLeft":
         case "h": col = Math.max(0, col - 1); row = 0; clamp(); break;
@@ -70,17 +63,25 @@
         case "k": row = Math.max(0, row - 1); break;
         case "ArrowDown":
         case "j": row = Math.min(columns[col].length - 1, row + 1); break;
-        case "[": e.preventDefault(); void moveSelected(-1); break;
-        case "]": e.preventDefault(); void moveSelected(1); break;
+        case "[": void moveSelected(-1); break;
+        case "]": void moveSelected(1); break;
         case "Enter":
         case "e":
-          if (selected) { e.preventDefault(); store.selectedKey = selected.key; }
+          if (!selected) return;
+          store.selectedKey = selected.key;
           break;
         default: return;
       }
+      kbActive = true;
+      e.preventDefault();
     };
+    const onMouse = () => (kbActive = false);
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("mousedown", onMouse);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("mousedown", onMouse);
+    };
   });
 
   $effect(() => {
@@ -89,122 +90,153 @@
   });
 </script>
 
-<div class="board">
-  {#each STATUSES as status, ci (status)}
-    {@const issues = columns[ci]}
-    <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <section
-      class="column s-{status}"
-      role="list"
-      aria-label={labels[status]}
-      class:over={dragOver === status}
-      class:focused={ci === col}
-      ondragover={(e) => { e.preventDefault(); dragOver = status; }}
-      ondragleave={() => (dragOver === status ? (dragOver = null) : null)}
-      ondrop={(e) => drop(e, status)}
-    >
-      <h2><span class="dot"></span>{labels[status]} <span class="count">{totalCounts[ci]}</span></h2>
-      <div class="cards">
-        {#each issues as issue, ri (issue.id)}
-          <Card {issue} keyboardSelected={ci === col && ri === row} />
-        {:else}
-          <p class="empty">No issues</p>
-        {/each}
-        {#if status === "done" && totalCounts[ci] > DONE_LIMIT}
-          <button class="more" onclick={() => (store.view = "backlog")}>
-            +{totalCounts[ci] - DONE_LIMIT} more · view in Backlog
-          </button>
-        {/if}
-      </div>
-    </section>
-  {/each}
+<div class="wrap">
+  {#if stripCycle}<CycleStrip cycle={stripCycle} />{/if}
+
+  <div class="board">
+    {#each STATUSES as status, ci (status)}
+      {@const issues = columns[ci]}
+      <section
+        class="col"
+        role="list"
+        aria-label={statusName(status)}
+        class:over={dragOver === status}
+        ondragover={(e) => { e.preventDefault(); dragOver = status; }}
+        ondragleave={(e) => { if (!(e.currentTarget as HTMLElement).contains(e.relatedTarget as Node)) dragOver = null; }}
+        ondrop={(e) => drop(e, status)}
+      >
+        <h2>
+          <StatusGlyph {status} />
+          {statusName(status)}
+          <span class="ct">{all[ci].length}</span>
+          {#if points[ci]}<span class="pts">{points[ci]} pts</span>{/if}
+          <button class="add" title="New issue in {statusName(status)}" aria-label="New issue in {statusName(status)}" onclick={() => store.openPalette(status)}>+</button>
+        </h2>
+        <div class="cards">
+          {#each issues as issue, ri (issue.id)}
+            <Card {issue} keyboardSelected={kbActive && ci === col && ri === row} />
+          {:else}
+            <p class="empty">{dragOver === status ? "Drop to move here" : "Nothing here"}</p>
+          {/each}
+          {#if status === "done" && all[ci].length > DONE_LIMIT}
+            <button class="more" onclick={() => (store.view = "backlog")}>
+              {all[ci].length - DONE_LIMIT} more in Backlog
+            </button>
+          {/if}
+        </div>
+      </section>
+    {/each}
+  </div>
 </div>
 
 <style>
-  .board {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: minmax(240px, 1fr);
-    gap: 10px;
-    padding: 12px 14px;
-    overflow-x: auto;
-    height: calc(100vh - 46px);
-    align-content: start;
-  }
-  .column {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-top: 2px solid var(--border);
-    border-radius: 8px;
-    padding: 8px;
+  .wrap {
+    height: 100%;
     display: flex;
     flex-direction: column;
     min-height: 0;
   }
-  .column.s-backlog { border-top-color: var(--status-backlog); }
-  .column.s-todo { border-top-color: var(--status-todo); }
-  .column.s-doing { border-top-color: var(--status-doing); }
-  .column.s-review { border-top-color: var(--status-review); }
-  .column.s-done { border-top-color: var(--status-done); }
-  .column.over {
-    border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  .board {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: repeat(5, minmax(220px, 1fr));
+    gap: 12px;
+    padding: 14px 20px 0;
+    overflow-x: auto;
   }
-  .column.focused {
-    border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  .col {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border-radius: 12px;
+    transition: background-color 0.15s, box-shadow 0.15s;
+  }
+  .col.over {
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
   }
   h2 {
-    margin: 2px 4px 8px;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--ink-dim);
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
+    margin: 0;
+    padding: 6px 6px 8px;
+    font: 600 13px/1.2 var(--font-ui);
   }
-  .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--border);
+  .ct {
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-dim);
+    background: var(--raise);
+    border-radius: 5px;
+    padding: 3px 6px;
+    font-variant-numeric: tabular-nums;
   }
-  .s-backlog .dot { background: var(--status-backlog); }
-  .s-todo .dot { background: var(--status-todo); }
-  .s-doing .dot { background: var(--status-doing); }
-  .s-review .dot { background: var(--status-review); }
-  .s-done .dot { background: var(--status-done); }
-  .count {
-    color: var(--border);
+  .pts {
+    font: 400 11px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .add {
+    margin-left: auto;
+    width: 22px;
+    height: 22px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--ink-3);
+    display: grid;
+    place-items: center;
+    font-size: 16px;
+    line-height: 1;
+  }
+  .add:hover {
+    background: var(--raise);
+    color: var(--ink);
   }
   .cards {
-    overflow-y: auto;
     flex: 1;
-  }
-  .more {
-    display: block;
-    width: 100%;
-    margin: 2px 0 4px;
-    padding: 7px 4px;
-    text-align: center;
-    font-size: 11px;
-    background: none;
-    border: 1px dashed var(--border);
-    border-radius: 6px;
-    color: var(--ink-dim);
-    cursor: pointer;
-  }
-  .more:hover {
-    border-color: var(--accent);
-    color: var(--accent);
+    min-height: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    /* room so the hover lift and focus rings aren't clipped by overflow */
+    padding: 3px 4px 20px;
+    margin: -3px -4px 0;
   }
   .empty {
     margin: 0;
-    padding: 10px 4px;
+    padding: 18px 8px;
     text-align: center;
     font-size: 12px;
-    color: var(--ink-dim);
-    opacity: 0.6;
+    color: var(--ink-3);
+    border: 1px dashed var(--line);
+    border-radius: 10px;
+  }
+  .more {
+    padding: 10px;
+    border-radius: 9px;
+    border: 1px dashed var(--line-2);
+    background: none;
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .more:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  @media (max-width: 860px) {
+    .board {
+      display: flex;
+      gap: 10px;
+      padding: 12px 14px 0;
+      scroll-snap-type: x mandatory;
+    }
+    .col {
+      flex: 0 0 85%;
+      scroll-snap-align: start;
+    }
   }
 </style>

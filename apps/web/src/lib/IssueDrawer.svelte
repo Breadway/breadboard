@@ -4,68 +4,49 @@
     PRIORITIES,
     STATUSES,
     type ActivityEntry,
-    type IssueDetail,
+    type Comment,
+    type Issue,
     type IssueLink,
+    type IssuePatch,
     type LinkKind,
-    type Priority,
-    type Status,
   } from "@breadboard/api-client";
-  import { api, store } from "./store.svelte";
+  import { api, errMsg, store, statusName } from "./store.svelte";
   import { renderMarkdown } from "./markdown";
+  import Menu, { type MenuItem } from "./ui/Menu.svelte";
+  import StatusGlyph from "./ui/StatusGlyph.svelte";
+  import PriorityGlyph from "./ui/PriorityGlyph.svelte";
+  import Avatar from "./ui/Avatar.svelte";
+  import Ring from "./ui/Ring.svelte";
+  import { labelColor, projectColor } from "./ui/colors";
 
-  let detail = $state<IssueDetail | null>(null);
+  // The issue's fields come straight from the store, so a drag on the board,
+  // a live event from someone else, or a refused save (which leaves the store
+  // untouched) all show here immediately. Only comments and activity, which
+  // the store doesn't hold, are fetched per issue.
+  let fetched = $state<Issue | null>(null);
+  const issue = $derived(store.issueByKey(store.selectedKey) ?? (fetched?.key === store.selectedKey ? fetched : null));
+
+  let comments = $state<Comment[]>([]);
   let activity = $state<ActivityEntry[]>([]);
-  let tab = $state<"comments" | "activity">("comments");
+  let loadedKey = $state<string | null>(null);
   let loading = $state(false);
+
   let titleDraft = $state("");
-  let bodyDraft = $state("");
-  let labelsDraft = $state("");
-  let commentDraft = $state("");
-  let confirmingDelete = $state(false);
-  let confirmTimer: ReturnType<typeof setTimeout> | undefined;
+  let titleFocused = $state(false);
+  let titleEl: HTMLTextAreaElement | undefined = $state();
   let editingBody = $state(false);
-  let linkKindDraft = $state<LinkKind>("blocks");
-  let linkTargetDraft = $state("");
+  let bodyDraft = $state("");
+  let labelDraft = $state("");
+  let commentDraft = $state("");
+  let posting = $state(false);
+  let confirmingDelete = $state(false);
+  let addingLink = $state(false);
+  let linkKind = $state<LinkKind>("blocks");
+  let linkTarget = $state("");
   let linkBusy = $state(false);
 
+  const POINTS = [1, 2, 3, 5, 8, 13];
   const manualLinkKinds: LinkKind[] = ["blocks", "blocked-by", "relates-to"];
-  let selectedEpic = $derived(store.epics.find((ep) => ep.id === detail?.epic_id));
-
-  function requestDelete() {
-    if (confirmingDelete) {
-      clearTimeout(confirmTimer);
-      confirmingDelete = false;
-      if (detail) void store.remove(detail.key);
-    } else {
-      confirmingDelete = true;
-      confirmTimer = setTimeout(() => (confirmingDelete = false), 3000);
-    }
-  }
-
-  $effect(() => {
-    const key = store.selectedKey;
-    clearTimeout(confirmTimer);
-    confirmingDelete = false;
-    editingBody = false;
-    if (!key) {
-      detail = null;
-      activity = [];
-      return;
-    }
-    loading = true;
-    api
-      .getIssue(key)
-      .then((d) => {
-        detail = d;
-        titleDraft = d.title;
-        bodyDraft = d.body;
-        labelsDraft = d.labels.join(", ");
-      })
-      .catch(() => store.flash(`couldn't load ${key}`))
-      .finally(() => (loading = false));
-    api.getActivity(key).then((a) => (activity = a)).catch(() => {});
-  });
-
   const linkLabels: Record<string, string> = {
     closes: "Closes",
     "closed-by": "Closed by",
@@ -74,307 +55,474 @@
     "relates-to": "Relates to",
   };
 
-  function describe(a: ActivityEntry): string {
-    const who = a.actor ?? (a.source === "breadboard" ? "someone" : "Forgejo");
-    if (a.field === "created") return `${who} created this (${a.new_value ?? ""})`;
-    const from = a.old_value || "—";
-    const to = a.new_value || "—";
-    return `${who} changed ${a.field}: ${from} → ${to}`;
+  async function load(key: string) {
+    loading = true;
+    try {
+      const [d, a] = await Promise.all([api.getIssue(key), api.getActivity(key).catch(() => [] as ActivityEntry[])]);
+      // A slower response for an issue you've already left must not land
+      // in this panel.
+      if (store.selectedKey !== key) return;
+      fetched = d;
+      comments = d.comments;
+      activity = a;
+      loadedKey = key;
+    } catch {
+      if (store.selectedKey === key) store.flash(`Couldn't load ${key}`);
+    } finally {
+      if (store.selectedKey === key) loading = false;
+    }
   }
 
-  async function save(patch: Parameters<typeof store.patch>[1]) {
-    if (!detail) return;
-    const updated = await store.patch(detail.key, patch);
-    detail = { ...detail, ...updated };
+  // New issue selected: reset local UI state and fetch its thread.
+  $effect(() => {
+    const key = store.selectedKey;
+    editingBody = false;
+    confirmingDelete = false;
+    addingLink = false;
+    labelDraft = "";
+    if (!key) {
+      comments = [];
+      activity = [];
+      loadedKey = null;
+      return;
+    }
+    if (loadedKey !== key) {
+      comments = [];
+      activity = [];
+    }
+    void load(key);
+  });
+
+  // A live event touched the open issue: refresh comments and activity.
+  $effect(() => {
+    const t = store.issueTick;
+    if (t.n && t.key === store.selectedKey && t.key === loadedKey) void load(t.key);
+  });
+
+  // Keep the title draft in step with the store unless you're typing in it.
+  $effect(() => {
+    const t = issue?.title ?? "";
+    if (!titleFocused) titleDraft = t;
+  });
+
+  // Grow the title to fit. Measured a frame later: while the panel is still
+  // sliding in, scrollHeight can read 0 and would collapse it.
+  function fitTitle() {
+    if (!titleEl) return;
+    titleEl.style.height = "auto";
+    if (titleEl.scrollHeight) titleEl.style.height = titleEl.scrollHeight + "px";
+  }
+  $effect(() => {
+    void titleDraft;
+    void titleEl;
+    const id = requestAnimationFrame(fitTitle);
+    return () => cancelAnimationFrame(id);
+  });
+
+  async function save(patch: IssuePatch) {
+    if (!issue) return;
+    await store.patch(issue.key, patch);
   }
 
   function saveTitle() {
-    if (detail && titleDraft.trim() && titleDraft !== detail.title) {
-      void save({ title: titleDraft.trim() });
-    }
-  }
-  function saveBody() {
-    if (detail && bodyDraft !== detail.body) void save({ body: bodyDraft });
-  }
-  function changeProject(project: string) {
-    if (detail) void store.moveProject(detail.key, project);
-  }
-  function saveLabels() {
-    if (!detail) return;
-    const next = labelsDraft
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (next.join(",") !== detail.labels.join(",")) void save({ labels: next });
+    titleFocused = false;
+    const t = titleDraft.trim();
+    if (issue && t && t !== issue.title) void save({ title: t });
+    else titleDraft = issue?.title ?? "";
   }
 
-  const assignedToMe = $derived(detail?.assignee_id === store.me?.id);
+  function startBody() {
+    bodyDraft = issue?.body ?? "";
+    editingBody = true;
+  }
+  async function saveBody() {
+    if (issue && bodyDraft !== issue.body) await save({ body: bodyDraft });
+    editingBody = false;
+  }
 
-  async function postComment() {
-    if (!detail || !commentDraft.trim()) return;
+  function addLabel() {
+    if (!issue) return;
+    const add = labelDraft.split(",").map((s) => s.trim()).filter(Boolean);
+    labelDraft = "";
+    const next = [...new Set([...issue.labels, ...add])];
+    if (next.length !== issue.labels.length) void save({ labels: next });
+  }
+  function removeLabel(l: string) {
+    if (issue) void save({ labels: issue.labels.filter((x) => x !== l) });
+  }
+
+  const statusItems = $derived<MenuItem[]>(
+    STATUSES.map((s, i) => ({
+      label: statusName(s),
+      glyph: { status: s },
+      hint: String(i + 1),
+      current: issue?.status === s,
+      run: () => issue && void store.move(issue.key, s),
+    })),
+  );
+  const priorityItems = $derived<MenuItem[]>(
+    [...PRIORITIES].reverse().map((p) => ({
+      label: p === "none" ? "No priority" : statusName(p),
+      glyph: { priority: p },
+      current: issue?.priority === p,
+      run: () => void save({ priority: p }),
+    })),
+  );
+  const assigneeItems = $derived<MenuItem[]>([
+    { label: store.me ? `${store.me.login} (you)` : "Me", glyph: { dot: "#d98a3d" }, current: issue?.assignee_id === store.me?.id, run: () => void save({ assignee_id: store.me?.id ?? null }) },
+    { label: "Unassigned", current: issue?.assignee_id == null, run: () => void save({ assignee_id: null }) },
+  ]);
+  const pointItems = $derived<MenuItem[]>([
+    { label: "No estimate", current: issue?.estimate == null, run: () => void save({ estimate: null }) },
+    ...[...new Set([...POINTS, ...(issue?.estimate != null ? [issue.estimate] : [])])]
+      .sort((a, b) => a - b)
+      .map((n) => ({ label: `${n} ${n === 1 ? "point" : "points"}`, current: issue?.estimate === n, run: () => void save({ estimate: n }) })),
+  ]);
+  const projectItems = $derived<MenuItem[]>(
+    store.projects
+      .filter((p) => !p.archived || p.id === issue?.project_id)
+      .map((p) => ({
+        label: `${p.key} · ${p.name}`,
+        glyph: { dot: projectColor(p.key) },
+        current: p.id === issue?.project_id,
+        run: () => issue && p.id !== issue.project_id && void store.moveProject(issue.key, p.key),
+      })),
+  );
+  const cycleItems = $derived<MenuItem[]>([
+    { label: "No cycle", current: issue?.cycle_id == null, run: () => void save({ cycle_id: null }) },
+    ...store.cycles.map((c) => ({
+      label: `${c.name}${c.closed ? " (closed)" : ""}`,
+      current: issue?.cycle_id === c.id,
+      run: () => void save({ cycle_id: c.id }),
+    })),
+  ]);
+  const epicItems = $derived<MenuItem[]>([
+    { label: "No epic", current: issue?.epic_id == null, run: () => void save({ epic_id: null }) },
+    ...store.epics
+      .filter((e) => !e.archived || e.id === issue?.epic_id)
+      .map((e) => ({ label: `${e.key} · ${e.title}`, glyph: { text: "◆" }, current: issue?.epic_id === e.id, run: () => void save({ epic_id: e.id }) })),
+  ]);
+
+  async function copy(text: string, what: string) {
     try {
-      const c = await api.addComment(detail.key, commentDraft.trim());
-      detail = { ...detail, comments: [...detail.comments, c] };
-      commentDraft = "";
-    } catch (e) {
-      store.flash(`comment failed: ${e instanceof Error ? e.message : e}`);
+      await navigator.clipboard.writeText(text);
+      store.info(`Copied ${what}`);
+    } catch {
+      store.flash(`Couldn't copy ${what}`);
     }
   }
+  const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40);
+  const moreItems = $derived<MenuItem[]>(
+    issue
+      ? [
+          { label: "Copy key", run: () => void copy(issue.key, issue.key) },
+          { label: "Copy link", run: () => void copy(`${store.serverBase}/#${issue.key}`, "link") },
+          { label: "Copy branch name", run: () => void copy(`fix/${issue.key.toLowerCase()}-${slug(issue.title)}`, "branch name") },
+          { label: "Delete issue…", danger: true, run: () => (confirmingDelete = true) },
+        ]
+      : [],
+  );
+
+  const selectedCycle = $derived(store.cycles.find((c) => c.id === issue?.cycle_id));
+  const cycleDone = $derived(selectedCycle ? store.issues.filter((i) => i.cycle_id === selectedCycle.id && i.status === "done").length : 0);
+  const cycleTotal = $derived(selectedCycle ? store.issues.filter((i) => i.cycle_id === selectedCycle.id).length : 0);
+  const selectedEpic = $derived(store.epics.find((e) => e.id === issue?.epic_id));
+  const project = $derived(issue ? store.project(issue.project_id) : undefined);
 
   async function resolveTargetId(keyOrId: string): Promise<number | null> {
-    const trimmed = keyOrId.trim();
-    if (!trimmed) return null;
-    const n = Number(trimmed);
-    if (!Number.isNaN(n)) return n;
-    const known = store.issues.find((i) => i.key.toLowerCase() === trimmed.toLowerCase());
+    const t = keyOrId.trim();
+    if (!t) return null;
+    const known = store.issues.find((i) => i.key.toLowerCase() === t.toLowerCase());
     if (known) return known.id;
+    if (/^\d+$/.test(t)) return Number(t);
     try {
-      const fetched = await api.getIssue(trimmed);
-      return fetched.id;
+      return (await api.getIssue(t.toUpperCase())).id;
     } catch {
       return null;
     }
   }
 
   async function addLink() {
-    if (!detail || !linkTargetDraft.trim()) return;
+    if (!issue || !linkTarget.trim()) return;
     linkBusy = true;
     try {
-      const targetId = await resolveTargetId(linkTargetDraft);
-      if (targetId === null) {
-        store.flash(`couldn't find issue "${linkTargetDraft.trim()}"`);
-        return;
+      const targetId = await resolveTargetId(linkTarget);
+      if (targetId === null) return store.flash(`No issue called "${linkTarget.trim()}"`);
+      if (targetId === issue.id) return store.flash("An issue can't link to itself");
+      if (!issue.links.some((l) => l.kind === linkKind && l.target_id === targetId)) {
+        await save({ links: [...issue.links, { kind: linkKind, target_id: targetId }] });
       }
-      if (targetId === detail.id) {
-        store.flash("an issue can't link to itself");
-        return;
-      }
-      const exists = detail.links.some((l) => l.kind === linkKindDraft && l.target_id === targetId);
-      if (!exists) {
-        const links: IssueLink[] = [...detail.links, { kind: linkKindDraft, target_id: targetId }];
-        await save({ links });
-      }
-      linkTargetDraft = "";
+      linkTarget = "";
+      addingLink = false;
     } finally {
       linkBusy = false;
     }
   }
 
-  async function removeLink(link: IssueLink) {
-    if (!detail) return;
-    const links = detail.links.filter((l) => !(l.kind === link.kind && l.target_id === link.target_id));
-    await save({ links });
+  function removeLink(link: IssueLink) {
+    if (issue) void save({ links: issue.links.filter((l) => !(l.kind === link.kind && l.target_id === link.target_id)) });
+  }
+
+  async function postComment() {
+    if (!issue || !commentDraft.trim() || posting) return;
+    posting = true;
+    try {
+      const c = await api.addComment(issue.key, commentDraft.trim());
+      comments = [...comments, c];
+      commentDraft = "";
+    } catch (e) {
+      store.flash(`Couldn't post the comment: ${errMsg(e)}`);
+    } finally {
+      posting = false;
+    }
+  }
+
+  type Entry = { at: string; c?: Comment; a?: ActivityEntry };
+  const timeline = $derived<Entry[]>(
+    [...activity.map((a) => ({ at: a.at, a })), ...comments.map((c) => ({ at: c.created_at, c }))].sort((x, y) =>
+      x.at.localeCompare(y.at),
+    ),
+  );
+
+  const FIELD: Record<string, string> = { assignee_id: "assignee", epic_id: "epic", cycle_id: "cycle", estimate: "points" };
+  // Activity stores raw column values; turn ids back into names.
+  function val(field: string, v: string | null): string {
+    if (v == null || v === "") return "none";
+    const n = Number(v);
+    if (field === "assignee_id") return n === store.me?.id ? store.me.login : `user #${v}`;
+    if (field === "cycle_id") return store.cycles.find((c) => c.id === n)?.name ?? `cycle #${v}`;
+    if (field === "epic_id") return store.epics.find((e) => e.id === n)?.key ?? `epic #${v}`;
+    return v;
+  }
+  function who(a: ActivityEntry) {
+    return a.actor ?? (a.source === "breadboard" ? "Someone" : "Forgejo");
+  }
+  function author(c: Comment) {
+    if (c.author_id != null && c.author_id === store.me?.id) return store.me.login;
+    return c.external_id ? "Forgejo" : "Someone";
+  }
+  function when(ts: string) {
+    const d = new Date(ts);
+    const today = new Date().toDateString() === d.toDateString();
+    return today
+      ? d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })
+      : d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
   }
 </script>
 
 {#if store.selectedKey}
-  <aside class="drawer" transition:fly={{ x: 40, duration: 150 }}>
+  <aside class="drawer" aria-label="Issue {store.selectedKey}" transition:fly={{ x: 60, duration: 220, opacity: 0.4 }}>
     <header>
+      {#if issue}<StatusGlyph status={issue.status} />{/if}
       <span class="key">{store.selectedKey}</span>
-      <div class="spacer"></div>
-      {#if detail?.milestone}
-        <span class="fg">◆ {detail.milestone}</span>
+      {#if issue?.forgejo_ref}
+        <span class="sync" title="Synced with Forgejo">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 6.5A5 5 0 0 1 12.2 4.5M13 9.5A5 5 0 0 1 3.8 11.5M12.5 2v2.8H9.7M3.5 14v-2.8h2.8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          {issue.forgejo_ref.repo}#{issue.forgejo_ref.number}
+        </span>
       {/if}
-      {#if detail?.forgejo_ref}
-        <span class="fg">⇄ {detail.forgejo_ref.repo}#{detail.forgejo_ref.number}</span>
+      {#if issue?.milestone}<span class="sync" title="Forgejo milestone">◆ {issue.milestone}</span>{/if}
+      <span class="grow"></span>
+      {#if issue}
+        <Menu items={moreItems} triggerClass="ib" title="More actions" align="right">
+          {#snippet trigger()}<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3" fill="currentColor" /><circle cx="8" cy="8" r="1.3" fill="currentColor" /><circle cx="12.5" cy="8" r="1.3" fill="currentColor" /></svg>{/snippet}
+        </Menu>
       {/if}
-      <button class="icon" title="Close" onclick={() => (store.selectedKey = null)}>✕</button>
+      <button class="ib" title="Close (Esc)" aria-label="Close" onclick={() => (store.selectedKey = null)}>
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
+      </button>
     </header>
 
-    {#if loading && !detail}
-      <p class="dim pad">loading…</p>
-    {:else if detail}
+    {#if !issue}
+      <p class="dim pad">{loading ? "Loading…" : "This issue isn't available."}</p>
+    {:else}
       <div class="body">
-        <input
+        <textarea
           class="title"
+          rows="1"
+          bind:this={titleEl}
           bind:value={titleDraft}
+          aria-label="Title"
+          onfocus={() => (titleFocused = true)}
           onblur={saveTitle}
-          onkeydown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-        />
+          onkeydown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              e.currentTarget.blur();
+            }
+          }}
+        ></textarea>
 
-        {#if detail.links.length}
-          <div class="links">
-            {#each detail.links as l (l.kind + l.target_id)}
-              {@const t = store.findIssue(l.target_id)}
-              <span class="link-chip">
-                <button class="link-chip-btn" onclick={() => t && (store.selectedKey = t.key)}>
-                  {linkLabels[l.kind] ?? l.kind} {t?.key ?? `#${l.target_id}`}{t ? ` · ${t.title}` : ""}
-                </button>
-                {#if manualLinkKinds.includes(l.kind)}
-                  <button class="link-chip-x" title="Remove link" onclick={() => removeLink(l)}>×</button>
-                {/if}
-              </span>
-            {/each}
+        <div class="props">
+          <span class="pl">Status</span>
+          <Menu items={statusItems} triggerClass="pv">
+            {#snippet trigger()}<StatusGlyph status={issue.status} />{statusName(issue.status)}{/snippet}
+          </Menu>
+          <span class="pl">Priority</span>
+          <Menu items={priorityItems} triggerClass="pv">
+            {#snippet trigger()}<PriorityGlyph priority={issue.priority} />{#if issue.priority === "none"}<span class="dim">No priority</span>{:else}{statusName(issue.priority)}{/if}{/snippet}
+          </Menu>
+
+          <span class="pl">Assignee</span>
+          <Menu items={assigneeItems} triggerClass="pv">
+            {#snippet trigger()}
+              {#if issue.assignee_id == null}<span class="dim">Unassigned</span>
+              {:else}<Avatar userId={issue.assignee_id} size={18} />{issue.assignee_id === store.me?.id ? store.me?.login : `User #${issue.assignee_id}`}{/if}
+            {/snippet}
+          </Menu>
+          <span class="pl">Points</span>
+          <Menu items={pointItems} triggerClass="pv">
+            {#snippet trigger()}{#if issue.estimate == null}<span class="dim">No estimate</span>{:else}{issue.estimate} {issue.estimate === 1 ? "pt" : "pts"}{/if}{/snippet}
+          </Menu>
+
+          <span class="pl">Project</span>
+          <Menu items={projectItems} triggerClass="pv" filter>
+            {#snippet trigger()}<span class="pj" style="background:{projectColor(project?.key ?? '?')}">{(project?.key ?? "?")[0]}</span><span class="tx">{project?.name ?? "?"}</span>{/snippet}
+          </Menu>
+          <span class="pl">Cycle</span>
+          <Menu items={cycleItems} triggerClass="pv">
+            {#snippet trigger()}{#if selectedCycle}<Ring done={cycleDone} total={cycleTotal} size={15} /><span class="tx">{selectedCycle.name}</span>{:else}<span class="dim">No cycle</span>{/if}{/snippet}
+          </Menu>
+
+          <span class="pl">Epic</span>
+          <div class="span3">
+            <Menu items={epicItems} triggerClass="pv" filter>
+              {#snippet trigger()}{#if selectedEpic}<span class="ek">{selectedEpic.key}</span><span class="tx">{selectedEpic.title}</span>{:else}<span class="dim">No epic</span>{/if}{/snippet}
+            </Menu>
           </div>
-        {/if}
 
-        <div class="row link-add">
-          <select bind:value={linkKindDraft}>
-            {#each manualLinkKinds as k (k)}<option value={k}>{linkLabels[k] ?? k}</option>{/each}
-          </select>
-          <input
-            placeholder="issue key, e.g. BB-12"
-            bind:value={linkTargetDraft}
-            onkeydown={(e) => e.key === "Enter" && addLink()}
-          />
-          <button class="btn" disabled={linkBusy || !linkTargetDraft.trim()} onclick={addLink}>
-            Add link
-          </button>
-        </div>
-
-        <div class="row">
-          <label>
-            Status
-            <select
-              value={detail.status}
-              onchange={(e) => save({ status: e.currentTarget.value as Status })}
-            >
-              {#each STATUSES as s (s)}<option value={s}>{s}</option>{/each}
-            </select>
-          </label>
-          <label>
-            Priority
-            <select
-              value={detail.priority}
-              onchange={(e) => save({ priority: e.currentTarget.value as Priority })}
-            >
-              {#each PRIORITIES as p (p)}<option value={p}>{p}</option>{/each}
-            </select>
-          </label>
-          <label>
-            Estimate
+          <span class="pl">Labels</span>
+          <div class="span3 labels">
+            {#each issue.labels as l (l)}
+              <span class="chip-label lab"><i style="background:{labelColor(l)}"></i>{l}<button aria-label="Remove label {l}" onclick={() => removeLabel(l)}>×</button></span>
+            {/each}
             <input
-              type="number"
-              min="0"
-              value={detail.estimate ?? ""}
-              onchange={(e) =>
-                save({ estimate: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) })}
+              class="addlab"
+              placeholder={issue.labels.length ? "+ label" : "Add labels"}
+              bind:value={labelDraft}
+              onkeydown={(e) => {
+                if (e.key === "Enter" || e.key === ",") {
+                  e.preventDefault();
+                  addLabel();
+                }
+              }}
+              onblur={addLabel}
             />
-          </label>
+          </div>
         </div>
 
-        <div class="row">
-          <label class="grow">
-            Labels
-            <input bind:value={labelsDraft} onblur={saveLabels} placeholder="comma, separated" />
-          </label>
-          <button
-            class="btn"
-            onclick={() => save({ assignee_id: assignedToMe ? null : store.me?.id })}
-          >
-            {assignedToMe ? "Unassign" : "Assign to me"}
-          </button>
-        </div>
-
-        <div class="row">
-          <label class="grow">
-            Project
-            <select
-              value={store.projectKey(detail.project_id)}
-              onchange={(e) => changeProject(e.currentTarget.value)}
-            >
-              {#each store.projects as p (p.id)}<option value={p.key}>{p.key} · {p.name}</option>{/each}
-            </select>
-          </label>
-          <label class="grow">
-            Cycle
-            <select
-              value={detail.cycle_id ?? ""}
-              onchange={(e) =>
-                save({ cycle_id: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) })}
-            >
-              <option value="">—</option>
-              {#each store.cycles as c (c.id)}
-                <option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>
-              {/each}
-            </select>
-          </label>
-        </div>
-
-        {#if store.epics.length}
-          <label class="block">
-            Epic
-            <select
-              value={detail.epic_id ?? ""}
-              onchange={(e) =>
-                save({ epic_id: e.currentTarget.value === "" ? null : Number(e.currentTarget.value) })}
-            >
-              <option value="">—</option>
-              {#each store.epics as ep (ep.id)}<option value={ep.id}>{ep.key} · {ep.title}</option>{/each}
-            </select>
-            {#if selectedEpic?.description?.trim()}
-              <p class="epic-description">{selectedEpic.description}</p>
-            {/if}
-          </label>
+        {#if selectedEpic?.description?.trim()}
+          <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>
         {/if}
 
-        <div class="block">
-          <div class="field-head">
-            <span>Description</span>
-            <button class="link-btn" onclick={() => (editingBody = !editingBody)}>
-              {editingBody ? "Preview" : "Edit"}
-            </button>
-          </div>
-          {#if editingBody}
-            <textarea
-              rows="6"
-              bind:value={bodyDraft}
-              onblur={() => {
-                saveBody();
-                editingBody = false;
-              }}
-            ></textarea>
+        <section class="sec">
+          <h3>Relations <button onclick={() => (addingLink = !addingLink)}>{addingLink ? "Cancel" : "+ Add"}</button></h3>
+          {#each issue.links as l (l.kind + l.target_id)}
+            {@const t = store.findIssue(l.target_id)}
+            <div class="rel">
+              <button class="rel-main" onclick={() => t && (store.selectedKey = t.key)} disabled={!t}>
+                <span class="rk k-{l.kind}">{linkLabels[l.kind] ?? l.kind}</span>
+                {#if t}<StatusGlyph status={t.status} />{/if}
+                <span class="key">{t?.key ?? `#${l.target_id}`}</span>
+                <span class="tx">{t?.title ?? ""}</span>
+              </button>
+              {#if manualLinkKinds.includes(l.kind)}
+                <button class="rel-x" title="Remove link" aria-label="Remove link" onclick={() => removeLink(l)}>×</button>
+              {/if}
+            </div>
           {:else}
-            <div class="md">{@html renderMarkdown(detail.body || "*No description.*")}</div>
-          {/if}
-        </div>
-
-        <section class="comments">
-          <div class="tabs">
-            <button class:on={tab === "comments"} onclick={() => (tab = "comments")}>
-              Comments {detail.comments.length ? `(${detail.comments.length})` : ""}
-            </button>
-            <button class:on={tab === "activity"} onclick={() => (tab = "activity")}>
-              Activity {activity.length ? `(${activity.length})` : ""}
-            </button>
-          </div>
-
-          {#if tab === "comments"}
-            {#each detail.comments as c (c.id)}
-              <div class="comment">
-                <div class="meta dim">
-                  {new Date(c.created_at).toLocaleString()}{c.external_id ? " · synced" : ""}
-                </div>
-                <div class="md">{@html renderMarkdown(c.body)}</div>
-              </div>
-            {:else}
-              <p class="dim">No comments yet.</p>
-            {/each}
-            <textarea
-              rows="2"
-              bind:value={commentDraft}
-              placeholder="Add a comment…"
-              onkeydown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && postComment()}
-            ></textarea>
-            <button class="btn" onclick={postComment} disabled={!commentDraft.trim()}>Comment</button>
-          {:else}
-            {#each activity as a (a.at + a.field)}
-              <div class="event">
-                <div class="meta dim">{new Date(a.at).toLocaleString()}</div>
-                <div>{describe(a)}</div>
-              </div>
-            {:else}
-              <p class="dim">No recorded activity.</p>
-            {/each}
+            {#if !addingLink}<p class="dim small">No related issues.</p>{/if}
+          {/each}
+          {#if addingLink}
+            <div class="link-add">
+              <select class="field" bind:value={linkKind} aria-label="Link type">
+                {#each manualLinkKinds as k (k)}<option value={k}>{linkLabels[k]}</option>{/each}
+              </select>
+              <!-- svelte-ignore a11y_autofocus -->
+              <input class="field" autofocus placeholder="Issue key, e.g. BB-12" bind:value={linkTarget} onkeydown={(e) => e.key === "Enter" && addLink()} />
+              <button class="btn" disabled={linkBusy || !linkTarget.trim()} onclick={addLink}>Link</button>
+            </div>
           {/if}
         </section>
 
-        <footer>
-          <button class="btn danger" class:confirm={confirmingDelete} onclick={requestDelete}>
-            {confirmingDelete ? "Click again to confirm" : "Delete issue"}
-          </button>
-        </footer>
+        <section class="sec">
+          <h3>Description {#if !editingBody}<button onclick={startBody}>Edit</button>{/if}</h3>
+          {#if editingBody}
+            <!-- svelte-ignore a11y_autofocus -->
+            <textarea
+              class="field desc"
+              rows="8"
+              autofocus
+              bind:value={bodyDraft}
+              placeholder="Markdown works here."
+              onkeydown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter") void saveBody();
+                if (e.key === "Escape") {
+                  e.stopPropagation();
+                  editingBody = false;
+                }
+              }}
+            ></textarea>
+            <div class="row-end">
+              <span class="dim small">Ctrl ↵ to save · Esc to cancel</span>
+              <button class="btn ghost" onclick={() => (editingBody = false)}>Cancel</button>
+              <button class="btn primary" onclick={saveBody}>Save</button>
+            </div>
+          {:else if issue.body.trim()}
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <div class="md" role="presentation" ondblclick={startBody}>{@html renderMarkdown(issue.body)}</div>
+          {:else}
+            <button class="empty-desc" onclick={startBody}>Add a description…</button>
+          {/if}
+        </section>
+
+        <section class="sec">
+          <h3>Activity</h3>
+          <div class="tl">
+            {#each timeline as e, i (i)}
+              {#if e.c}
+                <div class="cm">
+                  <div class="cm-h"><b>{author(e.c)}</b>{#if e.c.external_id}<span class="via">via Forgejo</span>{/if}<time title={new Date(e.at).toLocaleString()}>{when(e.at)}</time></div>
+                  <div class="md">{@html renderMarkdown(e.c.body)}</div>
+                </div>
+              {:else if e.a}
+                <div class="ev">
+                  {#if e.a.field === "created"}
+                    <b>{who(e.a)}</b> created this issue
+                  {:else}
+                    <b>{who(e.a)}</b> changed {FIELD[e.a.field] ?? e.a.field}
+                    {#if e.a.old_value}from <em>{val(e.a.field, e.a.old_value)}</em>{/if}
+                    to <em>{val(e.a.field, e.a.new_value)}</em>
+                  {/if}
+                  <time title={new Date(e.at).toLocaleString()}>{when(e.at)}</time>
+                </div>
+              {/if}
+            {:else}
+              <p class="dim small">{loading ? "Loading…" : "No activity yet."}</p>
+            {/each}
+          </div>
+          <div class="compose">
+            <textarea
+              bind:value={commentDraft}
+              placeholder="Leave a comment. Markdown and @mentions work."
+              aria-label="Comment"
+              onkeydown={(e) => (e.metaKey || e.ctrlKey) && e.key === "Enter" && postComment()}
+            ></textarea>
+            <div class="cf">
+              <span>Ctrl ↵ to send</span>
+              <button class="btn" onclick={postComment} disabled={!commentDraft.trim() || posting}>Comment</button>
+            </div>
+          </div>
+        </section>
       </div>
+
+      {#if confirmingDelete}
+        <div class="confirm" transition:fly={{ y: 10, duration: 140 }}>
+          <span>Delete <b>{issue.key}</b> permanently?</span>
+          <button class="btn ghost" onclick={() => (confirmingDelete = false)}>Cancel</button>
+          <button class="btn danger confirm" onclick={() => { confirmingDelete = false; void store.remove(issue.key); }}>Delete</button>
+        </div>
+      {/if}
     {/if}
   </aside>
 {/if}
@@ -384,283 +532,450 @@
     position: fixed;
     top: 0;
     right: 0;
-    width: min(440px, 100vw);
-    height: 100vh;
-    background: var(--surface);
-    border-left: 1px solid var(--border);
+    bottom: 0;
+    width: min(560px, 100vw);
+    z-index: 20;
     display: flex;
     flex-direction: column;
-    z-index: 20;
-    box-shadow: -12px 0 40px rgba(0, 0, 0, 0.4);
+    background: var(--surface);
+    border-left: 1px solid var(--line-2);
+    box-shadow: -30px 0 60px rgba(0, 0, 0, 0.45);
   }
   header {
     display: flex;
     align-items: center;
-    gap: 8px;
-    padding: 10px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-  .spacer {
-    flex: 1;
+    gap: 9px;
+    padding: 12px 14px 12px 18px;
+    border-bottom: 1px solid var(--line);
+    min-width: 0;
   }
   .key {
-    font-variant-numeric: tabular-nums;
+    font: 500 12px/1 var(--font-mono);
     color: var(--ink-dim);
+    white-space: nowrap;
   }
-  .fg {
-    font-size: 11px;
+  .sync {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font: 400 11px/1 var(--font-mono);
     color: var(--ink-dim);
+    padding: 5px 8px;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .icon {
+  .sync svg {
+    width: 12px;
+    height: 12px;
+    flex: none;
+    color: var(--ok);
+  }
+  .grow {
+    flex: 1;
+  }
+  header :global(.ib),
+  .ib {
+    width: 28px;
+    height: 28px;
+    border: 0;
+    border-radius: 7px;
     background: none;
-    border: none;
-    color: var(--ink-dim);
-    cursor: pointer;
-    font-size: 14px;
+    display: grid;
+    place-items: center;
+    color: var(--ink-3);
+  }
+  header :global(.ib:hover) {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  header :global(.ib svg) {
+    width: 15px;
+    height: 15px;
   }
   .body {
-    padding: 12px;
+    flex: 1;
     overflow-y: auto;
+    padding: 18px 22px 28px;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 22px;
   }
   .title {
-    font-size: 16px;
-    font-weight: 600;
+    width: 100%;
+    min-height: 38px;
+    margin: 0 0 -6px -8px;
+    padding: 4px 8px;
+    resize: none;
+    overflow: hidden;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: none;
+    font: 700 23px/1.2 var(--font-display);
+    letter-spacing: -0.02em;
+    outline: none;
+  }
+  .title:hover {
+    border-color: var(--line);
+  }
+  .title:focus {
+    border-color: var(--line-2);
     background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px;
-    color: var(--ink);
   }
-  .row {
+  .props {
+    display: grid;
+    grid-template-columns: 76px minmax(0, 1fr) 64px minmax(0, 1fr);
+    gap: 2px 10px;
+    align-items: center;
+  }
+  .pl {
+    font-size: 12px;
+    color: var(--ink-3);
+  }
+  .span3 {
+    grid-column: 2 / -1;
+    min-width: 0;
+  }
+  .props :global(.pv) {
     display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .links {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
-  }
-  .link-chip {
-    display: inline-flex;
-    align-items: stretch;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 999px;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    min-height: 30px;
+    margin-left: -8px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 7px;
+    background: none;
+    font-size: 13px;
+    text-align: left;
+    white-space: nowrap;
     overflow: hidden;
   }
-  .link-chip-btn {
+  .props :global(.pv:hover) {
+    background: var(--raise);
+  }
+  .tx {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .dim {
+    color: var(--ink-3);
+  }
+  .small {
+    font-size: 12.5px;
+    margin: 0;
+  }
+  .pad {
+    padding: 18px 22px;
+  }
+  .pj {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    display: grid;
+    place-items: center;
+    font: 700 9px/1 var(--font-display);
+    color: #0f0c09;
+    flex: none;
+  }
+  .ek {
+    font: 500 11px/1 var(--font-mono);
+    color: var(--accent);
+  }
+  .labels {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 0;
+  }
+  .lab button {
+    border: 0;
     background: none;
-    border: none;
-    padding: 3px 10px;
-    color: var(--ink-dim);
-    font-size: 12px;
-    cursor: pointer;
-    font: inherit;
-  }
-  .link-chip-btn:hover {
-    color: var(--ink);
-  }
-  .link-chip:hover {
-    border-color: var(--accent);
-  }
-  .link-chip-x {
-    background: none;
-    border: none;
-    border-left: 1px solid var(--border);
-    padding: 3px 8px;
-    color: var(--ink-dim);
-    cursor: pointer;
+    padding: 0 0 0 2px;
+    color: var(--ink-3);
     font-size: 12px;
     line-height: 1;
   }
-  .link-chip-x:hover {
-    color: #e05252;
+  .lab button:hover {
+    color: var(--danger);
   }
-  .link-add select,
-  .link-add input {
-    font-size: 12px;
-  }
-  .link-add input {
+  .addlab {
     flex: 1;
-  }
-  label {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ink-dim);
-  }
-  .block {
-    width: 100%;
-  }
-  .epic-description {
-    margin: 3px 0 0;
+    min-width: 80px;
+    padding: 3px 4px;
+    border: 0;
+    background: none;
     font-size: 12px;
-    line-height: 1.4;
-    letter-spacing: normal;
-    text-transform: none;
+    outline: none;
+  }
+  .addlab::placeholder {
+    color: var(--ink-3);
+  }
+  .epic-desc {
+    margin: -10px 0 0;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    line-height: 1.45;
     white-space: pre-wrap;
   }
-  .field-head {
+  .sec {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  h3 {
+    margin: 0;
     display: flex;
     justify-content: space-between;
     align-items: center;
-    font-size: 11px;
+    font: 500 10px/1 var(--font-mono);
+    letter-spacing: 0.12em;
     text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--ink-dim);
-    margin-bottom: 3px;
+    color: var(--ink-3);
   }
-  .link-btn {
+  h3 button {
+    border: 0;
     background: none;
-    border: none;
-    color: var(--ink-dim);
-    text-decoration: underline;
-    cursor: pointer;
-    font-size: 11px;
-    text-transform: none;
-    letter-spacing: normal;
-    padding: 0;
-  }
-  .link-btn:hover {
-    color: var(--accent);
-  }
-  .md {
-    font-size: 13px;
-    line-height: 1.5;
-  }
-  :global(.md p) {
-    margin: 0 0 8px;
-  }
-  :global(.md p:last-child) {
-    margin-bottom: 0;
-  }
-  :global(.md ul),
-  :global(.md ol) {
-    margin: 4px 0 8px;
-    padding-left: 20px;
-  }
-  :global(.md code) {
-    background: var(--bg);
-    padding: 1px 4px;
-    border-radius: 3px;
-    font-size: 12px;
-    font-family: ui-monospace, monospace;
-  }
-  :global(.md pre) {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px;
-    overflow-x: auto;
-  }
-  :global(.md pre code) {
-    background: none;
-    padding: 0;
-  }
-  :global(.md a) {
-    color: var(--accent);
-  }
-  :global(.md blockquote) {
-    border-left: 2px solid var(--border);
-    margin: 4px 0;
-    padding-left: 10px;
-    color: var(--ink-dim);
-  }
-  :global(.md h1),
-  :global(.md h2),
-  :global(.md h3) {
-    font-size: 1em;
-    font-weight: 600;
-    margin: 8px 0 4px;
-  }
-  :global(.md img) {
-    max-width: 100%;
-  }
-  label.grow {
-    flex: 1;
-  }
-  select,
-  input,
-  textarea {
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 5px 6px;
-    color: var(--ink);
     font: inherit;
-    text-transform: none;
-    letter-spacing: normal;
+    letter-spacing: inherit;
+    color: var(--ink-3);
   }
-  textarea {
-    resize: vertical;
+  h3 button:hover {
+    color: var(--accent);
   }
-  .btn {
-    align-self: flex-end;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 6px 10px;
-    color: var(--ink);
-    cursor: pointer;
-    font-size: 12px;
-  }
-  .btn:hover {
-    border-color: var(--accent);
-  }
-  .btn.danger:hover {
-    border-color: #e05252;
-    color: #e05252;
-  }
-  .btn.danger.confirm {
-    background: #e05252;
-    border-color: #e05252;
-    color: #fff;
-  }
-  .tabs {
+  .rel {
     display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
+    align-items: stretch;
+    border-radius: 8px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    overflow: hidden;
   }
-  .tabs button {
+  .rel:hover {
+    border-color: var(--line-2);
+  }
+  .rel-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 7px 10px;
+    border: 0;
     background: none;
-    border: none;
-    border-bottom: 2px solid transparent;
+    font-size: 13px;
+    text-align: left;
+  }
+  .rel-main .tx {
+    white-space: nowrap;
+  }
+  .rk {
+    width: 78px;
+    flex: none;
+    font: 500 10px/1 var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .k-blocks,
+  .k-blocked-by {
+    color: var(--danger);
+  }
+  .k-closed-by,
+  .k-closes {
+    color: var(--status-review);
+  }
+  .rel-x {
+    border: 0;
+    border-left: 1px solid var(--line);
+    background: none;
+    padding: 0 11px;
+    color: var(--ink-3);
+  }
+  .rel-x:hover {
+    color: var(--danger);
+  }
+  .link-add {
+    display: flex;
+    gap: 6px;
+  }
+  .link-add input {
+    flex: 1;
+    min-width: 0;
+  }
+  .desc {
+    width: 100%;
+    resize: vertical;
+    font: 400 13px/1.55 var(--font-mono);
+  }
+  .row-end {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+  .row-end .small {
+    margin-right: auto;
+  }
+  .empty-desc {
+    padding: 12px;
+    border: 1px dashed var(--line-2);
+    border-radius: 8px;
+    background: none;
+    color: var(--ink-3);
+    font-size: 13px;
+    text-align: left;
+  }
+  .empty-desc:hover {
     color: var(--ink-dim);
-    padding: 4px 2px;
-    margin-right: 10px;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12px;
+    border-color: color-mix(in srgb, var(--ink) 26%, transparent);
   }
-  .tabs button.on {
+  .tl {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding-left: 22px;
+  }
+  .tl::before {
+    content: "";
+    position: absolute;
+    left: 6px;
+    top: 8px;
+    bottom: 8px;
+    width: 1px;
+    background: var(--line-2);
+  }
+  .ev {
+    position: relative;
+    padding: 5px 0;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+  }
+  .ev::before {
+    content: "";
+    position: absolute;
+    left: -19px;
+    top: 11px;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: 1.5px solid var(--ink-3);
+  }
+  .ev b {
     color: var(--ink);
-    border-bottom-color: var(--accent);
+    font-weight: 500;
   }
-  .comment,
-  .event {
-    border-top: 1px solid var(--border);
-    padding: 8px 0;
+  .ev em {
+    font-style: normal;
+    color: var(--ink);
+  }
+  time {
+    margin-left: 6px;
+    font: 400 10.5px/1 var(--font-mono);
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+  .cm {
+    position: relative;
+    margin: 6px 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+  }
+  .cm::before {
+    content: "";
+    position: absolute;
+    left: -22px;
+    top: 10px;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, #f0b46a, #c96f2a);
+    box-shadow: 0 0 0 3px var(--surface);
+  }
+  .cm-h {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12.5px;
+    margin-bottom: 4px;
+  }
+  .via {
+    font: 400 10.5px/1 var(--font-mono);
+    color: var(--ok);
+  }
+  .cm .md {
     font-size: 13px;
   }
-  .meta {
-    font-size: 11px;
-    margin-bottom: 2px;
+  .compose {
+    margin-top: 6px;
+    border-radius: 10px;
+    border: 1px solid var(--line-2);
+    background: var(--bg);
+    overflow: hidden;
   }
-  .dim {
-    color: var(--ink-dim);
+  .compose:focus-within {
+    border-color: color-mix(in srgb, var(--accent) 55%, transparent);
   }
-  .pad {
-    padding: 12px;
+  .compose textarea {
+    display: block;
+    width: 100%;
+    min-height: 66px;
+    padding: 10px 12px;
+    border: 0;
+    background: none;
+    resize: vertical;
+    font-size: 13px;
+    outline: none;
   }
-  footer {
-    border-top: 1px solid var(--border);
-    padding-top: 12px;
+  .compose textarea::placeholder {
+    color: var(--ink-3);
+  }
+  .cf {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px 6px 12px;
+    border-top: 1px solid var(--line);
+    font: 400 11px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .cf .btn {
+    margin-left: auto;
+    height: 28px;
+  }
+  .confirm {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 18px;
+    border-top: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+    background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+    font-size: 13px;
+  }
+  .confirm span {
+    margin-right: auto;
+  }
+
+  @media (max-width: 860px) {
+    .props {
+      grid-template-columns: 76px minmax(0, 1fr);
+    }
+    .span3 {
+      grid-column: 2;
+    }
+    .body {
+      padding: 16px 16px 28px;
+    }
   }
 </style>

@@ -1,39 +1,68 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { fade } from "svelte/transition";
-  import { store } from "./lib/store.svelte";
+  import { fly } from "svelte/transition";
+  import { bare, isTyping, store, type View } from "./lib/store.svelte";
+  import Sidebar from "./lib/Sidebar.svelte";
+  import TopBar from "./lib/TopBar.svelte";
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
   import Roadmap from "./lib/Roadmap.svelte";
+  import Inbox from "./lib/Inbox.svelte";
   import Settings from "./lib/Settings.svelte";
-  import NotificationBell from "./lib/NotificationBell.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
+  import { closeOpenMenu } from "./lib/ui/Menu.svelte";
 
   let devLoginName = $state("riley");
 
+  // #new (the desktop shell's quick-add hotkey) opens the palette; #KEY
+  // (from "Copy link") opens that issue once the board has loaded.
+  let pendingKey: string | null = null;
+  function onHash() {
+    const h = decodeURIComponent(location.hash.slice(1));
+    if (!h) return;
+    if (h === "new") store.paletteOpen = true;
+    else if (/^[A-Za-z]+-\d+$/.test(h)) pendingKey = h.toUpperCase();
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  $effect(() => {
+    if (pendingKey && store.auth === "in" && store.issueByKey(pendingKey)) {
+      store.selectedKey = pendingKey;
+      pendingKey = null;
+    }
+  });
+
   onMount(() => {
     void store.init();
-
-    // The desktop shell navigates to #new for its quick-add hotkey.
-    const onHash = () => {
-      if (location.hash === "#new") {
-        store.paletteOpen = true;
-        history.replaceState(null, "", location.pathname + location.search);
-      }
-    };
     onHash();
     window.addEventListener("hashchange", onHash);
 
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      if (store.auth !== "in") return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "k") {
         e.preventDefault();
         store.paletteOpen = !store.paletteOpen;
-      } else if (e.key === "c" && !store.paletteOpen && !isTyping(e)) {
+        return;
+      }
+      // Esc closes the top layer only: palette (handled in the palette), then
+      // an open menu, then a focused field, then the issue panel.
+      if (e.key === "Escape") {
+        if (store.paletteOpen) {
+          store.paletteOpen = false;
+          return;
+        }
+        if (closeOpenMenu()) return;
+        if (isTyping(e)) {
+          (e.target as HTMLElement).blur();
+          return;
+        }
+        if (store.selectedKey) store.selectedKey = null;
+        return;
+      }
+      // Bare C only, so Ctrl+C still copies.
+      if (e.key === "c" && bare(e) && !store.paletteOpen && !isTyping(e)) {
         e.preventDefault();
-        store.paletteOpen = true;
-      } else if (e.key === "Escape" && store.selectedKey) {
-        store.selectedKey = null;
+        store.openPalette();
       }
     };
     window.addEventListener("keydown", onKey);
@@ -43,236 +72,244 @@
     };
   });
 
-  function isTyping(e: KeyboardEvent) {
-    const t = e.target as HTMLElement;
-    return t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
-  }
+  const tabs: { v: View; label: string }[] = [
+    { v: "board", label: "Board" },
+    { v: "backlog", label: "Backlog" },
+    { v: "roadmap", label: "Roadmap" },
+    { v: "inbox", label: "Inbox" },
+    { v: "settings", label: "Settings" },
+  ];
 </script>
 
-<svelte:head><title>breadboard</title></svelte:head>
+<svelte:head><title>{store.unread ? `(${store.unread}) ` : ""}breadboard</title></svelte:head>
+
+{#snippet logo(size: number)}
+  <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+    <path d="M4.5 10.2C2.6 9.4 2.4 5 6.6 4.1 9 3.6 10.5 4 12 4s3-.4 5.4.1c4.2.9 4 5.3 2.1 6.1V19a1.6 1.6 0 0 1-1.6 1.6H6.1A1.6 1.6 0 0 1 4.5 19z" fill="var(--accent)" />
+    <path d="M7.5 10.6v7.4M12 10.6v7.4M16.5 10.6v7.4M5.6 14.3h12.8" stroke="var(--on-accent)" stroke-width="1.5" stroke-linecap="round" opacity=".55" />
+  </svg>
+{/snippet}
 
 {#if store.auth === "loading"}
-  <div class="center dim">connecting…</div>
+  <div class="splash">
+    {@render logo(40)}
+    <p class="dim">Connecting…</p>
+  </div>
+{:else if store.auth === "error"}
+  <div class="splash">
+    {@render logo(40)}
+    <h1>Can't reach breadboard</h1>
+    <p class="dim">{store.authError}. Retrying on its own; you can also try now.</p>
+    <button class="btn primary" onclick={() => store.retryNow()}>Retry now</button>
+  </div>
 {:else if store.auth === "out"}
-  <div class="center signin">
+  <div class="splash signin">
+    <div class="glow" aria-hidden="true"></div>
+    {@render logo(52)}
     <h1>breadboard</h1>
-    <p class="dim">Issue tracker for the bread ecosystem.</p>
-    <a class="primary" href="/auth/login">Sign in with git.breadway.dev</a>
+    <p class="dim">Planning for the bread ecosystem, synced both ways with Forgejo.</p>
+    <a class="btn primary big" href="/auth/login">Sign in with git.breadway.dev</a>
     {#if store.isDev}
       <div class="dev">
-        <span class="dim">dev:</span>
-        <input bind:value={devLoginName} />
-        <button onclick={() => store.devLogin(devLoginName)}>dev login</button>
+        <span class="dim">Dev login</span>
+        <input class="field" bind:value={devLoginName} aria-label="Dev login name" />
+        <button class="btn" onclick={() => store.devLogin(devLoginName)}>Sign in</button>
       </div>
     {/if}
   </div>
 {:else}
-  <header>
-    <strong class="brand">breadboard</strong>
-
-    <div class="seg">
-      <button class:on={store.view === "board"} onclick={() => (store.view = "board")}>Board</button>
-      <button class:on={store.view === "backlog"} onclick={() => (store.view = "backlog")}>Backlog</button>
-      <button class:on={store.view === "roadmap"} onclick={() => (store.view = "roadmap")}>Roadmap</button>
-      <button class:on={store.view === "settings"} onclick={() => (store.view = "settings")}>Settings</button>
-    </div>
-
-    {#if store.view === "board" || store.view === "backlog"}
-      <select bind:value={store.filterProject} title="Filter by project">
-        <option value="">All projects</option>
-        {#each store.projects as p (p.id)}<option value={p.key}>{p.key}</option>{/each}
-      </select>
-
-      <select bind:value={store.filterCycle} title="Filter by cycle">
-        <option value={0}>All cycles</option>
-        {#each store.cycles as c (c.id)}<option value={c.id}>{c.name}{c.closed ? " (closed)" : ""}</option>{/each}
-      </select>
-
-      {#if store.epics.length}
-        <select bind:value={store.filterEpic} title="Filter by epic">
-          <option value={0}>All epics</option>
-          {#each store.epics as ep (ep.id)}<option value={ep.id}>{ep.key} · {ep.title}</option>{/each}
-        </select>
-      {/if}
-
-      {#if store.me}
-        <select bind:value={store.filterAssignee} title="Filter by assignee">
-          <option value={0}>All assignees</option>
-          <option value={store.me.id}>Me ({store.me.login})</option>
-        </select>
-      {/if}
-
-      <button class:on={store.filterMine} onclick={() => (store.filterMine = !store.filterMine)}>Mine</button>
-      <button class="new" onclick={() => (store.paletteOpen = true)}>+ New <kbd>C</kbd></button>
-    {/if}
-
-    <div class="right">
-      <span class="dot" class:ok={store.connected} title={store.connected ? "live" : "reconnecting"}></span>
-      <NotificationBell />
-      {#if store.me?.avatar_url}
-        <img class="avatar" src={store.me.avatar_url} alt="" width="20" height="20" />
-      {/if}
-      <span class="dim">{store.me?.login}</span>
-      <button class="link" onclick={() => store.logout()}>sign out</button>
-    </div>
-  </header>
-
-  {#if store.view === "board"}
-    <Board />
-  {:else if store.view === "backlog"}
-    <Backlog />
-  {:else if store.view === "roadmap"}
-    <Roadmap />
-  {:else}
-    <Settings />
-  {/if}
+  <div class="app">
+    <Sidebar />
+    <main class="main">
+      <TopBar />
+      <div class="view">
+        {#if store.view === "board"}
+          <Board />
+        {:else if store.view === "backlog"}
+          <Backlog />
+        {:else if store.view === "roadmap"}
+          <Roadmap />
+        {:else if store.view === "inbox"}
+          <Inbox />
+        {:else}
+          <Settings />
+        {/if}
+      </div>
+      <nav class="tabbar" aria-label="Views">
+        {#each tabs as t (t.v)}
+          <button class:on={store.view === t.v} onclick={() => (store.view = t.v)}>
+            {t.label}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}
+          </button>
+        {/each}
+      </nav>
+    </main>
+  </div>
 
   <IssueDrawer />
   <CommandPalette />
 
   {#if store.toast}
-    <div class="toast" transition:fade={{ duration: 150 }}>{store.toast}</div>
+    {#key store.toast.id}
+      <div class="toast" class:err={store.toast.kind === "error"} role="status" transition:fly={{ y: 12, duration: 200 }}>
+        <i></i>
+        <span>{store.toast.msg}</span>
+        {#if store.toast.undo}
+          <button
+            onclick={() => {
+              const u = store.toast?.undo;
+              store.toast = null;
+              u?.();
+            }}>Undo</button>
+        {/if}
+      </div>
+    {/key}
   {/if}
 {/if}
 
 <style>
-  header {
+  .app {
+    height: 100%;
+    display: grid;
+    grid-template-columns: 236px minmax(0, 1fr);
+  }
+  .main {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 7px 14px;
-    border-bottom: 1px solid var(--border);
-    height: 46px;
-    box-sizing: border-box;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
   }
-  header select,
-  header button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    color: var(--ink);
-    padding: 4px 8px;
-    font: inherit;
-    font-size: 12px;
-    cursor: pointer;
+  .view {
+    flex: 1;
+    min-height: 0;
   }
-  .brand {
-    letter-spacing: -0.01em;
+  .tabbar {
+    display: none;
   }
-  .seg {
-    display: flex;
-  }
-  .seg button {
-    border-radius: 0;
-  }
-  .seg button:first-child {
-    border-radius: 5px 0 0 5px;
-  }
-  .seg button:last-child {
-    border-radius: 0 5px 5px 0;
-    border-left: none;
-  }
-  button.on {
-    background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-    border-color: var(--accent);
-    color: var(--accent);
-  }
-  .new {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #000;
-    font-weight: 600;
-  }
-  .new:hover {
-    filter: brightness(1.08);
-  }
-  .new kbd {
-    border: 1px solid rgba(0, 0, 0, 0.3);
-    border-radius: 3px;
-    padding: 0 3px;
-    font-size: 10px;
-    color: rgba(0, 0, 0, 0.6);
-  }
-  .right {
-    margin-left: auto;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .link {
-    background: none !important;
-    border: none !important;
-    color: var(--ink-dim) !important;
-    text-decoration: underline;
-  }
-  .dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--ink-dim);
-  }
-  .dot.ok {
-    background: #4caf50;
-  }
-  .avatar {
-    border-radius: 50%;
-    object-fit: cover;
-    display: block;
-  }
-  .center {
-    height: 100vh;
+
+  .splash {
+    position: relative;
+    height: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 10px;
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
+    overflow: hidden;
+  }
+  .splash h1 {
+    margin: 4px 0 0;
+    font: 800 30px/1.1 var(--font-display);
+    letter-spacing: -0.03em;
   }
   .signin h1 {
-    margin: 0;
+    font-size: 44px;
   }
-  .primary {
-    background: var(--accent);
-    color: #000;
+  .splash p {
+    margin: 0;
+    max-width: 44ch;
+  }
+  .glow {
+    position: absolute;
+    inset: auto 0 -40%;
+    height: 80%;
+    background: radial-gradient(50% 50% at 50% 50%, color-mix(in srgb, var(--accent) 18%, transparent), transparent 70%);
+    pointer-events: none;
+  }
+  .big {
+    height: 40px;
+    padding: 0 18px;
+    font-size: 14px;
+    margin-top: 10px;
     text-decoration: none;
-    padding: 9px 16px;
-    border-radius: 6px;
-    font-weight: 600;
   }
   .dev {
-    margin-top: 20px;
+    margin-top: 24px;
     display: flex;
     gap: 6px;
     align-items: center;
-  }
-  .dev input {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--ink);
-    border-radius: 5px;
-    padding: 4px 6px;
-  }
-  .dev button {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    color: var(--ink);
-    border-radius: 5px;
-    padding: 4px 10px;
-    cursor: pointer;
+    font-size: 12px;
   }
   .dim {
     color: var(--ink-dim);
   }
+
   .toast {
     position: fixed;
-    bottom: 16px;
     left: 50%;
-    transform: translateX(-50%);
-    background: #2a1a1a;
-    border: 1px solid #e05252;
-    color: #f0c0c0;
-    padding: 8px 14px;
-    border-radius: 6px;
+    bottom: 22px;
+    translate: -50% 0;
+    z-index: 60;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    max-width: calc(100vw - 32px);
+    padding: 9px 12px 9px 11px;
+    border-radius: 10px;
+    background: var(--raise);
+    border: 1px solid var(--line-2);
+    box-shadow: var(--shadow-pop);
     font-size: 13px;
-    z-index: 50;
+  }
+  .toast i {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--ok);
+  }
+  .toast.err {
+    border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+  }
+  .toast.err i {
+    background: var(--danger);
+  }
+  .toast button {
+    border: 0;
+    background: none;
+    color: var(--accent);
+    font-weight: 600;
+    font-size: 12.5px;
+    padding: 0 0 0 4px;
+  }
+
+  @media (max-width: 860px) {
+    .app {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .app :global(.side) {
+      display: none;
+    }
+    .tabbar {
+      display: flex;
+      justify-content: space-around;
+      border-top: 1px solid var(--line);
+      background: var(--sunk);
+      padding: 4px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+    }
+    .tabbar button {
+      position: relative;
+      border: 0;
+      background: none;
+      padding: 10px 6px;
+      font-size: 12px;
+      color: var(--ink-3);
+    }
+    .tabbar button.on {
+      color: var(--accent);
+    }
+    .tabbar .dot {
+      position: absolute;
+      top: 8px;
+      right: 0;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+    }
+    .toast {
+      bottom: 70px;
+    }
   }
 </style>

@@ -1,20 +1,41 @@
-/* Global reset + theme tokens. The real deployment swaps these for the shared
-   bread-theme tokens ($XDG_RUNTIME_DIR/bread/theme.css); the palette here
-   matches the BOS dark base so it already looks like the suite. */
+/* Global reset + theme tokens. The real deployment swaps the base tokens
+   (--bg, --surface, --border, --ink, --ink-dim, --accent) for the shared
+   bread-theme ones ($XDG_RUNTIME_DIR/bread/theme.css); everything else is
+   derived from them with color-mix so a swapped theme still hangs together.
+   Neutrals lean warm, toward the crust accent. */
 :root {
   color-scheme: dark;
-  --bg: #0c0c0c;
-  --surface: #161616;
-  --border: #2a2a2a;
-  --ink: #e6e6e6;
-  --ink-dim: #8a8a8a;
+  --bg: #100e0c;
+  --surface: #161310;
+  --border: #2a2520;
+  --ink: #ede6dc;
+  --ink-dim: #a69c90;
   --accent: #d98a3d;
 
-  --status-backlog: #6b6b6b;
-  --status-todo: #5a8fd6;
-  --status-doing: #d98a3d;
-  --status-review: #a875d6;
-  --status-done: #4caf50;
+  /* derived surfaces */
+  --sunk: color-mix(in srgb, var(--bg) 78%, #000);
+  --raise: color-mix(in srgb, var(--surface) 92%, var(--ink));
+  --line: color-mix(in srgb, var(--ink) 8.5%, transparent);
+  --line-2: color-mix(in srgb, var(--ink) 16%, transparent);
+  --ink-3: color-mix(in srgb, var(--ink-dim) 62%, var(--bg));
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
+  --on-accent: #1a0f04;
+  --danger: #e5675c;
+  --ok: #63b780;
+
+  /* Doing is yolk, not the accent, so a selected card and a Doing card
+     don't read the same. */
+  --status-backlog: #857b70;
+  --status-todo: #6f9fe2;
+  --status-doing: #e3bd55;
+  --status-review: #ad8fe0;
+  --status-done: #63b780;
+
+  --font-display: "Bricolage Grotesque Variable", "Instrument Sans", system-ui, sans-serif;
+  --font-ui: "Instrument Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", monospace;
+  --ease: cubic-bezier(0.2, 0.9, 0.25, 1);
+  --shadow-pop: 0 18px 44px rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -30,14 +51,215 @@ body {
 body {
   background: var(--bg);
   color: var(--ink);
-  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font: 14px/1.45 var(--font-ui);
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  height: 100%;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
 }
 
 button {
-  font-family: inherit;
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 ::selection {
   background: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+kbd {
+  font: 500 10px/1 var(--font-mono);
+  color: var(--ink-3);
+  border: 1px solid var(--line-2);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 2px 5px;
+  background: var(--bg);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* Shared form controls. Components opt in with these classes. */
+.field {
+  background: var(--bg);
+  border: 1px solid var(--line-2);
+  border-radius: 7px;
+  padding: 6px 9px;
+  color: var(--ink);
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.12s;
+}
+.field:focus {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.field::placeholder {
+  color: var(--ink-3);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line-2);
+  background: var(--raise);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--ink) 26%, transparent);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 rgba(0, 0, 0, 0.18);
+}
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.07);
+}
+.btn.primary kbd {
+  background: rgba(0, 0, 0, 0.14);
+  border-color: rgba(0, 0, 0, 0.25);
+  color: rgba(26, 15, 4, 0.75);
+}
+.btn.ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--ink-dim);
+}
+.btn.ghost:hover:not(:disabled) {
+  background: var(--raise);
+  color: var(--ink);
+}
+.btn.danger {
+  color: var(--danger);
+}
+.btn.danger.confirm {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.chip-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--ink-dim);
+  padding: 1px 7px 1px 6px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+.chip-label i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex: none;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* Rendered markdown (descriptions, comments). */
+.md {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: color-mix(in srgb, var(--ink) 90%, var(--ink-dim));
+  overflow-wrap: anywhere;
+}
+.md p {
+  margin: 0 0 10px;
+}
+.md p:last-child {
+  margin-bottom: 0;
+}
+.md ul,
+.md ol {
+  margin: 4px 0 10px;
+  padding-left: 20px;
+}
+.md code {
+  font: 400 12px/1 var(--font-mono);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 2px 5px;
+  border-radius: 4px;
+  color: var(--ink);
+}
+.md pre {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--sunk);
+  border: 1px solid var(--line);
+  font: 400 12px/1.6 var(--font-mono);
+  overflow-x: auto;
+}
+.md pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+}
+.md a {
+  color: var(--accent);
+}
+.md blockquote {
+  border-left: 2px solid var(--line-2);
+  margin: 4px 0 10px;
+  padding-left: 10px;
+  color: var(--ink-dim);
+}
+.md h1,
+.md h2,
+.md h3 {
+  font: 700 1.05em/1.3 var(--font-display);
+  margin: 12px 0 6px;
+}
+.md img {
+  max-width: 100%;
+}
+.md hr {
+  border: 0;
+  border-top: 1px solid var(--line);
 }
