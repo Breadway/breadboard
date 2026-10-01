@@ -24,9 +24,11 @@ async fn issue_lifecycle_and_events() {
         .unwrap();
     assert_eq!(health["db"], json!(true));
 
-    // /api requires auth.
+    // /api and /events require auth.
     let unauth = c.get(format!("{base}/api/issues")).send().await.unwrap();
     assert_eq!(unauth.status(), 401);
+    let unauth_events = c.get(format!("{base}/events")).send().await.unwrap();
+    assert_eq!(unauth_events.status(), 401);
 
     // Seed project ROAD exists; create a real project too.
     let project: Value = c
@@ -42,7 +44,7 @@ async fn issue_lifecycle_and_events() {
     assert_eq!(project["key"], "BREAD");
 
     // Open the SSE stream before mutating so we capture the events.
-    let mut events = tu::EventStream::connect(&base).await;
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
 
     // Create an issue with just a title.
     let created: Value = c
@@ -157,7 +159,7 @@ async fn cycle_start_end_events() {
         .unwrap();
     let id = cycle["id"].as_i64().unwrap();
 
-    let mut events = tu::EventStream::connect(&base).await;
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
 
     c.post(format!("{base}/api/cycles/{id}/start"))
         .header("authorization", &auth)
@@ -177,4 +179,21 @@ async fn cycle_start_end_events() {
         .unwrap();
     assert_eq!(ended["closed"], json!(true));
     assert_eq!(events.next_type().await, "cycle.ended");
+}
+
+#[tokio::test]
+async fn events_accept_session_cookie_for_browser_clients() {
+    let app = tu::spawn().await;
+    let base = format!("http://{}", app.addr);
+    let mut events = tu::EventStream::connect_with_cookie(&base, &app.session_token).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/issues"))
+        .header("authorization", format!("Bearer {}", app.token))
+        .json(&json!({ "title": "cookie client event", "project": "ROAD" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(events.next_type().await, "card.created");
 }

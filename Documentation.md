@@ -40,16 +40,17 @@ Link kinds: `blocks` · `blocked-by` · `relates-to`.
 
 ## HTTP
 
-Base URL: the server's `public_url`. JSON in/out. `/healthz` and `/events` are
-public; everything under `/api` requires auth: a session cookie (`bb_session`,
-web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
+Base URL: the server's `public_url`. JSON in/out. `/healthz` is public;
+`/events` and everything under `/api` require auth: a session cookie
+(`bb_session`, web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when
+neither is valid.
 
 ### Implemented
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/healthz` | `{ status, version, db }`; `503` if the DB is unreachable |
-| `GET` | `/events` | SSE stream of `BoardEvent` (see below) |
+| `GET` | `/events` | Authenticated SSE stream of `BoardEvent` (see below); browser EventSource sends the session cookie, CLI/TUI clients use a bearer token |
 | `GET` | `/auth/login` | redirect to Forgejo OAuth2 authorize (sets a state cookie) |
 | `GET` | `/auth/callback` | exchange code, upsert user, set session, redirect to `/` |
 | `POST` | `/auth/logout` | clear the session; `204` |
