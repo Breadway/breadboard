@@ -123,6 +123,9 @@ exactly one digest.
 
 `GET /events` emits one JSON object per change, tagged by `type`. Each maps to a
 `bread.board.*` event on the bread bus (milestone 7).
+If a client falls behind the broadcast buffer, the server closes that SSE
+connection so `EventSource` reconnects; clients should reload the board snapshot
+after reconnecting to recover missed changes.
 
 | SSE `type` | bread event | payload |
 | --- | --- | --- |
