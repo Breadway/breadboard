@@ -65,16 +65,8 @@ PY
 BAKERY_STAGE_ROOT="$STAGING" CLI_BINARY="$ROOT/target/release/breadboard" \
     DESKTOP_BINARY="$ROOT/target/release/breadboard-desktop" \
     bash "$ROOT/scripts/stage-bakery.sh"
-exec {PUBLISH_LOCK}>"$PKG_ROOT/.breadboard-publish.lock"
-flock "$PUBLISH_LOCK"
-for product in breadboard-cli breadboard-desktop; do
-    test ! -e "$PKG_ROOT/$product/$VERSION" || {
-        echo "Refusing to overwrite a published version: $product/$VERSION"; exit 1;
-    }
-done
-for product in breadboard-cli breadboard-desktop; do
-    mkdir -p "$PKG_ROOT/$product"
-    mv "$STAGING/$product/$VERSION" "$PKG_ROOT/$product/$VERSION"
-    ln -sfn "$VERSION" "$PKG_ROOT/$product/latest"
-done
-TRACK="$TRACK" DL_DIR="$DL_DIR" bash "$ECOSYSTEM_CI_DIR/scripts/gen-index.sh"
+TRACK="$TRACK" DL_DIR="$DL_DIR" VERSION="$VERSION" \
+    STAGING="$STAGING" \
+    REGISTRY="$ECOSYSTEM_CI_DIR/registry/bread-ecosystem.toml" \
+    GEN_INDEX_SCRIPT="$ECOSYSTEM_CI_DIR/scripts/gen-index.sh" \
+    bash "$ROOT/scripts/publish-bakery-stage.sh"

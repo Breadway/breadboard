@@ -20,11 +20,14 @@ does not run the desktop app. Bakery distributes the resulting native binary
 with its declared dependencies; no FUSE or AppImage runtime is needed.
 
 Each native binary is stripped and checksummed in an isolated staging
-directory. Only after both are prepared are their version directories and
-latest links installed into the download root and the track index regenerated
-and signed. Published version directories are immutable. A per-track client
-publish lock prevents two breadboard jobs from racing with each other; the
-ecosystem generator also serializes index generation across repositories.
+directory. Once both are prepared, the publisher builds and signs an index
+against a private view of the complete track tree. A signing failure leaves
+the live links and index untouched. It then holds the same per-track
+`.gen-index.lock` used by every ecosystem repository while installing both
+version directories, both latest links, and the signed index. If a final
+publication step fails, it restores the previous latest links and
+index/signature, then removes the new version directories. Published version
+directories are immutable.
 
 ## Activation
 
@@ -48,9 +51,12 @@ Workflows are disabled until the repository Actions variable
    Stable/RC tags must match the base versions in both Cargo manifests. This
    preparation does not create or push a release tag.
 
-Missing signing credentials fail before build or publication. Roll back by
-disabling the variable and restoring each previous latest link, then
-regenerating that track's signed index through the approved publisher.
+Missing signing credentials or a failed staged signature leave the live track
+unchanged. Fix the signing problem and rerun the same workflow. A failure
+during final publication triggers rollback under the shared index lock. If
+the runner is interrupted or reports a rollback error, stop other publishers
+and inspect the affected latest links and index before running the publisher
+again.
 
 ## Local staging verification
 
