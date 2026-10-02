@@ -117,6 +117,7 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 /// Server-sent events: every [`breadboard_core::BoardEvent`] as it is published.
 async fn events(
     State(state): State<AppState>,
+    _user: auth::AuthUser,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stream = BroadcastStream::new(state.bus.subscribe()).filter_map(|msg| match msg {
         Ok(event) => Some(Ok(Event::default().json_data(&event).unwrap_or_default())),

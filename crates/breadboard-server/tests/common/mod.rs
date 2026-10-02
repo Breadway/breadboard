@@ -16,6 +16,7 @@ pub struct TestApp {
     pub addr: SocketAddr,
     pub db: SqlitePool,
     pub token: String,
+    pub session_token: String,
     pub state: AppState,
     _tmp: tempfile::TempDir,
 }
@@ -54,6 +55,18 @@ pub async fn spawn() -> TestApp {
     .await
     .unwrap();
 
+    let session_token = "test-session-abcdef".to_string();
+    sqlx::query(
+        "INSERT INTO sessions (user_id, token_hash, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(user_id)
+    .bind(sha256_hex(&session_token))
+    .bind(Utc::now().to_rfc3339())
+    .bind((Utc::now() + chrono::Duration::days(1)).to_rfc3339())
+    .execute(&db)
+    .await
+    .unwrap();
+
     let state = AppState::new(db.clone(), config).unwrap();
     let app = http::router(state.clone());
 
@@ -67,6 +80,7 @@ pub async fn spawn() -> TestApp {
         addr,
         db,
         token,
+        session_token,
         state,
         _tmp: tmp,
     }
@@ -87,14 +101,30 @@ pub struct EventStream {
 }
 
 impl EventStream {
-    pub async fn connect(base: &str) -> Self {
+    pub async fn connect_with_auth(base: &str, authorization: &str) -> Self {
         let resp = reqwest::Client::new()
             .get(format!("{base}/events"))
+            .header("authorization", authorization)
             .send()
             .await
             .unwrap();
         assert!(resp.status().is_success());
         // Give the broadcast subscription a beat to register.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        Self {
+            resp,
+            buf: String::new(),
+        }
+    }
+
+    pub async fn connect_with_cookie(base: &str, session_token: &str) -> Self {
+        let resp = reqwest::Client::new()
+            .get(format!("{base}/events"))
+            .header("cookie", format!("bb_session={session_token}"))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         Self {
             resp,
