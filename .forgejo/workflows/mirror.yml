@@ -1,0 +1,36 @@
+name: GitHub mirror
+
+on:
+  push:
+    branches: ['main']
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    if: ${{ vars.BREADBOARD_MIRROR_ENABLED == 'true' }}
+    runs-on: [self-hosted, hestia]
+    steps:
+      - name: mirror main and release tags
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN }}
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -euo pipefail
+          test -n "${MIRROR_TOKEN:-}" || { echo 'MIRROR_TOKEN is required'; exit 1; }
+          WORK_DIR="$(mktemp -d)"
+          trap 'rm -rf "$WORK_DIR"' EXIT
+          umask 077
+          cat > "$WORK_DIR/askpass" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *Password*) printf '%s\n' "$MIRROR_TOKEN" ;;
+            *) exit 1 ;;
+          esac
+          EOF
+          chmod 700 "$WORK_DIR/askpass"
+          export GIT_ASKPASS="$WORK_DIR/askpass"
+          git clone --bare "https://git.breadway.dev/${GITHUB_REPOSITORY}.git" "$WORK_DIR/repo.git"
+          git -C "$WORK_DIR/repo.git" push https://github.com/Breadway/breadboard.git \
+            refs/heads/main:refs/heads/main 'refs/tags/v*:refs/tags/v*'
