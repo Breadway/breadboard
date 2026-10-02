@@ -58,7 +58,22 @@ this automatically; nginx needs `proxy_buffering off;` for `/events`.
 
 ## 5. Forgejo webhook
 
-On each repo to sync (or org-wide), add a webhook:
+Choose the webhook scope that matches the repository owner:
+
+- An organization owner can use an organization webhook in its Settings.
+- A personal account owner can use a user webhook in User Settings. Forgejo
+  15.0.7 supports this through `POST /api/v1/user/hooks`, with the same payload
+  and events as repository and organization webhooks. This covers the account's
+  current and future repositories without converting the account into an
+  organization.
+- Use repository hooks when the operator cannot administer the owning account.
+
+The deployed `Breadway` namespace is a personal account. An organization hook
+cannot be created for it through `/api/v1/orgs/Breadway/hooks`. Use a Breadway
+user hook for account-wide coverage; do not convert the namespace or transfer
+repositories merely to obtain webhook coverage.
+
+Configure the selected hook with:
 
 - **URL**: `<public-url>/webhooks/forgejo`
 - **Content type**: `application/json`
@@ -68,6 +83,30 @@ On each repo to sync (or org-wide), add a webhook:
 Then map each repo to a project: `breadboard repos add <owner>/<name> <KEY>`
 (or `POST /api/repos`). The reconcile loop is the safety net if a webhook is
 missed.
+
+Unknown or disabled repositories are acknowledged with HTTP 200 and ignored:
+`apply_issue`, `apply_comment`, and `apply_pr` each check `repo_enabled` before
+syncing. The signature is still required, including for ignored repositories.
+
+### Activating an account-wide hook
+
+1. Sign in as the repository-owning account and open its webhook settings, or
+   use the authenticated `/api/v1/user/hooks` endpoint. Select the Forgejo hook
+   type, the URL and events above, and the existing deployment webhook secret.
+   Keep that secret out of command history, logs, and source control.
+2. Keep the existing repository hooks active while validating the new hook.
+   The sync engine deduplicates repeated issue and comment deliveries.
+3. Create an issue or comment in a mapped repository and inspect the user
+   hook's delivery record. Confirm HTTP 200 and one corresponding breadboard
+   issue/comment. Confirm an event from an unmapped repository is acknowledged
+   without importing it. A newly created account-owned repository should appear
+   in the user hook's delivery records without adding a repository hook.
+4. Once delivery has been verified, disable only the repository hooks with the
+   same breadboard destination. Retain their IDs and settings for rollback.
+   To roll back, reactivate those hooks and disable the user hook.
+
+The account-wide hook changes live Forgejo settings. Reviewing this procedure
+does not itself activate a hook or remove the existing repository hooks.
 
 ## Updating
 
