@@ -25,6 +25,9 @@ jobs:
       - name: check-docs
         run: cd src && cargo run -p xtask --locked -- check-docs
 
+      - name: bakery publisher transaction
+        run: cd src && bash scripts/test-publish-bakery-stage.sh
+
       - name: web
         run: |
           set -euo pipefail
