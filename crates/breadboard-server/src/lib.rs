@@ -27,6 +27,7 @@ use crate::forgejo::Forgejo;
 pub struct AppState {
     pub db: db::Db,
     pub bus: Bus,
+    pub shutdown: tokio::sync::watch::Sender<bool>,
     pub http: reqwest::Client,
     pub forgejo: Forgejo,
     pub config: Arc<Config>,
@@ -39,9 +40,11 @@ impl AppState {
             .user_agent(concat!("breadboard-server/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let forgejo = Forgejo::new(http.clone(), &config.forgejo);
+        let (shutdown, _) = tokio::sync::watch::channel(false);
         Ok(Self {
             db,
             bus: Bus::new(),
+            shutdown,
             http,
             forgejo,
             config: Arc::new(config),
