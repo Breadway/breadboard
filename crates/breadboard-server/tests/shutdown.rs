@@ -3,6 +3,8 @@
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+use breadboard_server::{auth::sha256_hex, db};
+use chrono::Utc;
 use tempfile::tempdir;
 use tokio::time::{sleep, timeout, Instant};
 
@@ -37,8 +39,34 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
     };
     drop(response);
 
+    // /events requires auth: mint a bearer token in the server's database.
+    let pool = db::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        temp.path().join("server.db").display()
+    ))
+    .await
+    .unwrap();
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let token = "shutdown-test-token";
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, ?3)",
+    )
+    .bind(user_id)
+    .bind(sha256_hex(token))
+    .bind(Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+
     let mut events = client
         .get(format!("http://{address}/events"))
+        .bearer_auth(token)
         .send()
         .await
         .unwrap();
