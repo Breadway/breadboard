@@ -71,6 +71,9 @@ impl FgIssue {
     pub fn is_closed(&self) -> bool {
         self.state == "closed"
     }
+    pub fn is_merged(&self) -> bool {
+        self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
     pub fn label_names(&self) -> Vec<String> {
         self.labels.iter().map(|l| l.name.clone()).collect()
     }
@@ -152,8 +155,7 @@ impl Forgejo {
     ) -> anyhow::Result<Vec<FgIssue>> {
         let mut out = Vec::new();
         for page in 1..=50u32 {
-            let mut url =
-                format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page={page}");
+            let mut url = format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page={page}");
             if let Some(s) = since {
                 url.push_str(&format!("&since={}", urlencoding::encode(s)));
             }
@@ -346,12 +348,18 @@ impl FgPrObject {
             number: self.number,
             title: self.title,
             body: self.body,
-            state: if self.merged { "closed".into() } else { self.state },
+            state: if self.merged {
+                "closed".into()
+            } else {
+                self.state
+            },
             labels: self.labels,
             assignees: self.assignees,
             milestone: self.milestone,
             user: self.user,
-            pull_request: Some(FgPullRequestStub { merged: self.merged }),
+            pull_request: Some(FgPullRequestStub {
+                merged: self.merged,
+            }),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

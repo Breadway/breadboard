@@ -126,7 +126,9 @@ async fn webhook_hmac_gate() {
     store::upsert_project_for_repo(&app.db, "BREAD", "bread", "Breadway/bread")
         .await
         .unwrap();
-    store::upsert_repo(&app.db, "Breadway/bread", true).await.unwrap();
+    store::upsert_repo(&app.db, "Breadway/bread", true)
+        .await
+        .unwrap();
 
     let payload = json!({
         "action": "opened",
@@ -182,7 +184,9 @@ async fn pr_import_and_milestone_sync() {
     // A PR (is_pr via pull_request field) with a milestone.
     let mut pr = fg_issue(12, "add the sync engine", Utc::now());
     pr.pull_request = Some(breadboard_server::forgejo::FgPullRequestStub { merged: false });
-    pr.milestone = Some(FgMilestone { title: "v1.0".into() });
+    pr.milestone = Some(FgMilestone {
+        title: "v1.0".into(),
+    });
     sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
         .await
         .unwrap();
@@ -196,7 +200,9 @@ async fn pr_import_and_milestone_sync() {
 
     // Milestone change flows in.
     let mut pr2 = pr.clone();
-    pr2.milestone = Some(FgMilestone { title: "v1.1".into() });
+    pr2.milestone = Some(FgMilestone {
+        title: "v1.1".into(),
+    });
     pr2.updated_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
     sync::apply_issue(&app.state, repo, &pr2, SyncSource::ForgejoReconcile)
         .await
@@ -234,7 +240,9 @@ async fn breadboard_comment_absorbs_its_own_echo() {
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
     };
-    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+    sync::apply_comment(&app.state, repo, 3, &echo)
+        .await
+        .unwrap();
 
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1, "echo claimed the local comment, no dup");
@@ -279,12 +287,18 @@ async fn breadboard_comment_echo_after_writeback_recorded() {
         created_at: Utc::now().to_rfc3339(),
         updated_at: (Utc::now() + Duration::seconds(1)).to_rfc3339(),
     };
-    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+    sync::apply_comment(&app.state, repo, 3, &echo)
+        .await
+        .unwrap();
 
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1, "echo updated in place, no dup");
     assert_eq!(comments[0].external_id, Some(900));
-    assert_eq!(comments[0].author_id, Some(1), "author stays the breadboard user");
+    assert_eq!(
+        comments[0].author_id,
+        Some(1),
+        "author stays the breadboard user"
+    );
 }
 
 /// Direction 2: a comment that originates in Forgejo is imported exactly once
@@ -325,7 +339,10 @@ async fn forgejo_origin_comment_imported_once() {
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0].external_id, Some(1234));
-    assert!(comments[0].author_id.is_some(), "attributed to the Forgejo author");
+    assert!(
+        comments[0].author_id.is_some(),
+        "attributed to the Forgejo author"
+    );
 }
 
 /// The edit case: an edited Forgejo comment (same id, new body) updates the
@@ -434,7 +451,10 @@ async fn reconcile_drift_signals_a_missed_webhook() {
         "reconcile applies the missed change and emits one drift event"
     );
     assert_eq!(
-        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        store::get_issue_by_key(&app.db, "BREAD-1")
+            .await
+            .unwrap()
+            .title,
         "OSD renders on the wrong monitor"
     );
 
@@ -452,7 +472,10 @@ async fn reconcile_drift_signals_a_missed_webhook() {
     assert_eq!(drift[0].0, "title");
     assert_eq!(drift[0].1, "breadboard");
     assert_eq!(
-        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        store::get_issue_by_key(&app.db, "BREAD-1")
+            .await
+            .unwrap()
+            .title,
         "OSD renders on the wrong monitor",
         "breadboard's value is kept"
     );
@@ -469,6 +492,186 @@ async fn reconcile_drift_signals_a_missed_webhook() {
         drain_drift(&mut rx).is_empty(),
         "webhook path stays silent on divergence"
     );
+}
+
+// --- PR close/merge target cascade regression tests ---
+
+fn pr_issue(
+    number: i64,
+    title: &str,
+    closed: bool,
+    merged: bool,
+    body: &str,
+    updated: chrono::DateTime<Utc>,
+) -> FgIssue {
+    FgIssue {
+        number,
+        title: title.into(),
+        body: body.into(),
+        state: if closed {
+            "closed".into()
+        } else {
+            "open".into()
+        },
+        labels: vec![],
+        assignees: None,
+        milestone: None,
+        user: None,
+        pull_request: Some(breadboard_server::forgejo::FgPullRequestStub { merged }),
+        created_at: "2026-09-01T00:00:00Z".into(),
+        updated_at: updated.to_rfc3339(),
+    }
+}
+
+async fn ensure_repo_and_project(app: &common::TestApp, repo: &str, key: &str) {
+    store::upsert_project_for_repo(&app.db, key, "test", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+}
+
+/// Import a non-PR issue via the sync path to allocate a deterministic breadboard key
+/// (first issue in a fresh project is KEY-1).
+async fn import_target_issue(
+    app: &common::TestApp,
+    repo: &str,
+    number: i64,
+    title: &str,
+    labels: &[&str],
+) -> breadboard_core::Issue {
+    let mut fg = fg_issue(number, title, Utc::now());
+    fg.labels = labels.iter().map(|n| label(n)).collect();
+    sync::apply_issue(&app.state, repo, &fg, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    // The first issue for this project will be <KEY>-1.
+    // We don't know the project key here; caller passes it or we fetch.
+    // For these tests we always use a fresh project per test so first target is KEY-1.
+    // Return by looking up the just-imported number.
+    store::find_issue_by_forgejo(&app.db, repo, number)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn closed_unmerged_pr_does_not_mark_targets_done() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    // Create target first so it gets TST-1.
+    let target = import_target_issue(&app, repo, 100, "needs verification", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    // Closed-unmerged PR referencing it.
+    let pr = pr_issue(
+        10,
+        "reject the thing",
+        true,
+        false,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_ne!(
+        t.status,
+        Status::Done,
+        "closed-unmerged must not cascade done"
+    );
+}
+
+#[tokio::test]
+async fn merged_pr_marks_targets_done() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 101, "landed work", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    let pr = pr_issue(11, "land it", true, true, "Closes TST-1", Utc::now());
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(t.status, Status::Done, "merged PR should cascade done");
+}
+
+#[tokio::test]
+async fn merged_pr_with_verify_before_done_label_goes_to_review() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(
+        &app,
+        repo,
+        102,
+        "needs live verify",
+        &["verify-before-done"],
+    )
+    .await;
+    assert_eq!(target.key, "TST-1");
+
+    let pr = pr_issue(
+        12,
+        "land verified later",
+        true,
+        true,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(
+        t.status,
+        Status::Review,
+        "verify-before-done forces review on merge"
+    );
+}
+
+#[tokio::test]
+async fn reopen_pr_does_not_cascade_done() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 103, "reopen test", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    // Merge first.
+    let pr_done = pr_issue(13, "temp merge", true, true, "Closes TST-1", Utc::now());
+    sync::apply_issue(&app.state, repo, &pr_done, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(t.status, Status::Done);
+
+    // Reopen the PR (still references the target).
+    let pr_open = pr_issue(
+        13,
+        "temp merge",
+        false,
+        false,
+        "Closes TST-1",
+        Utc::now() + Duration::seconds(2),
+    );
+    sync::apply_issue(&app.state, repo, &pr_open, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t2 = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    // Reopen of PR must not touch the target status (remains done until explicit move).
+    assert_eq!(t2.status, Status::Done);
 }
 
 // --- helpers ---
