@@ -4,9 +4,9 @@ use breadboard_core::dto::{
     EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
 };
 use breadboard_core::{Comment, Cycle, Epic, Issue, Notification, Project, User};
-use std::collections::BTreeMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -114,7 +114,9 @@ impl Client {
     }
 
     fn build(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
-        let b = self.http.request(method, format!("{}{path}", self.base_url));
+        let b = self
+            .http
+            .request(method, format!("{}{path}", self.base_url));
         match &self.token {
             Some(t) => b.bearer_auth(t),
             None => b,
@@ -144,13 +146,17 @@ impl Client {
             let body = resp.text().await.unwrap_or_default();
             return Err(Error::Status { status, body });
         }
+        // tolerate empty body or a JSON body (e.g. 202 {"ok":true} from reconcile);
+        // drain so we don't leave the connection in a bad state for reuse
+        let _ = resp.text().await;
         Ok(())
     }
 
     // --- health / identity ------------------------------------------------
 
     pub async fn health(&self) -> Result<Health> {
-        self.send(self.build(reqwest::Method::GET, "/healthz")).await
+        self.send(self.build(reqwest::Method::GET, "/healthz"))
+            .await
     }
 
     pub async fn me(&self) -> Result<User> {
@@ -205,8 +211,11 @@ impl Client {
 
     pub async fn add_comment(&self, key: &str, body: &str) -> Result<Comment> {
         self.send(
-            self.build(reqwest::Method::POST, &format!("/api/issues/{key}/comments"))
-                .json(&serde_json::json!({ "body": body })),
+            self.build(
+                reqwest::Method::POST,
+                &format!("/api/issues/{key}/comments"),
+            )
+            .json(&serde_json::json!({ "body": body })),
         )
         .await
     }
@@ -232,7 +241,8 @@ impl Client {
     }
 
     pub async fn list_epics(&self) -> Result<Vec<EpicView>> {
-        self.send(self.build(reqwest::Method::GET, "/api/epics")).await
+        self.send(self.build(reqwest::Method::GET, "/api/epics"))
+            .await
     }
 
     pub async fn create_epic(&self, new: &NewEpic) -> Result<Epic> {
@@ -274,11 +284,12 @@ impl Client {
         dry_run: bool,
     ) -> Result<ImportResult> {
         self.send(
-            self.build(reqwest::Method::POST, "/api/import").json(&serde_json::json!({
-                "project": project,
-                "markdown": markdown,
-                "dry_run": dry_run,
-            })),
+            self.build(reqwest::Method::POST, "/api/import")
+                .json(&serde_json::json!({
+                    "project": project,
+                    "markdown": markdown,
+                    "dry_run": dry_run,
+                })),
         )
         .await
     }
@@ -306,7 +317,8 @@ impl Client {
     // --- synced repos --------------------------------------------------
 
     pub async fn list_repos(&self) -> Result<Vec<RepoView>> {
-        self.send(self.build(reqwest::Method::GET, "/api/repos")).await
+        self.send(self.build(reqwest::Method::GET, "/api/repos"))
+            .await
     }
 
     pub async fn add_repo(&self, repo: &str, key: &str, name: Option<&str>) -> Result<RepoView> {

@@ -4,8 +4,8 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::extract::State;
-use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, patch, post, put};
 use axum::{Json, Router};
 use futures::stream::Stream;
@@ -21,7 +21,10 @@ use crate::{api, auth, device, webhook, AppState};
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
         .route("/me", get(auth::me))
-        .route("/projects", get(api::list_projects).post(api::create_project))
+        .route(
+            "/projects",
+            get(api::list_projects).post(api::create_project),
+        )
         .route(
             "/projects/{id}",
             get(api::get_project).patch(api::update_project),
@@ -47,12 +50,21 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
-        .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
+        .route(
+            "/repos/{owner}/{name}",
+            axum::routing::delete(api::remove_repo),
+        )
         .route("/sync/reconcile", post(api::reconcile_now))
         .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))
-        .route("/notifications/read-all", post(api::mark_all_notifications_read))
-        .route("/notifications/{id}/read", post(api::mark_notification_read))
+        .route(
+            "/notifications/read-all",
+            post(api::mark_all_notifications_read),
+        )
+        .route(
+            "/notifications/{id}/read",
+            post(api::mark_notification_read),
+        )
         .route(
             "/notifications/prefs",
             get(api::get_notification_prefs).put(api::set_notification_prefs),
@@ -79,9 +91,8 @@ pub fn router(state: AppState) -> Router {
     if let Some(dir) = &state.config.web_dir {
         if dir.is_dir() {
             let index = dir.join("index.html");
-            router = router.fallback_service(
-                ServeDir::new(dir).not_found_service(ServeFile::new(index)),
-            );
+            router = router
+                .fallback_service(ServeDir::new(dir).not_found_service(ServeFile::new(index)));
             tracing::info!(dir = %dir.display(), "serving web SPA");
         } else {
             tracing::warn!(dir = %dir.display(), "web_dir does not exist: not serving SPA");

@@ -126,7 +126,9 @@ async fn webhook_hmac_gate() {
     store::upsert_project_for_repo(&app.db, "BREAD", "bread", "Breadway/bread")
         .await
         .unwrap();
-    store::upsert_repo(&app.db, "Breadway/bread", true).await.unwrap();
+    store::upsert_repo(&app.db, "Breadway/bread", true)
+        .await
+        .unwrap();
 
     let payload = json!({
         "action": "opened",
@@ -182,7 +184,9 @@ async fn pr_import_and_milestone_sync() {
     // A PR (is_pr via pull_request field) with a milestone.
     let mut pr = fg_issue(12, "add the sync engine", Utc::now());
     pr.pull_request = Some(breadboard_server::forgejo::FgPullRequestStub { merged: false });
-    pr.milestone = Some(FgMilestone { title: "v1.0".into() });
+    pr.milestone = Some(FgMilestone {
+        title: "v1.0".into(),
+    });
     sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
         .await
         .unwrap();
@@ -196,7 +200,9 @@ async fn pr_import_and_milestone_sync() {
 
     // Milestone change flows in.
     let mut pr2 = pr.clone();
-    pr2.milestone = Some(FgMilestone { title: "v1.1".into() });
+    pr2.milestone = Some(FgMilestone {
+        title: "v1.1".into(),
+    });
     pr2.updated_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
     sync::apply_issue(&app.state, repo, &pr2, SyncSource::ForgejoReconcile)
         .await
@@ -234,7 +240,9 @@ async fn breadboard_comment_absorbs_its_own_echo() {
         created_at: Utc::now().to_rfc3339(),
         updated_at: Utc::now().to_rfc3339(),
     };
-    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+    sync::apply_comment(&app.state, repo, 3, &echo)
+        .await
+        .unwrap();
 
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1, "echo claimed the local comment, no dup");
@@ -279,12 +287,18 @@ async fn breadboard_comment_echo_after_writeback_recorded() {
         created_at: Utc::now().to_rfc3339(),
         updated_at: (Utc::now() + Duration::seconds(1)).to_rfc3339(),
     };
-    sync::apply_comment(&app.state, repo, 3, &echo).await.unwrap();
+    sync::apply_comment(&app.state, repo, 3, &echo)
+        .await
+        .unwrap();
 
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1, "echo updated in place, no dup");
     assert_eq!(comments[0].external_id, Some(900));
-    assert_eq!(comments[0].author_id, Some(1), "author stays the breadboard user");
+    assert_eq!(
+        comments[0].author_id,
+        Some(1),
+        "author stays the breadboard user"
+    );
 }
 
 /// Direction 2: a comment that originates in Forgejo is imported exactly once
@@ -325,7 +339,10 @@ async fn forgejo_origin_comment_imported_once() {
     let comments = store::list_comments(&app.db, issue.id).await.unwrap();
     assert_eq!(comments.len(), 1);
     assert_eq!(comments[0].external_id, Some(1234));
-    assert!(comments[0].author_id.is_some(), "attributed to the Forgejo author");
+    assert!(
+        comments[0].author_id.is_some(),
+        "attributed to the Forgejo author"
+    );
 }
 
 /// The edit case: an edited Forgejo comment (same id, new body) updates the
@@ -434,7 +451,10 @@ async fn reconcile_drift_signals_a_missed_webhook() {
         "reconcile applies the missed change and emits one drift event"
     );
     assert_eq!(
-        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        store::get_issue_by_key(&app.db, "BREAD-1")
+            .await
+            .unwrap()
+            .title,
         "OSD renders on the wrong monitor"
     );
 
@@ -452,7 +472,10 @@ async fn reconcile_drift_signals_a_missed_webhook() {
     assert_eq!(drift[0].0, "title");
     assert_eq!(drift[0].1, "breadboard");
     assert_eq!(
-        store::get_issue_by_key(&app.db, "BREAD-1").await.unwrap().title,
+        store::get_issue_by_key(&app.db, "BREAD-1")
+            .await
+            .unwrap()
+            .title,
         "OSD renders on the wrong monitor",
         "breadboard's value is kept"
     );

@@ -46,11 +46,7 @@ struct PrPayload {
     repository: Repository,
 }
 
-pub async fn handle(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> StatusCode {
+pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> StatusCode {
     let secret = &state.config.forgejo.webhook_secret;
     if secret.is_empty() {
         tracing::warn!("webhook received but forgejo.webhook_secret is unset");

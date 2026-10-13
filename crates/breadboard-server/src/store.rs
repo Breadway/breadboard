@@ -126,12 +126,13 @@ pub async fn list_projects(db: &SqlitePool) -> AppResult<Vec<Project>> {
 }
 
 pub async fn get_project(db: &SqlitePool, id: i64) -> AppResult<Project> {
-    let row: ProjectRow =
-        sqlx::query_as(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"))
-            .bind(id)
-            .fetch_optional(db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     Ok(row.into())
 }
 
@@ -288,14 +289,12 @@ impl From<EpicRow> for Epic {
     }
 }
 
-const EPIC_COLS: &str =
-    "id, key, title, description, project_id, archived, created_at, updated_at";
+const EPIC_COLS: &str = "id, key, title, description, project_id, archived, created_at, updated_at";
 
 pub async fn list_epics(db: &SqlitePool) -> AppResult<Vec<Epic>> {
-    let rows: Vec<EpicRow> =
-        sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<EpicRow> = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
+        .fetch_all(db)
+        .await?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -400,13 +399,17 @@ pub async fn delete_epic(db: &SqlitePool, id: i64) -> AppResult<()> {
 /// Per-status child-issue counts for an epic (or, with `epic_id = None`, for
 /// issues with no epic; the backlog).
 pub async fn epic_progress(db: &SqlitePool, epic_id: i64) -> AppResult<[(String, i64); 5]> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status",
-    )
-    .bind(epic_id)
-    .fetch_all(db)
-    .await?;
-    let count = |s: &str| rows.iter().find(|(st, _)| st == s).map(|(_, n)| *n).unwrap_or(0);
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status")
+            .bind(epic_id)
+            .fetch_all(db)
+            .await?;
+    let count = |s: &str| {
+        rows.iter()
+            .find(|(st, _)| st == s)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
     Ok([
         ("backlog".into(), count("backlog")),
         ("todo".into(), count("todo")),
@@ -444,10 +447,11 @@ impl From<CycleRow> for Cycle {
 const CYCLE_COLS: &str = "id, name, starts_on, ends_on, closed";
 
 pub async fn list_cycles(db: &SqlitePool) -> AppResult<Vec<Cycle>> {
-    let rows: Vec<CycleRow> =
-        sqlx::query_as(&format!("SELECT {CYCLE_COLS} FROM cycles ORDER BY starts_on DESC"))
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<CycleRow> = sqlx::query_as(&format!(
+        "SELECT {CYCLE_COLS} FROM cycles ORDER BY starts_on DESC"
+    ))
+    .fetch_all(db)
+    .await?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -465,7 +469,9 @@ pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
         return Err(AppError::bad_request("name is required"));
     }
     if new.ends_on < new.starts_on {
-        return Err(AppError::bad_request("ends_on must be on or after starts_on"));
+        return Err(AppError::bad_request(
+            "ends_on must be on or after starts_on",
+        ));
     }
     let row: CycleRow = sqlx::query_as(&format!(
         "INSERT INTO cycles (name, starts_on, ends_on) VALUES (?1, ?2, ?3) RETURNING {CYCLE_COLS}"
@@ -533,8 +539,14 @@ const ISSUE_COLS: &str = "id, key, project_id, title, body, status, priority, ty
 /// Fields whose changes are recorded in `sync_log`. Of these, `title` / `body` /
 /// `status` / `assignee_id` / `labels` also drive Forgejo writeback;
 /// `milestone` is inbound-only.
-pub const SYNCED_FIELDS: &[&str] =
-    &["title", "body", "status", "assignee_id", "labels", "milestone"];
+pub const SYNCED_FIELDS: &[&str] = &[
+    "title",
+    "body",
+    "status",
+    "assignee_id",
+    "labels",
+    "milestone",
+];
 
 async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
     let labels: Vec<String> =
@@ -591,12 +603,11 @@ pub async fn get_issue(db: &SqlitePool, id: i64) -> AppResult<Issue> {
 }
 
 pub async fn get_issue_by_key(db: &SqlitePool, key: &str) -> AppResult<Issue> {
-    let row: IssueRow =
-        sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
-            .bind(key)
-            .fetch_optional(db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
+        .bind(key)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
     hydrate(db, row).await
 }
 
@@ -741,12 +752,22 @@ pub async fn update_issue(
             return Err(AppError::bad_request("title must not be empty"));
         }
         if *title != before.title {
-            set_col!("title", title.trim(), Some(before.title.clone()), Some(title.clone()));
+            set_col!(
+                "title",
+                title.trim(),
+                Some(before.title.clone()),
+                Some(title.clone())
+            );
         }
     }
     if let Some(body) = &patch.body {
         if *body != before.body {
-            set_col!("body", body.as_str(), Some(before.body.clone()), Some(body.clone()));
+            set_col!(
+                "body",
+                body.as_str(),
+                Some(before.body.clone()),
+                Some(body.clone())
+            );
         }
     }
     if let Some(status) = patch.status {
@@ -954,12 +975,14 @@ pub async fn add_link(
     target_id: i64,
     kind: LinkKind,
 ) -> AppResult<()> {
-    sqlx::query("INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)")
-        .bind(issue_id)
-        .bind(target_id)
-        .bind(kind.as_str())
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)",
+    )
+    .bind(issue_id)
+    .bind(target_id)
+    .bind(kind.as_str())
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -1455,7 +1478,12 @@ pub struct NotificationPrefs {
 
 impl Default for NotificationPrefs {
     fn default() -> Self {
-        Self { assigned: true, mention: true, cycle: true, digest: false }
+        Self {
+            assigned: true,
+            mention: true,
+            cycle: true,
+            digest: false,
+        }
     }
 }
 

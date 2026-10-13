@@ -3,6 +3,7 @@
 //! (the same path the CLI device flow will populate).
 
 mod common;
+use breadboard_client::Client;
 use common as tu;
 use serde_json::{json, Value};
 
@@ -85,10 +86,11 @@ async fn issue_lifecycle_and_events() {
     assert!(seen.contains("card.updated"), "got {seen:?}");
 
     // sync_log recorded the status + labels change (synced fields).
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert_eq!(n, 2);
 
     // Detail view includes (empty) comments.
@@ -179,6 +181,33 @@ async fn cycle_start_end_events() {
         .unwrap();
     assert_eq!(ended["closed"], json!(true));
     assert_eq!(events.next_type().await, "cycle.ended");
+}
+
+#[tokio::test]
+async fn reconcile_returns_json_body() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let resp = c
+        .post(format!("{base}/api/sync/reconcile"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn client_reconcile_tolerates_json_body() {
+    let app = tu::spawn().await;
+    let base = format!("http://{}", app.addr);
+    let client = Client::new(&base, Some(app.token.clone()));
+    // must not panic or return Err on a 202 with body
+    client.reconcile().await.unwrap();
 }
 
 #[tokio::test]
