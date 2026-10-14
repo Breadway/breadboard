@@ -11,33 +11,132 @@ use tokio::time::{sleep, timeout, Instant};
 #[tokio::test]
 async fn sigterm_exits_promptly_and_closes_sse_streams() {
     let temp = tempdir().unwrap();
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let address = listener.local_addr().unwrap();
-    drop(listener);
+    // Old std listener no longer needed for the address (we discover the real bound
+    // port from the OS after the child is healthy). Keep the bind/drop to preserve
+    // the original intent of releasing a candidate port early, then ignore the value.
+    let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    drop(_listener);
 
+    // Use LISTEN=...:0 so the server picks an unused port. This eliminates the
+    // bind+drop+reuse race that previously existed between the test's std::net::TcpListener
+    // and the child's tokio::net::TcpListener (other concurrent tests also bind ephemeral
+    // ports; the window allowed EADDRINUSE in the child, causing silent early exit and
+    // the opaque "did not become healthy" after 5s with null stderr).
+    //
+    // Capture stdout/stderr so any startup failure (bind error, migration failure,
+    // config panic, etc.) is reported in the test output instead of discarded.
+    // Poll child exit during waits. After the server reports healthy we discover
+    // the actual bound address from the OS (ss/lsof on the child PID). This is
+    // race-free for the purpose of subsequent connections and keeps the same 5s
+    // budget for full startup (migrations + bind + first health response).
     let mut child = Command::new(env!("CARGO_BIN_EXE_breadboard-server"))
         .env_clear()
         .env("BREADBOARD_CONFIG", temp.path().join("no-config.toml"))
-        .env("BREADBOARD_LISTEN", address.to_string())
+        .env("BREADBOARD_LISTEN", "127.0.0.1:0")
         .env("BREADBOARD_DATABASE_PATH", temp.path().join("server.db"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
 
-    let client = reqwest::Client::new();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let response = loop {
-        match client.get(format!("http://{address}/healthz")).send().await {
-            Ok(response) if response.status().is_success() => break response,
-            _ if Instant::now() < deadline => sleep(Duration::from_millis(25)).await,
-            _ => {
-                let _ = child.kill();
-                panic!("server did not become healthy");
+    // Drain pipes into an accumulator for rich diagnostics on any failure path.
+    // We do not rely on log parsing for the happy-path address discovery.
+    let stdout_pipe = child.stdout.take().expect("stdout");
+    let stderr_pipe = child.stderr.take().expect("stderr");
+    let log_handle = std::thread::spawn(move || {
+        use std::io::{BufRead, BufReader};
+        let mut out_r = BufReader::new(stdout_pipe);
+        let mut err_r = BufReader::new(stderr_pipe);
+        let mut buf = String::new();
+        let mut acc = String::new();
+        let mut stdout_eof = false;
+        let mut stderr_eof = false;
+        while !(stdout_eof && stderr_eof) {
+            let mut progressed = false;
+            if !stdout_eof {
+                match out_r.read_line(&mut buf) {
+                    Ok(0) => { stdout_eof = true; }
+                    Ok(_) => { acc.push_str(&buf); buf.clear(); progressed = true; }
+                    Err(_) => {}
+                }
+            }
+            if !stderr_eof {
+                match err_r.read_line(&mut buf) {
+                    Ok(0) => { stderr_eof = true; }
+                    Ok(_) => { acc.push_str(&buf); buf.clear(); progressed = true; }
+                    Err(_) => {}
+                }
+            }
+            if !progressed {
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
+        acc
+    });
+
+    fn discover_bound_addr(pid: u32) -> Option<std::net::SocketAddr> {
+        // Ask the OS which TCP LISTEN socket belongs to this pid.
+        // Works on Linux (ss is present on the self-hosted runner and in CI).
+        let out = std::process::Command::new("ss")
+            .args(["-ltnp"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        for line in text.lines() {
+            if line.contains("LISTEN") && line.contains(&format!("pid={}", pid)) {
+                // Typical line contains something like: 127.0.0.1:54321
+                for tok in line.split_whitespace() {
+                    if tok.contains("127.0.0.1:") {
+                        if let Ok(sa) = tok.parse::<std::net::SocketAddr>() {
+                            return Some(sa);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let client = reqwest::Client::new();
+    let overall_deadline = Instant::now() + Duration::from_secs(5);
+
+    // Wait for health while also checking that the child has not exited.
+    // Once /healthz answers 200, discover the bound address from the OS.
+    let address: std::net::SocketAddr = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let acc = log_handle.join().unwrap_or_default();
+            // pipes already moved; best effort is in the thread acc
+            panic!(
+                "server exited early (status={status}) before becoming healthy.\n\
+                 captured: {acc}"
+            );
+        }
+        // Try to discover a LISTEN socket for the child. If present, try health.
+        if let Some(addr) = discover_bound_addr(child.id()) {
+            match client.get(format!("http://{addr}/healthz")).send().await {
+                Ok(r) if r.status().is_success() => {
+                    // success path: we have a live address
+                    break addr;
+                }
+                _ => {
+                    // server bound but not yet serving (or still migrating); keep waiting
+                }
+            }
+        }
+        if Instant::now() > overall_deadline {
+            let _ = child.kill();
+            let acc = log_handle.join().unwrap_or_default();
+            panic!(
+                "server did not become healthy within 5s (no LISTEN socket or /healthz failed).\n\
+                 captured: {acc}"
+            );
+        }
+        sleep(Duration::from_millis(25)).await;
     };
-    drop(response);
+
+    // We reached a healthy server on a discovered address.
+    // (The previous response body was dropped by the loop; that's fine.)
+    let _ = client.get(format!("http://{address}/healthz")).send().await;
 
     // /events requires auth: mint a bearer token in the server's database.
     let pool = db::connect(&format!(

@@ -68,7 +68,8 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    tracing::info!(%addr, "listening");
+    let bound = listener.local_addr().context("local_addr after bind")?;
+    tracing::info!(requested = %addr, %bound, "listening");
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown))
