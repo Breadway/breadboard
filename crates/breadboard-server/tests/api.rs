@@ -159,14 +159,19 @@ async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins
         .unwrap();
     let project_id = project["id"].as_i64().unwrap();
     let cycle: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
-        .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31", "project_ids":[project_id]}))
+        .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31"}))
         .send().await.unwrap().json().await.unwrap();
     let cycle_id = cycle["id"].as_i64().unwrap();
-    assert_eq!(cycle["project_ids"], json!([project_id]));
+    assert_eq!(cycle["project_ids"], json!([]));
     let preexisting: Value = c.post(format!("{base}/api/issues")).header("authorization", &auth)
-        .json(&json!({"title":"before selection", "project":"CYCLE", "cycle_id":null}))
+        .json(&json!({"title":"before selection", "project":"CYCLE"}))
         .send().await.unwrap().json().await.unwrap();
     assert_eq!(preexisting["cycle_id"], Value::Null);
+    let selected_resp = c.patch(format!("{base}/api/cycles/{cycle_id}")).header("authorization", &auth)
+        .json(&json!({"project_ids":[project_id]})).send().await.unwrap();
+    assert!(selected_resp.status().is_success());
+    let selected: Value = selected_resp.json().await.unwrap();
+    assert_eq!(selected["project_ids"], json!([project_id]));
     let created: Value = c
         .post(format!("{base}/api/issues"))
         .header("authorization", &auth)
