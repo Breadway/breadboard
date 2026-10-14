@@ -14,12 +14,21 @@ pub async fn connect(database_url: &str) -> anyhow::Result<Db> {
         .foreign_keys(true)
         .busy_timeout(std::time::Duration::from_secs(5));
 
+    let started = std::time::Instant::now();
     let pool = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(opts)
         .await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "db: first connection open (WAL set)"
+    );
 
     sqlx::migrate!("../../migrations").run(&pool).await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "db: migrations applied"
+    );
 
     Ok(pool)
 }
