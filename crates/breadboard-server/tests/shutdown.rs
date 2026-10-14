@@ -11,12 +11,6 @@ use tokio::time::{sleep, timeout, Instant};
 #[tokio::test]
 async fn sigterm_exits_promptly_and_closes_sse_streams() {
     let temp = tempdir().unwrap();
-    // Old std listener no longer needed for the address (we discover the real bound
-    // port from the OS after the child is healthy). Keep the bind/drop to preserve
-    // the original intent of releasing a candidate port early, then ignore the value.
-    let _listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    drop(_listener);
-
     // Use LISTEN=...:0 so the server picks an unused port. This eliminates the
     // bind+drop+reuse race that previously existed between the test's std::net::TcpListener
     // and the child's tokio::net::TcpListener (other concurrent tests also bind ephemeral
@@ -41,38 +35,41 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
 
     // Drain pipes into an accumulator for rich diagnostics on any failure path.
     // We do not rely on log parsing for the happy-path address discovery.
+    let logs = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let stdout_pipe = child.stdout.take().expect("stdout");
     let stderr_pipe = child.stderr.take().expect("stderr");
-    let log_handle = std::thread::spawn(move || {
-        use std::io::{BufRead, BufReader};
-        let mut out_r = BufReader::new(stdout_pipe);
-        let mut err_r = BufReader::new(stderr_pipe);
-        let mut buf = String::new();
-        let mut acc = String::new();
-        let mut stdout_eof = false;
-        let mut stderr_eof = false;
-        while !(stdout_eof && stderr_eof) {
-            let mut progressed = false;
-            if !stdout_eof {
-                match out_r.read_line(&mut buf) {
-                    Ok(0) => { stdout_eof = true; }
-                    Ok(_) => { acc.push_str(&buf); buf.clear(); progressed = true; }
-                    Err(_) => {}
-                }
+    let stdout_logs = logs.clone();
+    let stdout_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = stdout_pipe;
+        let mut buf = [0; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
             }
-            if !stderr_eof {
-                match err_r.read_line(&mut buf) {
-                    Ok(0) => { stderr_eof = true; }
-                    Ok(_) => { acc.push_str(&buf); buf.clear(); progressed = true; }
-                    Err(_) => {}
-                }
-            }
-            if !progressed {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
+            stdout_logs
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
         }
-        acc
     });
+    let stderr_logs = logs.clone();
+    let stderr_handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = stderr_pipe;
+        let mut buf = [0; 4096];
+        while let Ok(n) = reader.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            stderr_logs
+                .lock()
+                .unwrap()
+                .push_str(&String::from_utf8_lossy(&buf[..n]));
+        }
+    });
+
+    let captured_logs = || logs.lock().unwrap().clone();
 
     fn discover_bound_addr(pid: u32) -> Option<std::net::SocketAddr> {
         // Ask the OS which TCP LISTEN socket belongs to this pid.
@@ -104,11 +101,10 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
     // Once /healthz answers 200, discover the bound address from the OS.
     let address: std::net::SocketAddr = loop {
         if let Some(status) = child.try_wait().unwrap() {
-            let acc = log_handle.join().unwrap_or_default();
-            // pipes already moved; best effort is in the thread acc
             panic!(
                 "server exited early (status={status}) before becoming healthy.\n\
-                 captured: {acc}"
+                 captured: {}",
+                captured_logs()
             );
         }
         // Try to discover a LISTEN socket for the child. If present, try health.
@@ -125,10 +121,13 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
         }
         if Instant::now() > overall_deadline {
             let _ = child.kill();
-            let acc = log_handle.join().unwrap_or_default();
+            let _ = child.wait();
+            stdout_handle.join().expect("stdout reader panicked");
+            stderr_handle.join().expect("stderr reader panicked");
             panic!(
                 "server did not become healthy within 5s (no LISTEN socket or /healthz failed).\n\
-                 captured: {acc}"
+                 captured: {}",
+                captured_logs()
             );
         }
         sleep(Duration::from_millis(25)).await;
@@ -203,4 +202,6 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
         end.is_none(),
         "SSE client received data after server shutdown"
     );
+    stdout_handle.join().expect("stdout reader panicked");
+    stderr_handle.join().expect("stderr reader panicked");
 }
