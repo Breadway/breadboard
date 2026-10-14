@@ -85,10 +85,11 @@ async fn issue_lifecycle_and_events() {
     assert!(seen.contains("card.updated"), "got {seen:?}");
 
     // sync_log recorded the status + labels change (synced fields).
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert_eq!(n, 2);
 
     // Detail view includes (empty) comments.
@@ -138,6 +139,99 @@ async fn issue_lifecycle_and_events() {
         .unwrap();
     assert_eq!(del.status(), 204);
     assert_eq!(events.next_type().await, "card.deleted");
+}
+
+#[tokio::test]
+async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let project: Value = c
+        .post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({"key":"CYCLE","name":"Cycle project"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let project_id = project["id"].as_i64().unwrap();
+    let cycle: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+        .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31", "project_ids":[project_id]}))
+        .send().await.unwrap().json().await.unwrap();
+    let cycle_id = cycle["id"].as_i64().unwrap();
+    assert_eq!(cycle["project_ids"], json!([project_id]));
+    let preexisting: Value = c.post(format!("{base}/api/issues")).header("authorization", &auth)
+        .json(&json!({"title":"before selection", "project":"CYCLE", "cycle_id":null}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(preexisting["cycle_id"], Value::Null);
+    let created: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"inherited", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["cycle_id"], json!(cycle_id));
+    let second: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+        .json(&json!({"name":"Also default", "starts_on":"2026-11-01", "ends_on":"2026-11-30", "project_ids":[project_id]}))
+        .send().await.unwrap().json().await.unwrap();
+    let explicit: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"explicit", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit["cycle_id"], second["id"]);
+    let ambiguous = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"ambiguous", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ambiguous.status(), reqwest::StatusCode::CONFLICT);
+    let explicit_id: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"chosen", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit_id["cycle_id"], second["id"]);
+    let update = c
+        .patch(format!("{base}/api/cycles/{cycle_id}"))
+        .header("authorization", &auth)
+        .json(&json!({"project_ids":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(update.status().is_success());
+    let old: Value = c
+        .get(format!("{base}/api/issues/{}", created["key"].as_str().unwrap()))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(old["cycle_id"], json!(cycle_id));
+    let unchanged: Value = c.get(format!("{base}/api/issues/{}", preexisting["key"].as_str().unwrap()))
+        .header("authorization", &auth).send().await.unwrap().json().await.unwrap();
+    assert_eq!(unchanged["cycle_id"], Value::Null);
 }
 
 #[tokio::test]

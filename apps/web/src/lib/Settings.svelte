@@ -42,6 +42,7 @@
   let ncName = $state("");
   let ncStart = $state("");
   let ncEnd = $state("");
+  let ncProjects = $state<number[]>([]);
 
   // markdown import
   let imProject = $state("");
@@ -123,11 +124,14 @@
 
   const createCycle = () =>
     run(async () => {
-      await api.createCycle({ name: ncName.trim(), starts_on: ncStart, ends_on: ncEnd });
+      await api.createCycle({ name: ncName.trim(), starts_on: ncStart, ends_on: ncEnd, project_ids: ncProjects });
       ncName = "";
       ncStart = "";
       ncEnd = "";
+      ncProjects = [];
     });
+
+  const updateCycleProjects = (id: number, project_ids: number[]) => run(() => api.updateCycle(id, { project_ids }));
 
   const toggleCycle = (id: number, closed: boolean) =>
     run(() => (closed ? api.startCycle(id) : api.endCycle(id)));
@@ -275,7 +279,7 @@
       <h2>Cycles &amp; releases</h2>
       <table>
         <thead>
-          <tr><th>Name</th><th>Dates</th><th>Issues</th><th>Status</th><th></th></tr>
+          <tr><th>Name</th><th>Dates</th><th>Default projects</th><th>Issues</th><th>Status</th><th></th></tr>
         </thead>
         <tbody>
           {#each store.cycles as c (c.id)}
@@ -283,6 +287,9 @@
             <tr>
               <td>{c.name}</td>
               <td class="dim mono">{c.starts_on} → {c.ends_on}</td>
+              <td><select multiple size="3" disabled={busy} value={c.project_ids.map(String)} onchange={(e) => updateCycleProjects(c.id, Array.from(e.currentTarget.selectedOptions, (o) => Number(o.value)))}>
+                {#each store.projects as p (p.id)}<option value={p.id}>{p.key}</option>{/each}
+              </select></td>
               <td class="dim">{counts.done}/{counts.total} done</td>
               <td><span class="badge" class:on={!c.closed} class:off={c.closed}>{c.closed ? "closed" : "open"}</span></td>
               <td class="right">
@@ -292,7 +299,7 @@
               </td>
             </tr>
           {:else}
-            <tr><td colspan="5" class="dim">No cycles yet.</td></tr>
+            <tr><td colspan="6" class="dim">No cycles yet.</td></tr>
           {/each}
         </tbody>
       </table>
@@ -302,6 +309,9 @@
           <input placeholder="Name (e.g. BOS 0.6.2)" bind:value={ncName} style="width:200px" />
           <input type="date" bind:value={ncStart} />
           <input type="date" bind:value={ncEnd} />
+          <select multiple size="3" bind:value={ncProjects} aria-label="Projects for new issue defaults">
+            {#each store.projects as p (p.id)}<option value={p.id}>{p.key}</option>{/each}
+          </select>
           <button
             class="primary"
             disabled={busy || !ncName.trim() || !ncStart || !ncEnd}
@@ -311,9 +321,9 @@
           </button>
         </div>
         <p class="hint">
-          A cycle spans every project: use it for a release like "BOS 0.6.2" that pulls in work
-          from several repos. Closing one archives its done issues off the default board/backlog
-          view; they're still there by picking that cycle from the header filter.
+          New issues in selected projects default to this cycle. Existing issues are never moved.
+          If multiple open cycles select a project, new issues must specify a cycle explicitly.
+          Closing one archives its done issues off the default board/backlog view.
         </p>
       </div>
     </section>
