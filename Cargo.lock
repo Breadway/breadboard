@@ -264,6 +264,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-extra",
+ "breadboard-client",
  "breadboard-core",
  "chrono",
  "dirs",

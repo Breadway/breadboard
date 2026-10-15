@@ -3,6 +3,7 @@
 //! (the same path the CLI device flow will populate).
 
 mod common;
+use breadboard_client::Client;
 use common as tu;
 use serde_json::{json, Value};
 
@@ -158,17 +159,36 @@ async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins
         .await
         .unwrap();
     let project_id = project["id"].as_i64().unwrap();
-    let cycle: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+    let cycle: Value = c
+        .post(format!("{base}/api/cycles"))
+        .header("authorization", &auth)
         .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31"}))
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let cycle_id = cycle["id"].as_i64().unwrap();
     assert_eq!(cycle["project_ids"], json!([]));
-    let preexisting: Value = c.post(format!("{base}/api/issues")).header("authorization", &auth)
+    let preexisting: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
         .json(&json!({"title":"before selection", "project":"CYCLE"}))
-        .send().await.unwrap().json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(preexisting["cycle_id"], Value::Null);
-    let selected_resp = c.patch(format!("{base}/api/cycles/{cycle_id}")).header("authorization", &auth)
-        .json(&json!({"project_ids":[project_id]})).send().await.unwrap();
+    let selected_resp = c
+        .patch(format!("{base}/api/cycles/{cycle_id}"))
+        .header("authorization", &auth)
+        .json(&json!({"project_ids":[project_id]}))
+        .send()
+        .await
+        .unwrap();
     assert!(selected_resp.status().is_success());
     let selected: Value = selected_resp.json().await.unwrap();
     assert_eq!(selected["project_ids"], json!([project_id]));
@@ -225,7 +245,10 @@ async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins
         .unwrap();
     assert!(update.status().is_success());
     let old: Value = c
-        .get(format!("{base}/api/issues/{}", created["key"].as_str().unwrap()))
+        .get(format!(
+            "{base}/api/issues/{}",
+            created["key"].as_str().unwrap()
+        ))
         .header("authorization", &auth)
         .send()
         .await
@@ -234,8 +257,18 @@ async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins
         .await
         .unwrap();
     assert_eq!(old["cycle_id"], json!(cycle_id));
-    let unchanged: Value = c.get(format!("{base}/api/issues/{}", preexisting["key"].as_str().unwrap()))
-        .header("authorization", &auth).send().await.unwrap().json().await.unwrap();
+    let unchanged: Value = c
+        .get(format!(
+            "{base}/api/issues/{}",
+            preexisting["key"].as_str().unwrap()
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     assert_eq!(unchanged["cycle_id"], Value::Null);
 }
 
@@ -278,6 +311,33 @@ async fn cycle_start_end_events() {
         .unwrap();
     assert_eq!(ended["closed"], json!(true));
     assert_eq!(events.next_type().await, "cycle.ended");
+}
+
+#[tokio::test]
+async fn reconcile_returns_json_body() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let resp = c
+        .post(format!("{base}/api/sync/reconcile"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn client_reconcile_tolerates_json_body() {
+    let app = tu::spawn().await;
+    let base = format!("http://{}", app.addr);
+    let client = Client::new(&base, Some(app.token.clone()));
+    // must not panic or return Err on a 202 with body
+    client.reconcile().await.unwrap();
 }
 
 #[tokio::test]

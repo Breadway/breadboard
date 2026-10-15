@@ -126,7 +126,9 @@ async fn webhook_hmac_gate() {
     store::upsert_project_for_repo(&app.db, "BREAD", "bread", "Breadway/bread")
         .await
         .unwrap();
-    store::upsert_repo(&app.db, "Breadway/bread", true).await.unwrap();
+    store::upsert_repo(&app.db, "Breadway/bread", true)
+        .await
+        .unwrap();
     let project = store::get_project_by_repo(&app.db, "Breadway/bread")
         .await
         .unwrap();
@@ -141,7 +143,9 @@ async fn webhook_hmac_gate() {
     )
     .await
     .unwrap();
-    store::update_cycle_projects(&app.db, cycle.id, &[project.id]).await.unwrap();
+    store::update_cycle_projects(&app.db, cycle.id, &[project.id])
+        .await
+        .unwrap();
 
     let payload = json!({
         "action": "opened",
@@ -182,7 +186,11 @@ async fn webhook_hmac_gate() {
     let imported = store::find_issue_by_forgejo(&app.db, "Breadway/bread", 99)
         .await
         .unwrap();
-    assert_eq!(imported.unwrap().cycle_id, Some(cycle.id), "signed webhook import inherits its project's unique default");
+    assert_eq!(
+        imported.unwrap().cycle_id,
+        Some(cycle.id),
+        "signed webhook import inherits its project's unique default"
+    );
 }
 
 #[tokio::test]

@@ -16,7 +16,9 @@ pub fn emit_bread(state: &AppState, event: &BoardEvent) {
         return;
     }
     let name = event.bread_event_name();
-    let Ok(payload) = serde_json::to_string(event) else { return };
+    let Ok(payload) = serde_json::to_string(event) else {
+        return;
+    };
     let _ = std::process::Command::new("bread-emit")
         .arg(name)
         .arg(payload)
@@ -33,7 +35,9 @@ async fn deliver(
     issue_id: Option<i64>,
     body: String,
 ) {
-    let prefs = store::get_prefs(&state.db, user_id).await.unwrap_or_default();
+    let prefs = store::get_prefs(&state.db, user_id)
+        .await
+        .unwrap_or_default();
     let wanted = match kind {
         NotificationKind::Assigned => prefs.assigned,
         NotificationKind::Mention => prefs.mention,
@@ -95,7 +99,14 @@ pub async fn cycle(state: &AppState, cycle_id: i64, name: &str, started: bool) {
     let verb = if started { "started" } else { "ended" };
     if let Ok(users) = store::issue_assignees_in_cycle(&state.db, cycle_id).await {
         for uid in users {
-            deliver(state, uid, kind, None, format!("cycle \u{201c}{name}\u{201d} {verb}")).await;
+            deliver(
+                state,
+                uid,
+                kind,
+                None,
+                format!("cycle \u{201c}{name}\u{201d} {verb}"),
+            )
+            .await;
         }
     }
 }
@@ -138,13 +149,10 @@ pub async fn send_daily_digest(state: &AppState) {
     let now = Utc::now().to_rfc3339();
     let mut sent = 0u32;
     for r in recipients {
-        let items = store::unread_notifications_since(
-            &state.db,
-            r.user_id,
-            r.last_digest_at.as_deref(),
-        )
-        .await
-        .unwrap_or_default();
+        let items =
+            store::unread_notifications_since(&state.db, r.user_id, r.last_digest_at.as_deref())
+                .await
+                .unwrap_or_default();
         if items.is_empty() {
             continue; // no digest when there is nothing pending
         }
@@ -153,7 +161,9 @@ pub async fn send_daily_digest(state: &AppState) {
             .await
             .is_ok()
         {
-            state.bus.publish(BoardEvent::Notified { user_id: r.user_id });
+            state
+                .bus
+                .publish(BoardEvent::Notified { user_id: r.user_id });
             emit_bread(state, &BoardEvent::Notified { user_id: r.user_id });
             // Advance the window only on a real send, so every item lands in
             // exactly one digest.
@@ -218,6 +228,9 @@ mod tests {
             super::parse_mentions("hey @riley and @bread-bot, cc @riley"),
             vec!["riley", "bread-bot"]
         );
-        assert_eq!(super::parse_mentions("email me@example.com"), Vec::<String>::new());
+        assert_eq!(
+            super::parse_mentions("email me@example.com"),
+            Vec::<String>::new()
+        );
     }
 }
