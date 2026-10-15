@@ -71,6 +71,9 @@ impl FgIssue {
     pub fn is_closed(&self) -> bool {
         self.state == "closed"
     }
+    pub fn is_merged(&self) -> bool {
+        self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
     pub fn label_names(&self) -> Vec<String> {
         self.labels.iter().map(|l| l.name.clone()).collect()
     }
