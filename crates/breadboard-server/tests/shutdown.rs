@@ -9,27 +9,16 @@
 //! - `SIGTERM_BUDGET` (2s): from SIGTERM until the child exits successfully.
 //! - `SSE_EOF_BUDGET` (1s): from child exit until the SSE client sees EOF.
 //!
-//! `SETUP_BUDGET` is separate and only covers creating and migrating the
-//! database before the child is spawned. A cold SQLite file costs about 21
-//! fsyncs (WAL switch, six migrations, seed), so on a runner whose disk syncs
-//! slowly that work dominates and has nothing to do with shutdown. Evidence:
-//! with the previous test, 300ms per fsync in the child reproduced CI run 72
-//! exactly (only the `starting` log line, failure at 5.0s), while a warm start
-//! costs about one fsync and took 22ms even at 200ms per fsync. In run 72 the
-//! sibling tests that do the same connect and migrate took 12s to 40s, where
-//! they take under a second locally. Doing the cold work up front means the
-//! child's 5s budget measures a warm start. The setup budget is bounded and
-//! generous because it only guards against a hang, not against slow disks.
-//!
 //! The child's startup stages are logged with `elapsed_ms`, and the test prints
 //! the child's complete output on every failure path, so a slow stage is
-//! visible in the failure report.
+//! visible in the failure report. The child opens a cold SQLite database and
+//! applies migrations inside the same five-second startup deadline; the
+//! database is prepared for the authenticated SSE request only after health.
 
 use std::io::Read;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -40,11 +29,9 @@ use tempfile::tempdir;
 use tokio::time::{sleep, timeout, timeout_at, Instant};
 
 const STARTUP_BUDGET: Duration = Duration::from_secs(5);
-const SETUP_BUDGET: Duration = Duration::from_secs(60);
 const SIGTERM_BUDGET: Duration = Duration::from_secs(2);
 const SSE_EOF_BUDGET: Duration = Duration::from_secs(1);
 const PROBE_INTERVAL: Duration = Duration::from_millis(25);
-const READER_JOIN_BUDGET: Duration = Duration::from_secs(2);
 const CAPTURE_LIMIT: usize = 256 * 1024;
 
 /// Bounded, shared buffer for the child's stdout and stderr.
@@ -77,13 +64,13 @@ impl Capture {
 
 struct Reader {
     handle: JoinHandle<()>,
-    done: Arc<AtomicBool>,
 }
 
-fn spawn_reader<R: Read + Send + 'static>(mut pipe: R, capture: Arc<Capture>) -> Reader {
-    let done = Arc::new(AtomicBool::new(false));
-    let flag = done.clone();
-    let handle = std::thread::spawn(move || {
+fn spawn_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+    capture: Arc<Capture>,
+) -> std::io::Result<Reader> {
+    let handle = std::thread::Builder::new().spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
             match pipe.read(&mut buf) {
@@ -91,9 +78,8 @@ fn spawn_reader<R: Read + Send + 'static>(mut pipe: R, capture: Arc<Capture>) ->
                 Ok(n) => capture.push(&buf[..n]),
             }
         }
-        flag.store(true, Ordering::SeqCst);
-    });
-    Reader { handle, done }
+    })?;
+    Ok(Reader { handle })
 }
 
 /// Owns the child process. Dropping it (including during a panic unwind)
@@ -107,20 +93,20 @@ struct ChildGuard {
 
 impl ChildGuard {
     fn spawn(cmd: &mut Command) -> std::io::Result<Self> {
-        let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+        let child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
         let capture = Arc::new(Capture::default());
-        let mut readers = Vec::new();
-        if let Some(out) = child.stdout.take() {
-            readers.push(spawn_reader(out, capture.clone()));
-        }
-        if let Some(err) = child.stderr.take() {
-            readers.push(spawn_reader(err, capture.clone()));
-        }
-        Ok(Self {
+        let mut guard = Self {
             child,
-            readers,
-            capture,
-        })
+            readers: Vec::new(),
+            capture: capture.clone(),
+        };
+        if let Some(out) = guard.child.stdout.take() {
+            guard.readers.push(spawn_reader(out, capture.clone())?);
+        }
+        if let Some(err) = guard.child.stderr.take() {
+            guard.readers.push(spawn_reader(err, capture)?);
+        }
+        Ok(guard)
     }
 
     fn id(&self) -> u32 {
@@ -135,19 +121,14 @@ impl ChildGuard {
         self.capture.text()
     }
 
-    /// Kill if still running, wait, and join the readers (bounded, since a
-    /// descendant that inherited the pipes could keep them open). Idempotent.
+    /// Kill if still running, wait, then join both readers. The child is
+    /// started without descendants, so after the child closes the pipes the
+    /// readers terminate. Idempotent.
     fn reap(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let give_up = std::time::Instant::now() + READER_JOIN_BUDGET;
         for reader in self.readers.drain(..) {
-            while !reader.done.load(Ordering::SeqCst) && std::time::Instant::now() < give_up {
-                std::thread::sleep(Duration::from_millis(5));
-            }
-            if reader.done.load(Ordering::SeqCst) {
-                let _ = reader.handle.join();
-            }
+            let _ = reader.handle.join();
         }
     }
 
@@ -175,7 +156,11 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         self.reap();
         if std::thread::panicking() {
-            eprintln!("captured child output:\n{}", self.logs());
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                use std::io::Write;
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "captured child output:\n{}", self.logs());
+            }));
         }
     }
 }
@@ -269,33 +254,28 @@ fn http_client() -> reqwest::Client {
     reqwest::Client::builder().no_proxy().build().unwrap()
 }
 
-/// Create, migrate and seed the database and mint the bearer token the SSE
-/// request needs, all before the child starts (see the module docs).
+/// Prepare the seeded project and mint the bearer token the SSE request needs.
 async fn prepare_database(db_path: &Path, token: &str) {
-    timeout(SETUP_BUDGET, async {
-        let pool = db::connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
-            .await
-            .unwrap();
-        store::ensure_seed(&pool).await.unwrap();
-        let user_id: i64 = sqlx::query_scalar(
-            "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester') RETURNING id",
-        )
-        .fetch_one(&pool)
+    let pool = db::connect(&format!("sqlite://{}?mode=rwc", db_path.display()))
         .await
         .unwrap();
-        sqlx::query(
-            "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, ?3)",
-        )
-        .bind(user_id)
-        .bind(sha256_hex(token))
-        .bind(Utc::now().to_rfc3339())
-        .execute(&pool)
-        .await
-        .unwrap();
-        pool.close().await;
-    })
+    store::ensure_seed(&pool).await.unwrap();
+    let user_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester') RETURNING id",
+    )
+    .fetch_one(&pool)
     .await
-    .unwrap_or_else(|_| panic!("database setup exceeded {SETUP_BUDGET:?}"));
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, ?3)",
+    )
+    .bind(user_id)
+    .bind(sha256_hex(token))
+    .bind(Utc::now().to_rfc3339())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
 }
 
 #[tokio::test]
@@ -303,7 +283,6 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
     let temp = tempdir().unwrap();
     let db_path = temp.path().join("server.db");
     let token = "shutdown-test-token";
-    prepare_database(&db_path, token).await;
 
     // BREADBOARD_LISTEN=...:0 lets the OS pick the port, so there is no
     // reserve-release-rebind window. The child logs the bound address and the
@@ -322,6 +301,8 @@ async fn sigterm_exits_promptly_and_closes_sse_streams() {
     let address = wait_until_healthy(&mut guard, &client, started, STARTUP_BUDGET)
         .await
         .unwrap_or_else(|e| panic!("{e}"));
+
+    prepare_database(&db_path, token).await;
 
     let mut events = client
         .get(format!("http://{address}/events"))
