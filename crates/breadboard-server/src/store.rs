@@ -126,12 +126,13 @@ pub async fn list_projects(db: &SqlitePool) -> AppResult<Vec<Project>> {
 }
 
 pub async fn get_project(db: &SqlitePool, id: i64) -> AppResult<Project> {
-    let row: ProjectRow =
-        sqlx::query_as(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"))
-            .bind(id)
-            .fetch_optional(db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     Ok(row.into())
 }
 
@@ -288,14 +289,12 @@ impl From<EpicRow> for Epic {
     }
 }
 
-const EPIC_COLS: &str =
-    "id, key, title, description, project_id, archived, created_at, updated_at";
+const EPIC_COLS: &str = "id, key, title, description, project_id, archived, created_at, updated_at";
 
 pub async fn list_epics(db: &SqlitePool) -> AppResult<Vec<Epic>> {
-    let rows: Vec<EpicRow> =
-        sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<EpicRow> = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
+        .fetch_all(db)
+        .await?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -400,13 +399,17 @@ pub async fn delete_epic(db: &SqlitePool, id: i64) -> AppResult<()> {
 /// Per-status child-issue counts for an epic (or, with `epic_id = None`, for
 /// issues with no epic; the backlog).
 pub async fn epic_progress(db: &SqlitePool, epic_id: i64) -> AppResult<[(String, i64); 5]> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status",
-    )
-    .bind(epic_id)
-    .fetch_all(db)
-    .await?;
-    let count = |s: &str| rows.iter().find(|(st, _)| st == s).map(|(_, n)| *n).unwrap_or(0);
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status")
+            .bind(epic_id)
+            .fetch_all(db)
+            .await?;
+    let count = |s: &str| {
+        rows.iter()
+            .find(|(st, _)| st == s)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
     Ok([
         ("backlog".into(), count("backlog")),
         ("todo".into(), count("todo")),

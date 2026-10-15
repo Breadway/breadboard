@@ -147,6 +147,9 @@ impl Client {
             let body = resp.text().await.unwrap_or_default();
             return Err(Error::Status { status, body });
         }
+        // tolerate empty body or a JSON body (e.g. 202 {"ok":true} from reconcile);
+        // drain so we don't leave the connection in a bad state for reuse
+        let _ = resp.text().await;
         Ok(())
     }
 

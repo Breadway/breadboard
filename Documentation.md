@@ -87,7 +87,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
-| `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202` |
+| `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202 { "ok": true }` |
 | `POST` | `/api/import` | `{ project, markdown, dry_run? }`: `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
 | `POST` | `/webhooks/forgejo` | inbound sync: **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 

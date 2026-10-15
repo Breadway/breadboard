@@ -52,7 +52,10 @@ fn parse(md: &str) -> Vec<ParsedEpic> {
             .or_else(|| line.strip_prefix("* "))
             .or_else(|| line.strip_prefix("+ "));
         if let Some(item) = checkbox {
-            let (done, text) = if let Some(t) = item.strip_prefix("[x]").or_else(|| item.strip_prefix("[X]")) {
+            let (done, text) = if let Some(t) = item
+                .strip_prefix("[x]")
+                .or_else(|| item.strip_prefix("[X]"))
+            {
                 (true, t.trim())
             } else if let Some(t) = item.strip_prefix("[ ]") {
                 (false, t.trim())
@@ -218,7 +221,10 @@ mod tests {
         assert_eq!(epics.len(), 2);
         assert_eq!(epics[0].title, "Ecosystem platform pass");
         assert_eq!(epics[0].issues.len(), 2);
-        assert_eq!(epics[0].issues[0], ("pin bread-theme tag in breadclip".into(), false));
+        assert_eq!(
+            epics[0].issues[0],
+            ("pin bread-theme tag in breadclip".into(), false)
+        );
         assert_eq!(epics[0].issues[1].0, "fix the OSD bug in breadbar");
         assert!(epics[0].issues[1].1);
         assert_eq!(epics[1].issues[0].0, "breadbox sync flakiness");

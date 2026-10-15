@@ -489,13 +489,21 @@ pub async fn remove_repo(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn reconcile_now(State(app): State<AppState>, _user: AuthUser) -> AppResult<StatusCode> {
+#[derive(Serialize)]
+pub struct ReconcileResponse {
+    ok: bool,
+}
+
+pub async fn reconcile_now(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<(StatusCode, Json<ReconcileResponse>)> {
     tokio::spawn(async move {
         if let Err(e) = sync::reconcile_once(&app).await {
             tracing::warn!(error = %e, "manual reconcile failed");
         }
     });
-    Ok(StatusCode::ACCEPTED)
+    Ok((StatusCode::ACCEPTED, Json(ReconcileResponse { ok: true })))
 }
 
 // --- notifications ------------------------------------------------------
