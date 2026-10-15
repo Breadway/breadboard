@@ -432,16 +432,21 @@ struct CycleRow {
     closed: i64,
 }
 
-impl From<CycleRow> for Cycle {
-    fn from(r: CycleRow) -> Self {
-        Cycle {
-            id: r.id,
-            name: r.name,
-            starts_on: r.starts_on.parse().unwrap_or_default(),
-            ends_on: r.ends_on.parse().unwrap_or_default(),
-            closed: r.closed != 0,
-        }
-    }
+async fn hydrate_cycle(db: &SqlitePool, r: CycleRow) -> AppResult<Cycle> {
+    let project_ids = sqlx::query_scalar(
+        "SELECT project_id FROM cycle_projects WHERE cycle_id = ?1 ORDER BY project_id",
+    )
+    .bind(r.id)
+    .fetch_all(db)
+    .await?;
+    Ok(Cycle {
+        id: r.id,
+        name: r.name,
+        starts_on: r.starts_on.parse().unwrap_or_default(),
+        ends_on: r.ends_on.parse().unwrap_or_default(),
+        closed: r.closed != 0,
+        project_ids,
+    })
 }
 
 const CYCLE_COLS: &str = "id, name, starts_on, ends_on, closed";
@@ -452,7 +457,11 @@ pub async fn list_cycles(db: &SqlitePool) -> AppResult<Vec<Cycle>> {
     ))
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let mut cycles = Vec::with_capacity(rows.len());
+    for row in rows {
+        cycles.push(hydrate_cycle(db, row).await?);
+    }
+    Ok(cycles)
 }
 
 pub async fn get_cycle(db: &SqlitePool, id: i64) -> AppResult<Cycle> {
@@ -461,7 +470,7 @@ pub async fn get_cycle(db: &SqlitePool, id: i64) -> AppResult<Cycle> {
         .fetch_optional(db)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(row.into())
+    hydrate_cycle(db, row).await
 }
 
 pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
@@ -473,15 +482,81 @@ pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
             "ends_on must be on or after starts_on",
         ));
     }
+    let mut tx = db.begin().await?;
     let row: CycleRow = sqlx::query_as(&format!(
         "INSERT INTO cycles (name, starts_on, ends_on) VALUES (?1, ?2, ?3) RETURNING {CYCLE_COLS}"
     ))
     .bind(&new.name)
     .bind(new.starts_on.to_string())
     .bind(new.ends_on.to_string())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(row.into())
+    for project_id in new
+        .project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists == 0 {
+            return Err(AppError::bad_request("unknown project id"));
+        }
+        sqlx::query("INSERT INTO cycle_projects (cycle_id, project_id) VALUES (?1, ?2)")
+            .bind(row.id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_cycle(db, row.id).await
+}
+
+pub async fn update_cycle_projects(
+    db: &SqlitePool,
+    id: i64,
+    project_ids: &[i64],
+) -> AppResult<Cycle> {
+    let mut tx = db.begin().await?;
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cycles WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if exists == 0 {
+        return Err(AppError::NotFound);
+    }
+    for project_id in project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists == 0 {
+            return Err(AppError::bad_request("unknown project id"));
+        }
+    }
+    sqlx::query("DELETE FROM cycle_projects WHERE cycle_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for project_id in project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        sqlx::query("INSERT INTO cycle_projects (cycle_id, project_id) VALUES (?1, ?2)")
+            .bind(id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_cycle(db, id).await
 }
 
 pub async fn set_cycle_closed(db: &SqlitePool, id: i64, closed: bool) -> AppResult<Cycle> {
@@ -682,6 +757,28 @@ pub async fn create_issue(
         ))?,
     };
 
+    let cycle_id = if let Some(explicit) = new.cycle_id {
+        Some(explicit)
+    } else {
+        let matches: Vec<i64> = sqlx::query_scalar(
+            "SELECT c.id FROM cycles c JOIN cycle_projects cp ON cp.cycle_id = c.id \
+             WHERE cp.project_id = ?1 AND c.closed = 0 ORDER BY c.id",
+        )
+        .bind(project.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        match matches.as_slice() {
+            [] => None,
+            [id] => Some(*id),
+            _ => {
+                return Err(AppError::Conflict(format!(
+                    "project {} is selected by multiple open cycles; specify cycle_id explicitly",
+                    project.key
+                )))
+            }
+        }
+    };
+
     let number: i64 = project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(project.id)
@@ -707,7 +804,7 @@ pub async fn create_issue(
     .bind(new.assignee_id)
     .bind(reporter_id)
     .bind(new.epic_id)
-    .bind(new.cycle_id)
+    .bind(cycle_id)
     .bind(&ts)
     .fetch_one(&mut *tx)
     .await?;
@@ -1024,6 +1121,25 @@ pub async fn import_issue(
     source: SyncSource,
 ) -> AppResult<Issue> {
     let mut tx = db.begin().await?;
+    // Only genuinely new, current issues inherit defaults. Reconcile imports
+    // of older backlog are historical and must not be retroactively scheduled;
+    // PRs are read-mostly and never inherit issue scheduling defaults.
+    let cycle_id = if !is_pr && is_current_external_issue(created_at, updated_at) {
+        let matches: Vec<i64> = sqlx::query_scalar(
+            "SELECT c.id FROM cycles c JOIN cycle_projects cp ON cp.cycle_id = c.id \
+             WHERE cp.project_id = ?1 AND c.closed = 0 ORDER BY c.id",
+        )
+        .bind(project.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        match matches.as_slice() {
+            [] => None,
+            [id] => Some(*id),
+            _ => None, // Ambiguous defaults require an explicit local choice.
+        }
+    } else {
+        None
+    };
     let n: i64 = project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(project.id)
@@ -1033,9 +1149,9 @@ pub async fn import_issue(
 
     let row: IssueRow = sqlx::query_as(&format!(
         "INSERT INTO issues
-            (key, project_id, title, body, status, priority, type, assignee_id,
+            (key, project_id, title, body, status, priority, type, assignee_id, cycle_id,
              forgejo_repo, forgejo_number, milestone, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          RETURNING {ISSUE_COLS}"
     ))
     .bind(&key)
@@ -1045,6 +1161,7 @@ pub async fn import_issue(
     .bind(status.as_str())
     .bind(if is_pr { "pr" } else { "issue" })
     .bind(assignee_id)
+    .bind(cycle_id)
     .bind(repo)
     .bind(number)
     .bind(milestone)
@@ -1074,6 +1191,18 @@ pub async fn import_issue(
 
     tx.commit().await?;
     hydrate(db, row).await
+}
+
+fn is_current_external_issue(created_at: &str, updated_at: &str) -> bool {
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    created.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
+        && updated.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
 }
 
 /// Insert or update a synced comment (matched by `(issue_id, external_id)`).

@@ -1,7 +1,8 @@
 //! Async client for `breadboard-server`. Shared by `breadboard-cli` (CLI + TUI).
 
 use breadboard_core::dto::{
-    EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
+    CyclePatch, EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject,
+    ProjectPatch,
 };
 use breadboard_core::{Comment, Cycle, Epic, Issue, Notification, Project, User};
 use serde::de::DeserializeOwned;
@@ -302,6 +303,14 @@ impl Client {
     pub async fn create_cycle(&self, new: &NewCycle) -> Result<Cycle> {
         self.send(self.build(reqwest::Method::POST, "/api/cycles").json(new))
             .await
+    }
+
+    pub async fn update_cycle(&self, id: i64, patch: &CyclePatch) -> Result<Cycle> {
+        self.send(
+            self.build(reqwest::Method::PATCH, &format!("/api/cycles/{id}"))
+                .json(patch),
+        )
+        .await
     }
 
     pub async fn start_cycle(&self, id: i64) -> Result<Cycle> {

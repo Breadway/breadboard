@@ -93,6 +93,14 @@ pub struct NewCycle {
     pub name: String,
     pub starts_on: chrono::NaiveDate,
     pub ends_on: chrono::NaiveDate,
+    #[serde(default)]
+    pub project_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CyclePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<i64>>,
 }
 
 /// Only `title` is required: the "create a card with just a title" rule.

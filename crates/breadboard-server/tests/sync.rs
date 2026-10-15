@@ -126,9 +126,22 @@ async fn webhook_hmac_gate() {
     store::upsert_project_for_repo(&app.db, "BREAD", "bread", "Breadway/bread")
         .await
         .unwrap();
-    store::upsert_repo(&app.db, "Breadway/bread", true)
+    store::upsert_repo(&app.db, "Breadway/bread", true).await.unwrap();
+    let project = store::get_project_by_repo(&app.db, "Breadway/bread")
         .await
         .unwrap();
+    let cycle = store::create_cycle(
+        &app.db,
+        &breadboard_core::dto::NewCycle {
+            name: "Webhook default".into(),
+            starts_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            ends_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
+            project_ids: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    store::update_cycle_projects(&app.db, cycle.id, &[project.id]).await.unwrap();
 
     let payload = json!({
         "action": "opened",
@@ -137,7 +150,7 @@ async fn webhook_hmac_gate() {
             "title": "from a webhook",
             "body": "",
             "state": "open",
-            "created_at": "2026-09-01T00:00:00Z",
+            "created_at": Utc::now().to_rfc3339(),
             "updated_at": Utc::now().to_rfc3339(),
         },
         "repository": { "full_name": "Breadway/bread" }
@@ -169,7 +182,129 @@ async fn webhook_hmac_gate() {
     let imported = store::find_issue_by_forgejo(&app.db, "Breadway/bread", 99)
         .await
         .unwrap();
-    assert!(imported.is_some(), "webhook issue imported");
+    assert_eq!(imported.unwrap().cycle_id, Some(cycle.id), "signed webhook import inherits its project's unique default");
+}
+
+#[tokio::test]
+async fn new_webhook_issues_inherit_unique_cycle_default_but_history_and_prs_do_not() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    let project = store::get_project_by_repo(&app.db, repo).await.unwrap();
+    let cycle = store::create_cycle(
+        &app.db,
+        &breadboard_core::dto::NewCycle {
+            name: "Current".into(),
+            starts_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            ends_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
+            project_ids: vec![project.id],
+        },
+    )
+    .await
+    .unwrap();
+    store::update_cycle_projects(&app.db, cycle.id, &[project.id])
+        .await
+        .unwrap();
+
+    let mut recent = fg_issue(301, "new external issue", Utc::now());
+    recent.created_at = Utc::now().to_rfc3339();
+    sync::apply_issue(&app.state, repo, &recent, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let imported = store::find_issue_by_forgejo(&app.db, repo, 301)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported.cycle_id, Some(cycle.id));
+
+    let mut historical = fg_issue(302, "old backlog issue", Utc::now());
+    historical.created_at = "2020-01-01T00:00:00Z".into();
+    sync::apply_issue(&app.state, repo, &historical, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    let historical = store::find_issue_by_forgejo(&app.db, repo, 302)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(historical.cycle_id, None);
+
+    let mut pr = fg_issue(303, "pull request", Utc::now());
+    pr.created_at = Utc::now().to_rfc3339();
+    pr.pull_request = Some(breadboard_server::forgejo::FgPullRequestStub { merged: false });
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let pr = store::find_issue_by_forgejo(&app.db, repo, 303)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pr.cycle_id, None);
+
+    let second = store::create_cycle(
+        &app.db,
+        &breadboard_core::dto::NewCycle {
+            name: "Also current".into(),
+            starts_on: chrono::NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+            ends_on: chrono::NaiveDate::from_ymd_opt(2026, 11, 30).unwrap(),
+            project_ids: vec![project.id],
+        },
+    )
+    .await
+    .unwrap();
+    store::update_cycle_projects(&app.db, second.id, &[project.id])
+        .await
+        .unwrap();
+    let second_id = second.id;
+    let mut conflict = fg_issue(304, "ambiguous defaults", Utc::now());
+    conflict.created_at = Utc::now().to_rfc3339();
+    sync::apply_issue(&app.state, repo, &conflict, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let imported = store::find_issue_by_forgejo(&app.db, repo, 304)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(imported.cycle_id, Some(second_id));
+    assert_eq!(imported.cycle_id, None);
+}
+
+#[tokio::test]
+async fn reconcile_new_external_issues_inherit_project_cycle_default() {
+    let app = common::spawn().await;
+    let repo = "Breadway/bread";
+    store::upsert_project_for_repo(&app.db, "BREAD", "bread", repo)
+        .await
+        .unwrap();
+    store::upsert_repo(&app.db, repo, true).await.unwrap();
+    let project = store::get_project_by_repo(&app.db, repo).await.unwrap();
+    let cycle = store::create_cycle(
+        &app.db,
+        &breadboard_core::dto::NewCycle {
+            name: "Reconcile default".into(),
+            starts_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 1).unwrap(),
+            ends_on: chrono::NaiveDate::from_ymd_opt(2026, 10, 31).unwrap(),
+            project_ids: vec![],
+        },
+    )
+    .await
+    .unwrap();
+    store::update_cycle_projects(&app.db, cycle.id, &[project.id])
+        .await
+        .unwrap();
+
+    let mut external = fg_issue(401, "reconcile import", Utc::now());
+    external.created_at = Utc::now().to_rfc3339();
+    sync::apply_issue(&app.state, repo, &external, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    let imported = store::find_issue_by_forgejo(&app.db, repo, 401)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(imported.cycle_id, Some(cycle.id));
 }
 
 #[tokio::test]

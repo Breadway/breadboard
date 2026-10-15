@@ -51,6 +51,11 @@ export interface Cycle {
   starts_on: string;
   ends_on: string;
   closed: boolean;
+  project_ids: number[];
+}
+
+export interface NewCycle {
+  name: string; starts_on: string; ends_on: string; project_ids?: number[];
 }
 
 export interface ForgejoRef {
@@ -308,8 +313,10 @@ export class BreadboardClient {
   deleteEpic = (id: number) => this.req<void>("DELETE", `/api/epics/${id}`);
 
   listCycles = () => this.req<Cycle[]>("GET", "/api/cycles");
-  createCycle = (c: { name: string; starts_on: string; ends_on: string }) =>
+  createCycle = (c: NewCycle) =>
     this.req<Cycle>("POST", "/api/cycles", c);
+  updateCycle = (id: number, patch: { project_ids: number[] }) =>
+    this.req<Cycle>("PATCH", `/api/cycles/${id}`, patch);
   startCycle = (id: number) => this.req<Cycle>("POST", `/api/cycles/${id}/start`);
   endCycle = (id: number) => this.req<Cycle>("POST", `/api/cycles/${id}/end`);
 

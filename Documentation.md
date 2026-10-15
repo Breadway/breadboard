@@ -66,10 +66,17 @@ neither is valid.
 | `PATCH` | `/api/epics/{id}` | `{ title?, description?, archived? }` |
 | `DELETE` | `/api/epics/{id}` | `204` (child issues keep running, `epic_id` cleared) |
 | `GET` | `/api/cycles` | list |
-| `POST` | `/api/cycles` | `{ name, starts_on, ends_on }` (ISO dates); `201` |
+| `POST` | `/api/cycles` | `{ name, starts_on, ends_on, project_ids? }` (ISO dates; project ids whose new issues default to this cycle); `201` |
+| `PATCH` | `/api/cycles/{id}` | `{ project_ids }` replaces selected project defaults; existing issues are not moved |
 | `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
 | `POST` | `/api/cycles/{id}/end` | sets `closed`, emits `cycle.ended` |
 | `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
+
+When creating an issue without `cycle_id`, Breadboard assigns the sole open cycle
+selecting that project's id. No selected cycle means no default. Multiple matching
+open cycles return `409 conflict`; callers must provide `cycle_id`. Explicit cycle
+assignment always takes precedence. Changing project selections never moves existing
+issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; only `title` required. `project` defaults to the first non-archived project; key allocated from that project's counter. `201` |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |

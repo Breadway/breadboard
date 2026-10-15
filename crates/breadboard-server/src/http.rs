@@ -37,6 +37,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(api::delete_epic),
         )
         .route("/cycles", get(api::list_cycles).post(api::create_cycle))
+        .route("/cycles/{id}", axum::routing::patch(api::update_cycle))
         .route("/cycles/{id}/start", post(api::start_cycle))
         .route("/cycles/{id}/end", post(api::end_cycle))
         .route("/issues", get(api::list_issues).post(api::create_issue))

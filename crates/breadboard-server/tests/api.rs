@@ -143,6 +143,104 @@ async fn issue_lifecycle_and_events() {
 }
 
 #[tokio::test]
+async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let project: Value = c
+        .post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({"key":"CYCLE","name":"Cycle project"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let project_id = project["id"].as_i64().unwrap();
+    let cycle: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+        .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31"}))
+        .send().await.unwrap().json().await.unwrap();
+    let cycle_id = cycle["id"].as_i64().unwrap();
+    assert_eq!(cycle["project_ids"], json!([]));
+    let preexisting: Value = c.post(format!("{base}/api/issues")).header("authorization", &auth)
+        .json(&json!({"title":"before selection", "project":"CYCLE"}))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(preexisting["cycle_id"], Value::Null);
+    let selected_resp = c.patch(format!("{base}/api/cycles/{cycle_id}")).header("authorization", &auth)
+        .json(&json!({"project_ids":[project_id]})).send().await.unwrap();
+    assert!(selected_resp.status().is_success());
+    let selected: Value = selected_resp.json().await.unwrap();
+    assert_eq!(selected["project_ids"], json!([project_id]));
+    let created: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"inherited", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["cycle_id"], json!(cycle_id));
+    let second: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+        .json(&json!({"name":"Also default", "starts_on":"2026-11-01", "ends_on":"2026-11-30", "project_ids":[project_id]}))
+        .send().await.unwrap().json().await.unwrap();
+    let explicit: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"explicit", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit["cycle_id"], second["id"]);
+    let ambiguous = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"ambiguous", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ambiguous.status(), reqwest::StatusCode::CONFLICT);
+    let explicit_id: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"chosen", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit_id["cycle_id"], second["id"]);
+    let update = c
+        .patch(format!("{base}/api/cycles/{cycle_id}"))
+        .header("authorization", &auth)
+        .json(&json!({"project_ids":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(update.status().is_success());
+    let old: Value = c
+        .get(format!("{base}/api/issues/{}", created["key"].as_str().unwrap()))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(old["cycle_id"], json!(cycle_id));
+    let unchanged: Value = c.get(format!("{base}/api/issues/{}", preexisting["key"].as_str().unwrap()))
+        .header("authorization", &auth).send().await.unwrap().json().await.unwrap();
+    assert_eq!(unchanged["cycle_id"], Value::Null);
+}
+
+#[tokio::test]
 async fn cycle_start_end_events() {
     let app = tu::spawn().await;
     let c = reqwest::Client::new();

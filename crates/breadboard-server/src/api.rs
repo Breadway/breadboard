@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::dto::{
-    EpicPatch, IssueFilter, IssuePatch, MoveProject, NewCycle, NewEpic, NewIssue, NewProject,
-    ProjectPatch,
+    CyclePatch, EpicPatch, IssueFilter, IssuePatch, MoveProject, NewCycle, NewEpic, NewIssue,
+    NewProject, ProjectPatch,
 };
 use crate::error::{AppError, AppResult};
 use crate::{notify, store, sync, AppState};
@@ -138,6 +138,19 @@ pub async fn create_cycle(
 ) -> AppResult<(StatusCode, Json<Cycle>)> {
     let cycle = store::create_cycle(&app.db, &body).await?;
     Ok((StatusCode::CREATED, Json(cycle)))
+}
+
+pub async fn update_cycle(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+    Json(body): Json<CyclePatch>,
+) -> AppResult<Json<Cycle>> {
+    let cycle = match body.project_ids {
+        Some(ids) => store::update_cycle_projects(&app.db, id, &ids).await?,
+        None => store::get_cycle(&app.db, id).await?,
+    };
+    Ok(Json(cycle))
 }
 
 pub async fn start_cycle(
