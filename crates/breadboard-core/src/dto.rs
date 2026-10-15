@@ -50,7 +50,11 @@ pub struct ProjectPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
     /// `Some(None)` detaches the repo mapping.
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub forgejo_repo: Option<Option<String>>,
 }
 
@@ -74,7 +78,11 @@ pub struct NewEpic {
 pub struct EpicPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
@@ -85,6 +93,14 @@ pub struct NewCycle {
     pub name: String,
     pub starts_on: chrono::NaiveDate,
     pub ends_on: chrono::NaiveDate,
+    #[serde(default)]
+    pub project_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CyclePatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_ids: Option<Vec<i64>>,
 }
 
 /// Only `title` is required: the "create a card with just a title" rule.
@@ -130,20 +146,40 @@ pub struct IssuePatch {
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub estimate: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub assignee_id: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub epic_id: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cycle_id: Option<Option<i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<IssueLink>>,
     /// Sync-managed (Forgejo → breadboard); not pushed back.
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub milestone: Option<Option<String>>,
 }
 
