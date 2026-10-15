@@ -536,6 +536,7 @@ async fn cycles(client: &Client, action: CycleAction) -> Result<()> {
                     name,
                     starts_on,
                     ends_on,
+                    project_ids: Vec::new(),
                 })
                 .await?;
             println!("created cycle {} ({})", c.id, c.name);
