@@ -131,7 +131,19 @@
       ncProjects = [];
     });
 
-  const updateCycleProjects = (id: number, project_ids: number[]) => run(() => api.updateCycle(id, { project_ids }));
+  async function updateCycleProjects(id: number, project_ids: number[]) {
+    busy = true;
+    try {
+      await api.updateCycle(id, { project_ids });
+      await store.loadSettings();
+    } catch (e) {
+      // Keep the UI aligned with the persisted selection when a write is rejected.
+      await store.loadSettings();
+      store.flash(e instanceof Error ? e.message : String(e));
+    } finally {
+      busy = false;
+    }
+  }
 
   const toggleCycle = (id: number, closed: boolean) =>
     run(() => (closed ? api.startCycle(id) : api.endCycle(id)));
@@ -287,7 +299,7 @@
             <tr>
               <td>{c.name}</td>
               <td class="dim mono">{c.starts_on} → {c.ends_on}</td>
-              <td><select multiple size="3" disabled={busy} value={c.project_ids.map(String)} onchange={(e) => updateCycleProjects(c.id, Array.from(e.currentTarget.selectedOptions, (o) => Number(o.value)))}>
+              <td><select multiple size="3" disabled={busy} bind:value={c.project_ids} onchange={(e) => updateCycleProjects(c.id, Array.from(e.currentTarget.selectedOptions, (o) => Number(o.value)))}>
                 {#each store.projects as p (p.id)}<option value={p.id}>{p.key}</option>{/each}
               </select></td>
               <td class="dim">{counts.done}/{counts.total} done</td>

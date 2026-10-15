@@ -1118,6 +1118,25 @@ pub async fn import_issue(
     source: SyncSource,
 ) -> AppResult<Issue> {
     let mut tx = db.begin().await?;
+    // Only genuinely new, current issues inherit defaults. Reconcile imports
+    // of older backlog are historical and must not be retroactively scheduled;
+    // PRs are read-mostly and never inherit issue scheduling defaults.
+    let cycle_id = if !is_pr && is_current_external_issue(created_at, updated_at) {
+        let matches: Vec<i64> = sqlx::query_scalar(
+            "SELECT c.id FROM cycles c JOIN cycle_projects cp ON cp.cycle_id = c.id \
+             WHERE cp.project_id = ?1 AND c.closed = 0 ORDER BY c.id",
+        )
+        .bind(project.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        match matches.as_slice() {
+            [] => None,
+            [id] => Some(*id),
+            _ => None, // Ambiguous defaults require an explicit local choice.
+        }
+    } else {
+        None
+    };
     let n: i64 = project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(project.id)
@@ -1127,9 +1146,9 @@ pub async fn import_issue(
 
     let row: IssueRow = sqlx::query_as(&format!(
         "INSERT INTO issues
-            (key, project_id, title, body, status, priority, type, assignee_id,
+            (key, project_id, title, body, status, priority, type, assignee_id, cycle_id,
              forgejo_repo, forgejo_number, milestone, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          RETURNING {ISSUE_COLS}"
     ))
     .bind(&key)
@@ -1139,6 +1158,7 @@ pub async fn import_issue(
     .bind(status.as_str())
     .bind(if is_pr { "pr" } else { "issue" })
     .bind(assignee_id)
+    .bind(cycle_id)
     .bind(repo)
     .bind(number)
     .bind(milestone)
@@ -1168,6 +1188,18 @@ pub async fn import_issue(
 
     tx.commit().await?;
     hydrate(db, row).await
+}
+
+fn is_current_external_issue(created_at: &str, updated_at: &str) -> bool {
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    created.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
+        && updated.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
 }
 
 /// Insert or update a synced comment (matched by `(issue_id, external_id)`).
