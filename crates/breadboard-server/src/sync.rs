@@ -614,20 +614,33 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
 /// repo, create it on Forgejo too and link it. Returns the linked issue (or the
 /// original if nothing was pushed). Best-effort: logs on failure.
 pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
-    if issue.forgejo_ref.is_some() || !state.forgejo.is_configured() {
-        return issue;
+    writeback_new_issue_result(state, issue).await.0
+}
+
+/// Create and link a new issue, retaining a useful failure reason for callers
+/// that need to expose a retryable pending-writeback state.
+pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issue, Option<String>) {
+    if issue.forgejo_ref.is_some() {
+        return (issue, None);
     }
     let Ok(project) = store::get_project(&state.db, issue.project_id).await else {
-        return issue;
+        return (issue, None);
     };
     let Some(repo) = project.forgejo_repo else {
-        return issue;
+        return (issue, None);
     };
     if !matches!(store::repo_enabled(&state.db, &repo).await, Ok(true)) {
-        return issue;
+        return (issue, None);
     }
-    let Ok((owner, name)) = split_repo(&repo) else {
-        return issue;
+    if !state.forgejo.is_configured() {
+        return (
+            issue,
+            Some(format!("Forgejo writeback is not configured for {repo}")),
+        );
+    }
+    let (owner, name) = match split_repo(&repo) {
+        Ok(parts) => parts,
+        Err(e) => return (issue, Some(e.to_string())),
     };
 
     let assignees: Vec<String> = match issue.assignee_id {
@@ -646,7 +659,7 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
         Ok(fg) => fg,
         Err(e) => {
             tracing::warn!(key = %issue.key, error = %e, "forgejo issue creation failed");
-            return issue;
+            return (issue, Some(e.to_string()));
         }
     };
 
@@ -663,11 +676,11 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
     match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
         Ok(linked) => {
             tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
-            linked
+            (linked, None)
         }
         Err(e) => {
             tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
-            issue
+            (issue, Some(e.to_string()))
         }
     }
 }

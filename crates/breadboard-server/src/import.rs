@@ -7,10 +7,13 @@
 
 use breadboard_core::{Status, SyncSource};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 
 use crate::dto::{NewEpic, NewIssue};
 use crate::error::{AppError, AppResult};
 use crate::{store, AppState};
+
+static IMPORT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ImportRequest {
@@ -26,6 +29,15 @@ pub struct ImportResult {
     pub epics_created: Vec<String>,
     pub issues_created: Vec<String>,
     pub skipped: Vec<String>,
+    /// Issues that remain local because Forgejo creation or linking failed.
+    /// Repeating the same import retries these without changing their keys.
+    pub pending_writebacks: Vec<PendingWriteback>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingWriteback {
+    pub key: String,
+    pub error: String,
 }
 
 struct ParsedEpic {
@@ -106,22 +118,30 @@ fn strip_md(s: &str) -> String {
 }
 
 pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResult> {
+    // Imports perform a title-based idempotence check before creating cards.
+    // Serialize that check/create/writeback sequence so concurrent requests in
+    // this server process cannot both allocate a card for the same title.
+    let _guard = IMPORT_LOCK
+        .get_or_init(|| tokio::sync::Mutex::new(()))
+        .lock()
+        .await;
     let project = store::get_project_by_key(&state.db, &req.project)
         .await
         .map_err(|_| AppError::bad_request(format!("unknown project `{}`", req.project)))?;
 
     let parsed = parse(&req.markdown);
-    let existing_issues: std::collections::HashSet<String> = store::list_issues(
-        &state.db,
-        &crate::dto::IssueFilter {
-            project: Some(project.key.clone()),
-            ..Default::default()
-        },
-    )
-    .await?
-    .into_iter()
-    .map(|i| i.title.to_lowercase())
-    .collect();
+    let mut existing_issues: std::collections::HashMap<String, breadboard_core::Issue> =
+        store::list_issues(
+            &state.db,
+            &crate::dto::IssueFilter {
+                project: Some(project.key.clone()),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .map(|i| (i.title.to_lowercase(), i))
+        .collect();
     let existing_epics: std::collections::HashSet<String> = store::list_epics(&state.db)
         .await?
         .into_iter()
@@ -165,8 +185,20 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
         };
 
         for (title, done) in pe.issues {
-            if existing_issues.contains(&title.to_lowercase()) {
+            if let Some(existing) = existing_issues.get(&title.to_lowercase()).cloned() {
                 result.skipped.push(format!("issue: {title}"));
+                if !req.dry_run && existing.forgejo_ref.is_none() {
+                    let (linked, error) =
+                        crate::sync::writeback_new_issue_result(state, existing).await;
+                    if let Some(error) = error {
+                        result.pending_writebacks.push(PendingWriteback {
+                            key: linked.key,
+                            error,
+                        });
+                    } else if linked.forgejo_ref.is_some() {
+                        existing_issues.insert(title.to_lowercase(), linked);
+                    }
+                }
                 continue;
             }
             if req.dry_run {
@@ -196,7 +228,15 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
             .execute(&state.db)
             .await
             .ok();
-            result.issues_created.push(issue.key);
+            let (issue, error) = crate::sync::writeback_new_issue_result(state, issue).await;
+            if let Some(error) = error {
+                result.pending_writebacks.push(PendingWriteback {
+                    key: issue.key.clone(),
+                    error,
+                });
+            }
+            result.issues_created.push(issue.key.clone());
+            existing_issues.insert(title.to_lowercase(), issue);
         }
     }
     Ok(result)

@@ -22,6 +22,10 @@ pub struct TestApp {
 }
 
 pub async fn spawn() -> TestApp {
+    spawn_with_forgejo(None).await
+}
+
+pub async fn spawn_with_forgejo(fake: Option<(String, String)>) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
     let config = Config {
         database_path: tmp.path().join("test.db"),
@@ -29,6 +33,11 @@ pub async fn spawn() -> TestApp {
         public_url: "http://127.0.0.1".into(),
         forgejo: ForgejoConfig {
             webhook_secret: WEBHOOK_SECRET.into(),
+            base_url: fake
+                .as_ref()
+                .map(|(url, _)| url.clone())
+                .unwrap_or_else(|| ForgejoConfig::default().base_url),
+            api_token: fake.map(|(_, token)| token).unwrap_or_default(),
             ..ForgejoConfig::default()
         },
         ..Config::default()
