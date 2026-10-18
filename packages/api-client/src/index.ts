@@ -157,12 +157,15 @@ export interface ImportRequest {
   project: string;
   markdown: string;
   dry_run?: boolean;
+  repair?: boolean;
 }
 
 export interface ImportResult {
   epics_created: string[];
   issues_created: string[];
   skipped: string[];
+  remote_would_create: string[];
+  pending_writebacks: { key: string; error: string }[];
 }
 
 export interface NewIssue {

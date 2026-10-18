@@ -1290,24 +1290,30 @@ pub async fn link_issue(
     number: i64,
 ) -> AppResult<Issue> {
     let ts = now_rfc3339();
-    sqlx::query(
-        "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1",
-    )
-    .bind(issue_id)
-    .bind(repo)
-    .bind(number)
-    .bind(&ts)
-    .execute(db)
-    .await?;
-    sqlx::query(
-        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
-         VALUES (?1, 'created', NULL, ?2, 'breadboard', NULL, ?3)",
-    )
-    .bind(issue_id)
-    .bind(format!("{repo}#{number}"))
-    .bind(&ts)
-    .execute(db)
-    .await?;
+    let mut tx = db.begin().await?;
+    let result = sqlx::query(
+        "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1 AND forgejo_repo IS NULL",
+    ).bind(issue_id).bind(repo).bind(number).bind(&ts).execute(&mut *tx).await;
+    // A concurrent webhook may have linked the exact same remote issue. Only
+    // interpret a uniqueness conflict as success when that link exists.
+    if let Err(error) = result {
+        tx.rollback().await?;
+        if let Some(already) = find_issue_by_forgejo(db, repo, number).await? {
+            return Ok(already);
+        }
+        return Err(error.into());
+    }
+    let affected = result.unwrap().rows_affected();
+    if affected == 0 {
+        tx.rollback().await?;
+        if let Some(already) = find_issue_by_forgejo(db, repo, number).await? {
+            return Ok(already);
+        }
+        return Err(AppError::Conflict("issue was linked concurrently".into()));
+    }
+    sqlx::query("INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at) VALUES (?1, 'created', NULL, ?2, 'breadboard', NULL, ?3)")
+        .bind(issue_id).bind(format!("{repo}#{number}")).bind(&ts).execute(&mut *tx).await?;
+    tx.commit().await?;
     let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE id = ?1"))
         .bind(issue_id)
         .fetch_one(db)
@@ -1316,7 +1322,7 @@ pub async fn link_issue(
 }
 
 /// Claim a local, not-yet-linked issue that matches an incoming Forgejo issue
-/// by project + exact title, created moments ago. This closes a race between
+/// by project + exact title, regardless of age. This closes a race between
 /// `writeback_new_issue`'s own `link_issue` call and the webhook for the issue
 /// it just created arriving back at us first: without this, both paths insert
 /// their own row for the same Forgejo issue, producing a duplicate.
@@ -1327,19 +1333,23 @@ pub async fn claim_unlinked_issue(
     repo: &str,
     number: i64,
 ) -> AppResult<Option<Issue>> {
-    let cutoff = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
-    let row: Option<IssueRow> = sqlx::query_as(&format!(
+    let mut rows: Vec<IssueRow> = sqlx::query_as(&format!(
         "SELECT {ISSUE_COLS} FROM issues
-         WHERE project_id = ?1 AND forgejo_repo IS NULL AND title = ?2 AND created_at >= ?3
-         ORDER BY created_at DESC LIMIT 1"
+         WHERE project_id = ?1 AND forgejo_repo IS NULL AND title = ?2
+         ORDER BY created_at DESC"
     ))
     .bind(project_id)
     .bind(title)
-    .bind(&cutoff)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?;
-    let Some(row) = row else { return Ok(None) };
-    link_issue(db, row.id, repo, number).await.map(Some)
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    rows.truncate(1);
+    match link_issue(db, rows[0].id, repo, number).await {
+        Ok(issue) => Ok(Some(issue)),
+        Err(_) => find_issue_by_forgejo(db, repo, number).await,
+    }
 }
 
 pub async fn set_comment_external_id(

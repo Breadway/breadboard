@@ -48,6 +48,7 @@
   let imProject = $state("");
   let imMarkdown = $state("");
   let imBusy = $state(false);
+  let imRepair = $state(false);
   let imResult = $state<ImportResult | null>(null);
   let imError = $state<string | null>(null);
 
@@ -153,8 +154,12 @@
     imBusy = true;
     imError = null;
     try {
-      imResult = await api.importMarkdown({ project: imProject, markdown: imMarkdown, dry_run: dryRun });
-      if (!dryRun) {
+      imResult = await api.importMarkdown({ project: imProject, markdown: imMarkdown, dry_run: dryRun, repair: imRepair });
+      if (!dryRun && imResult.pending_writebacks.length) {
+        imError = `Import completed locally, but ${imResult.pending_writebacks.length} Forgejo writeback(s) failed.`;
+        await store.loadAll();
+      }
+      if (!dryRun && !imResult.pending_writebacks.length) {
         imMarkdown = "";
         await store.loadAll();
       }
@@ -342,6 +347,7 @@
 
     <section class="card">
       <h2>Import markdown outline</h2>
+      <label><input type="checkbox" bind:checked={imRepair} /> Repair existing unlinked cards (dry-run first)</label>
       <p class="hint">
         Paste an outline; "##" headings become epics and "- [ ]" / "- [x]" items become issues,
         filed under the project you pick.
@@ -381,6 +387,8 @@
         {#if imResult.epics_created.length}<p class="hint">Epics: {imResult.epics_created.join(", ")}</p>{/if}
         {#if imResult.issues_created.length}<p class="hint">Issues: {imResult.issues_created.join(", ")}</p>{/if}
         {#if imResult.skipped.length}<p class="hint">Skipped: {imResult.skipped.join(", ")}</p>{/if}
+        {#if imResult.remote_would_create.length}<p class="hint">Would create remotely: {imResult.remote_would_create.join(", ")}</p>{/if}
+        {#each imResult.pending_writebacks as pending}<p class="error">Writeback pending for {pending.key}: {pending.error}</p>{/each}
       {/if}
     </section>
 

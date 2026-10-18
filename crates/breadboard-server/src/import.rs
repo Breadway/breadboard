@@ -7,13 +7,17 @@
 
 use breadboard_core::{Status, SyncSource};
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use crate::dto::{NewEpic, NewIssue};
 use crate::error::{AppError, AppResult};
 use crate::{store, AppState};
 
-static IMPORT_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static IMPORT_LOCKS: OnceLock<std::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ImportRequest {
@@ -22,6 +26,10 @@ pub struct ImportRequest {
     pub markdown: String,
     #[serde(default)]
     pub dry_run: bool,
+    /// Repair existing local cards without a Forgejo link. Ordinary imports
+    /// only mirror cards created by that request.
+    #[serde(default)]
+    pub repair: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -29,8 +37,8 @@ pub struct ImportResult {
     pub epics_created: Vec<String>,
     pub issues_created: Vec<String>,
     pub skipped: Vec<String>,
+    pub remote_would_create: Vec<String>,
     /// Issues that remain local because Forgejo creation or linking failed.
-    /// Repeating the same import retries these without changing their keys.
     pub pending_writebacks: Vec<PendingWriteback>,
 }
 
@@ -118,41 +126,65 @@ fn strip_md(s: &str) -> String {
 }
 
 pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResult> {
-    // Imports perform a title-based idempotence check before creating cards.
-    // Serialize that check/create/writeback sequence so concurrent requests in
-    // this server process cannot both allocate a card for the same title.
-    let _guard = IMPORT_LOCK
-        .get_or_init(|| tokio::sync::Mutex::new(()))
-        .lock()
-        .await;
     let project = store::get_project_by_key(&state.db, &req.project)
         .await
         .map_err(|_| AppError::bad_request(format!("unknown project `{}`", req.project)))?;
+    let lock = IMPORT_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(project.id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
 
     let parsed = parse(&req.markdown);
-    let mut existing_issues: std::collections::HashMap<String, breadboard_core::Issue> =
-        store::list_issues(
-            &state.db,
-            &crate::dto::IssueFilter {
-                project: Some(project.key.clone()),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_iter()
-        .map(|i| (i.title.to_lowercase(), i))
-        .collect();
-    let existing_epics: std::collections::HashSet<String> = store::list_epics(&state.db)
-        .await?
-        .into_iter()
-        .map(|e| e.title.to_lowercase())
-        .collect();
+    let issue_list = store::list_issues(
+        &state.db,
+        &crate::dto::IssueFilter {
+            project: Some(project.key.clone()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    let mut existing_issues: std::collections::HashMap<String, Vec<breadboard_core::Issue>> =
+        HashMap::new();
+    for issue in issue_list {
+        existing_issues
+            .entry(issue.title.to_lowercase())
+            .or_default()
+            .push(issue);
+    }
+    let mut titles = std::collections::HashSet::new();
+    for epic in &parsed {
+        for (title, _) in &epic.issues {
+            if !titles.insert(title.to_lowercase()) {
+                return Err(AppError::bad_request(format!(
+                    "duplicate import item title `{title}` is ambiguous"
+                )));
+            }
+        }
+    }
+    let mut existing_epics: std::collections::HashMap<String, Vec<i64>> = HashMap::new();
+    for epic in store::list_epics(&state.db).await? {
+        existing_epics
+            .entry(epic.title.to_lowercase())
+            .or_default()
+            .push(epic.id);
+    }
 
     let mut result = ImportResult::default();
     let mut ep_seq = 1;
 
     for pe in parsed {
-        let epic_id = if existing_epics.contains(&pe.title.to_lowercase()) {
+        let epic_matches = existing_epics.get(&pe.title.to_lowercase());
+        if epic_matches.is_some_and(|matches| matches.len() > 1) {
+            return Err(AppError::bad_request(format!(
+                "multiple existing epics match `{}`; refusing ambiguous import",
+                pe.title
+            )));
+        }
+        let epic_id = if epic_matches.is_some() {
             result.skipped.push(format!("epic: {}", pe.title));
             store::list_epics(&state.db)
                 .await?
@@ -185,9 +217,21 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
         };
 
         for (title, done) in pe.issues {
-            if let Some(existing) = existing_issues.get(&title.to_lowercase()).cloned() {
+            if let Some(matches) = existing_issues.get(&title.to_lowercase()) {
+                if matches.len() > 1 {
+                    return Err(AppError::bad_request(format!(
+                        "multiple existing cards match `{title}`; refusing ambiguous import"
+                    )));
+                }
+            }
+            if let Some(existing) = existing_issues
+                .get(&title.to_lowercase())
+                .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
+            {
                 result.skipped.push(format!("issue: {title}"));
-                if !req.dry_run && existing.forgejo_ref.is_none() {
+                let repair_key = existing.key.clone();
+                let is_unlinked = existing.forgejo_ref.is_none();
+                if req.repair && !req.dry_run && existing.forgejo_ref.is_none() {
                     let (linked, error) =
                         crate::sync::writeback_new_issue_result(state, existing).await;
                     if let Some(error) = error {
@@ -196,13 +240,29 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
                             error,
                         });
                     } else if linked.forgejo_ref.is_some() {
-                        existing_issues.insert(title.to_lowercase(), linked);
+                        existing_issues.insert(title.to_lowercase(), vec![linked]);
                     }
+                }
+                let repo_enabled = if let Some(repo) = &project.forgejo_repo {
+                    matches!(store::repo_enabled(&state.db, repo).await, Ok(true))
+                } else {
+                    false
+                };
+                if req.repair && req.dry_run && is_unlinked && repo_enabled {
+                    result.remote_would_create.push(repair_key);
                 }
                 continue;
             }
             if req.dry_run {
-                result.issues_created.push(title);
+                result.issues_created.push(title.clone());
+                let repo_enabled = if let Some(repo) = &project.forgejo_repo {
+                    matches!(store::repo_enabled(&state.db, repo).await, Ok(true))
+                } else {
+                    false
+                };
+                if repo_enabled {
+                    result.remote_would_create.push(title.clone());
+                }
                 continue;
             }
             let issue = store::create_issue(
@@ -236,7 +296,7 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
                 });
             }
             result.issues_created.push(issue.key.clone());
-            existing_issues.insert(title.to_lowercase(), issue);
+            existing_issues.insert(title.to_lowercase(), vec![issue]);
         }
     }
     Ok(result)
