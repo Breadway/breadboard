@@ -88,7 +88,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
 | `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202 { "ok": true }` |
-| `POST` | `/api/import` | `{ project, markdown, dry_run? }`: `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
+| `POST` | `/api/import` | `{ project, markdown, dry_run?, repair? }`: headings → epics, checklist items → issues (`[x]` creates closed/done remotely too); returns created/skipped entries, `remote_would_create[]`, and `pending_writebacks[]` (`key`, `error`). Ordinary imports mirror only cards created in that request. Set `repair: true` to retry existing unlinked matches; combine with `dry_run: true` to list local keys that would be created remotely without writing. Duplicate item titles in one outline and multiply-matched existing cards are rejected as ambiguous. |
 | `POST` | `/webhooks/forgejo` | inbound sync: **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 
 **IssuePatch**: every field optional; absent = unchanged. `title`, `body`,
@@ -167,6 +167,9 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 - creating an issue in a project mapped to an enabled repo also creates it on
   Forgejo and links it (`forgejo_ref`); issues in a repo-less project (e.g. the
   roadmap) stay breadboard-only.
+- retried writebacks carry a stable hidden local-key marker so a timeout or
+  link race can find the already-created Forgejo issue rather than POSTing a
+  duplicate. Forgejo requests have a bounded timeout.
 - a `PATCH /api/issues/{key}` that changes a synced field on a linked issue is
   pushed (`PATCH issue` for title/body/state/assignees, `PUT labels` otherwise).
 - adding a comment on a linked issue is pushed.

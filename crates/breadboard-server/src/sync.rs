@@ -614,21 +614,44 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
 /// repo, create it on Forgejo too and link it. Returns the linked issue (or the
 /// original if nothing was pushed). Best-effort: logs on failure.
 pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
-    if issue.forgejo_ref.is_some() || !state.forgejo.is_configured() {
-        return issue;
+    writeback_new_issue_result(state, issue).await.0
+}
+
+/// Create and link a new issue, retaining a useful failure reason for callers
+/// that need to expose a retryable pending-writeback state.
+pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issue, Option<String>) {
+    if issue.forgejo_ref.is_some() {
+        return (issue, None);
     }
     let Ok(project) = store::get_project(&state.db, issue.project_id).await else {
-        return issue;
+        return (issue, None);
     };
     let Some(repo) = project.forgejo_repo else {
-        return issue;
+        return (issue, None);
     };
     if !matches!(store::repo_enabled(&state.db, &repo).await, Ok(true)) {
-        return issue;
+        return (issue, None);
     }
-    let Ok((owner, name)) = split_repo(&repo) else {
-        return issue;
+    if !state.forgejo.is_configured() {
+        return (
+            issue,
+            Some(format!("Forgejo writeback is not configured for {repo}")),
+        );
+    }
+    let (owner, name) = match split_repo(&repo) {
+        Ok(parts) => parts,
+        Err(e) => return (issue, Some(e.to_string())),
     };
+
+    // Embed a stable, private HTML comment so a timed-out POST can be
+    // discovered on retry rather than creating another Forgejo issue.
+    let marker = format!("<!-- breadboard-import:{} -->", issue.key);
+    if let Ok(Some(found)) = state.forgejo.find_import_issue(owner, name, &marker).await {
+        return match store::link_issue(&state.db, issue.id, &repo, found.number).await {
+            Ok(linked) => (linked, None),
+            Err(error) => (issue, Some(error.to_string())),
+        };
+    }
 
     let assignees: Vec<String> = match issue.assignee_id {
         Some(id) => match store::get_user(&state.db, id).await {
@@ -638,17 +661,22 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
         None => vec![],
     };
 
+    let remote_body = format!("{}\n\n{}", issue.body, marker);
     let fg = match state
         .forgejo
-        .create_issue(owner, name, &issue.title, &issue.body, &assignees)
+        .create_issue(owner, name, &issue.title, &remote_body, &assignees)
         .await
     {
         Ok(fg) => fg,
         Err(e) => {
             tracing::warn!(key = %issue.key, error = %e, "forgejo issue creation failed");
-            return issue;
+            return (issue, Some(e.to_string()));
         }
     };
+
+    // Link immediately after creation. If the webhook wins the race, its
+    // atomic claim links this exact pending card and this operation observes
+    // the existing link instead of creating an orphaned duplicate.
 
     if !issue.labels.is_empty() {
         if let Err(e) = state
@@ -662,12 +690,34 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
 
     match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
         Ok(linked) => {
+            if linked.status == Status::Done {
+                if let Err(error) = state
+                    .forgejo
+                    .patch_issue(
+                        owner,
+                        name,
+                        fg.number,
+                        FgIssuePatch {
+                            state: Some("closed"),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
+                }
+            }
             tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
-            linked
+            (linked, None)
         }
         Err(e) => {
+            if let Ok(Some(linked)) =
+                store::find_issue_by_forgejo(&state.db, &repo, fg.number).await
+            {
+                return (linked, None);
+            }
             tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
-            issue
+            (issue, Some(e.to_string()))
         }
     }
 }

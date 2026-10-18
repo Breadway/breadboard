@@ -45,7 +45,7 @@ or in `.mcp.json`:
 | `list_projects` `list_epics` `list_cycles` `list_repos` | metadata |
 | `get_epic` `create_epic` `update_epic` `delete_epic` | read and manage epics by key or id; `get_epic` includes child issues, progress, and counts; deleting an epic keeps and unlinks its child issues |
 | `create_project` `update_project` `create_cycle` `update_cycle_projects` `start_cycle` `end_cycle` `add_repo` `remove_repo` `reconcile` | admin (cycle creation accepts project ids for new-issue defaults; `update_cycle_projects` replaces them without moving existing issues) |
-| `import_markdown` | outline → epics + issues |
+| `import_markdown` | outline → epics + issues; set `repair: true` to retry existing unlinked cards and `dry_run: true` to list the local keys that would be created remotely. Normal import mirrors only newly created local cards. |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |
 
 `update_issue`'s `add_links`/`remove_links` take `{ kind, target }` pairs

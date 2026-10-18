@@ -67,6 +67,16 @@ pub struct ImportResult {
     pub epics_created: Vec<String>,
     pub issues_created: Vec<String>,
     pub skipped: Vec<String>,
+    #[serde(default)]
+    pub remote_would_create: Vec<String>,
+    #[serde(default)]
+    pub pending_writebacks: Vec<PendingWriteback>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PendingWriteback {
+    pub key: String,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -283,6 +293,7 @@ impl Client {
         project: &str,
         markdown: &str,
         dry_run: bool,
+        repair: bool,
     ) -> Result<ImportResult> {
         self.send(
             self.build(reqwest::Method::POST, "/api/import")
@@ -290,6 +301,7 @@ impl Client {
                     "project": project,
                     "markdown": markdown,
                     "dry_run": dry_run,
+                    "repair": repair,
                 })),
         )
         .await

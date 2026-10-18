@@ -136,9 +136,15 @@ impl Forgejo {
         &self,
         rb: reqwest::RequestBuilder,
     ) -> anyhow::Result<T> {
-        let resp = rb.send().await.context("forgejo request failed")?;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(20), rb.send())
+            .await
+            .context("forgejo request timed out")?
+            .context("forgejo request failed")?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), resp.text())
+            .await
+            .context("forgejo response body timed out")?
+            .unwrap_or_default();
         if !status.is_success() {
             return Err(anyhow!("forgejo {status}: {body}"));
         }
@@ -175,6 +181,21 @@ impl Forgejo {
             &format!("/repos/{owner}/{repo}/issues/{number}"),
         ))
         .await
+    }
+
+    pub async fn find_import_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        marker: &str,
+    ) -> anyhow::Result<Option<FgIssue>> {
+        let issues: Vec<FgIssue> = self
+            .json(self.req(
+                reqwest::Method::GET,
+                &format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page=1"),
+            ))
+            .await?;
+        Ok(issues.into_iter().find(|issue| issue.body.contains(marker)))
     }
 
     pub async fn issue_comments(

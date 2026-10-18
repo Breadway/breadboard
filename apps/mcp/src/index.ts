@@ -490,8 +490,9 @@ server.tool(
     project: z.string(),
     markdown: z.string(),
     dry_run: z.boolean().optional(),
+    repair: z.boolean().optional().describe("Retry existing unlinked local cards; use dry_run first to list remote keys."),
   },
-  ({ project, markdown, dry_run }) => run(() => client.importMarkdown({ project, markdown, dry_run })),
+  ({ project, markdown, dry_run, repair }) => run(() => client.importMarkdown({ project, markdown, dry_run, repair })),
 );
 
 server.tool(

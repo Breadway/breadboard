@@ -38,6 +38,7 @@ impl AppState {
     pub fn new(db: db::Db, config: Config) -> anyhow::Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!("breadboard-server/", env!("CARGO_PKG_VERSION")))
+            .timeout(std::time::Duration::from_secs(20))
             .build()?;
         let forgejo = Forgejo::new(http.clone(), &config.forgejo);
         let (shutdown, _) = tokio::sync::watch::channel(false);
