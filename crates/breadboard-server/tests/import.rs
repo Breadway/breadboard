@@ -194,6 +194,59 @@ async fn existing_unlinked_card_is_repaired_without_changing_its_key() {
 }
 
 #[tokio::test]
+async fn repair_ignores_pull_request_cards_with_the_same_title() {
+    let (app, fake) = harness(false).await;
+    let local = store::create_issue(
+        &app.db,
+        &breadboard_server::dto::NewIssue {
+            project: Some("TST".into()),
+            title: "Task".into(),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let pr = store::create_issue(
+        &app.db,
+        &breadboard_server::dto::NewIssue {
+            project: Some("TST".into()),
+            title: "Task".into(),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE issues SET type = 'pr' WHERE id = ?1")
+        .bind(pr.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let mut repair = request();
+    repair.repair = true;
+    let result = import::run(&app.state, &repair).await.unwrap();
+    assert!(result.pending_writebacks.is_empty());
+    assert_eq!(result.remote_would_create, Vec::<String>::new());
+    assert_eq!(
+        store::get_issue_by_key(&app.db, &local.key)
+            .await
+            .unwrap()
+            .forgejo_ref
+            .unwrap()
+            .number,
+        41
+    );
+    assert!(store::get_issue_by_key(&app.db, &pr.key)
+        .await
+        .unwrap()
+        .forgejo_ref
+        .is_none());
+    assert_eq!(fake.creates.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn repositoryless_import_stays_local() {
     let app = common::spawn().await;
     let result = import::run(
