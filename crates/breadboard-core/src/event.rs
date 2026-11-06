@@ -74,6 +74,9 @@ pub enum BoardEvent {
     /// A claim was released. The card returns to its normal colour.
     #[serde(rename = "agent.released")]
     AgentReleased { id: i64, key: String },
+    /// A chat message was posted to a room or DM.
+    #[serde(rename = "chat.message")]
+    ChatMessage { room_id: i64, id: i64 },
 }
 
 impl BoardEvent {
@@ -92,6 +95,7 @@ impl BoardEvent {
             BoardEvent::AgentClaimed { .. } => "bread.board.agent.claimed",
             BoardEvent::AgentUpdated { .. } => "bread.board.agent.updated",
             BoardEvent::AgentReleased { .. } => "bread.board.agent.released",
+            BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
         }
     }
 }

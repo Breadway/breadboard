@@ -764,6 +764,102 @@ server.tool(
     }),
 );
 
+/** The agent name to speak as; chat requires one. */
+function chatAgent(explicit?: string): string {
+  const name = explicit?.trim() || autoAgentName;
+  if (!name) {
+    throw new Error("no agent name yet: claim an issue or pass agent_name");
+  }
+  return name;
+}
+
+server.tool(
+  "chat_rooms",
+  "List chat rooms and DMs. Shared rooms (including the global lobby) are open to everyone; " +
+    "an agent only sees DMs it belongs to.",
+  { agent_name: z.string().optional().describe("defaults to this process's agent name") },
+  ({ agent_name }) => run(() => client.listChatRooms(chatAgent(agent_name))),
+);
+
+server.tool(
+  "chat_read",
+  "Read recent messages from a room or DM. Use `room` for a room name/id (default lobby) or " +
+    "`with` to read the DM with another agent.",
+  {
+    room: z.string().optional().describe("room name or id; defaults to lobby"),
+    with: z.string().optional().describe("agent name to read the DM with"),
+    after: z.number().optional().describe("only messages with id greater than this"),
+    limit: z.number().min(1).max(500).optional(),
+    agent_name: z.string().optional(),
+  },
+  ({ room, with: peer, after, limit, agent_name }) =>
+    run(async () => {
+      const name = chatAgent(agent_name);
+      let roomId: number | undefined;
+      if (peer) {
+        roomId = (await client.openDm(peer, name)).id;
+      } else {
+        const rooms = await client.listChatRooms(name);
+        const want = room?.trim() || "lobby";
+        const found = rooms.find(
+          (r) => String(r.id) === want || r.name === want,
+        );
+        if (!found) throw new Error(`no room ${want}`);
+        roomId = found.id;
+      }
+      return client.listChatMessages(roomId, { agent: name, after, limit });
+    }),
+);
+
+server.tool(
+  "chat_send",
+  "Send a chat message as yourself. Use `to` for a DM with another agent, or `room` for a " +
+    "shared room (default lobby). Create new rooms with chat_create_room.",
+  {
+    body: z.string().optional().describe("message text; may be empty when attaching files"),
+    to: z.string().optional().describe("agent name to DM"),
+    room: z.string().optional().describe("room name or id; defaults to lobby"),
+    uploads: z.array(z.number()).optional().describe("upload ids from chat_upload"),
+    agent_name: z.string().optional(),
+  },
+  ({ body, to, room, uploads, agent_name }) =>
+    run(() => {
+      if (!body?.trim() && !uploads?.length) {
+        throw new Error("message needs text or at least one upload");
+      }
+      return client.postChatMessage({
+        body: body ?? "",
+        to,
+        room,
+        uploads,
+        agent_name: chatAgent(agent_name),
+      });
+    }),
+);
+
+server.tool(
+  "chat_upload",
+  "Upload a file or image to attach to a chat message. Pass base64 data (raw or a data: URL), " +
+    "then send the returned upload id in chat_send. 10 MB limit.",
+  {
+    filename: z.string(),
+    mime: z.string().optional().describe("e.g. image/png; inferred from the filename if omitted"),
+    data_base64: z.string().describe("base64 file contents"),
+  },
+  ({ filename, mime, data_base64 }) =>
+    run(() => client.uploadChatBase64(filename, data_base64, mime)),
+);
+
+server.tool(
+  "chat_create_room",
+  "Create a shared chat room (the global lobby already exists). Silly rooms encouraged.",
+  {
+    name: z.string().describe("room slug, e.g. bread-puns"),
+    description: z.string().optional().describe("what it is for, max 160 chars"),
+  },
+  ({ name, description }) => run(() => client.createChatRoom(name, description)),
+);
+
 server.tool(
   "suggest_agent_names",
   "Get a handful of fun, memorable agent names to choose from. Names are characters, not hosts: " +

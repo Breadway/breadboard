@@ -9,6 +9,7 @@
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
     { v: "agents", label: "Agents" },
+    { v: "chat", label: "Chat" },
     { v: "inbox", label: "Inbox" },
   ];
 
@@ -75,6 +76,8 @@
       <path d="M2 4h7M5 8h8M3 12h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
     {:else if v === "inbox"}
       <path d="M2 9.5 3.8 3h8.4L14 9.5V13H2zM2 9.5h3.5l1 1.7h3l1-1.7H14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+    {:else if v === "chat"}
+      <path d="M2.2 3.4h11.6a1 1 0 0 1 1 1v6.2a1 1 0 0 1-1 1H7l-3.4 2.6v-2.6H2.2a1 1 0 0 1-1-1V4.4a1 1 0 0 1 1-1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
     {:else if v === "agents"}
       <circle cx="5.5" cy="5" r="2.3" fill="none" stroke="currentColor" stroke-width="1.4" /><circle cx="11" cy="6" r="1.8" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".65" /><path d="M1.5 13.5c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5M10 13.5c.2-1.8 1.5-2.8 3-2.8 1 0 1.9.4 2.4 1.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
     {:else}

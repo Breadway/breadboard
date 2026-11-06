@@ -102,6 +102,10 @@ fn all_event_names() -> Vec<&'static str> {
             id: 0,
             key: String::new(),
         },
+        ChatMessage {
+            room_id: 0,
+            id: 0,
+        },
         CycleStarted {
             id: 0,
             name: String::new(),

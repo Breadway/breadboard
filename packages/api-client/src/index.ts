@@ -295,6 +295,36 @@ export interface ClaimUpdate {
   head_sha?: string | null;
 }
 
+export type ChatRoomKind = "room" | "dm";
+export type ChatAuthorKind = "agent" | "human";
+
+export interface ChatUpload {
+  id: number;
+  filename: string;
+  mime: string;
+  size: number;
+}
+
+export interface ChatMessage {
+  id: number;
+  room_id: number;
+  author_member: string;
+  author_display: string;
+  author_kind: ChatAuthorKind;
+  body: string;
+  attachments: ChatUpload[];
+  created_at: string;
+}
+
+export interface ChatRoom {
+  id: number;
+  kind: ChatRoomKind;
+  name: string | null;
+  description: string | null;
+  members: string[];
+  last_message: ChatMessage | null;
+}
+
 export interface AgentStatusSummary {
   total: number;
   live: number;
@@ -332,7 +362,8 @@ export type BoardEvent =
   | { type: "notified"; user_id: number }
   | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
-  | { type: "agent.released"; id: number; key: string };
+  | { type: "agent.released"; id: number; key: string }
+  | { type: "chat.message"; room_id: number; id: number };
 
 export class ApiError extends Error {
   constructor(
@@ -463,6 +494,51 @@ export class BreadboardClient {
     this.req<void>("DELETE", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
   releaseClaimById = (id: number) =>
     this.req<void>("DELETE", `/api/claims/${id}`);
+  listChatRooms = (agent?: string) =>
+    this.req<ChatRoom[]>("GET", `/api/chat/rooms${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
+  createChatRoom = (name: string, description?: string) =>
+    this.req<ChatRoom>("POST", "/api/chat/rooms", { name, description });
+  listChatMessages = (
+    room: number,
+    opts: { agent?: string; after?: number; limit?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.agent) q.set("agent", opts.agent);
+    if (opts.after) q.set("after", String(opts.after));
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return this.req<ChatMessage[]>("GET", `/api/chat/rooms/${room}/messages${qs ? `?${qs}` : ""}`);
+  };
+  postChatMessage = (body: {
+    body: string;
+    room?: string;
+    to?: string;
+    agent_name?: string;
+    uploads?: number[];
+  }) => this.req<ChatMessage>("POST", "/api/chat/messages", body);
+
+  /** Multipart upload from the browser (session cookie). */
+  uploadChatFile = async (file: File): Promise<ChatUpload> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    const headers: Record<string, string> = {};
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await fetch(`${this.baseUrl}/api/chat/uploads`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: fd,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => res.statusText));
+    return (await res.json()) as ChatUpload;
+  };
+
+  /** Base64 upload for MCP/CLI clients. */
+  uploadChatBase64 = (filename: string, data_base64: string, mime?: string) =>
+    this.req<ChatUpload>("POST", "/api/chat/uploads/base64", { filename, mime, data_base64 });
+  openDm = (withAgent: string, agent_name?: string) =>
+    this.req<ChatRoom>("POST", "/api/chat/dm", { with: withAgent, agent_name });
+
   setAgentMessage = (agent_name: string, message: string) =>
     this.req<{ agent_name: string; message: string | null }>("PUT", "/api/agents/message", {
       agent_name,

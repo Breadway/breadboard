@@ -350,6 +350,90 @@ pub struct Notification {
     pub created_at: DateTime<Utc>,
 }
 
+/// A chat room is either the shared lobby or a two-party DM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatRoomKind {
+    Room,
+    Dm,
+}
+
+impl ChatRoomKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatRoomKind::Room => "room",
+            ChatRoomKind::Dm => "dm",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "room" => Some(ChatRoomKind::Room),
+            "dm" => Some(ChatRoomKind::Dm),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatAuthorKind {
+    Agent,
+    Human,
+}
+
+impl ChatAuthorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatAuthorKind::Agent => "agent",
+            ChatAuthorKind::Human => "human",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(ChatAuthorKind::Agent),
+            "human" => Some(ChatAuthorKind::Human),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatUpload {
+    pub id: i64,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatMessage {
+    pub id: i64,
+    pub room_id: i64,
+    /// `agent:<name>` or `human:<login>`.
+    pub author_member: String,
+    /// What to show next to the message.
+    pub author_display: String,
+    pub author_kind: ChatAuthorKind,
+    pub body: String,
+    pub attachments: Vec<ChatUpload>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatRoom {
+    pub id: i64,
+    pub kind: ChatRoomKind,
+    /// Set for shared rooms (`lobby`), absent for DMs.
+    pub name: Option<String>,
+    /// Optional room blurb, e.g. what the silly room is for.
+    pub description: Option<String>,
+    /// Member keys, e.g. `agent:crumb baron`.
+    pub members: Vec<String>,
+    pub last_message: Option<ChatMessage>,
+}
+
 /// Lifecycle state of an agent working an issue. Mirrors the durable
 /// `~/.config/breadboard` session states used by the opencode `bb-status`
 /// widget, so the server-side Agents page speaks the same language.
