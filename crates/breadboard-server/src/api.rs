@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthUser;
 use crate::dto::{
-    EpicPatch, IssueFilter, IssuePatch, MoveProject, NewCycle, NewEpic, NewIssue, NewProject,
-    ProjectPatch,
+    CyclePatch, EpicPatch, IssueFilter, IssuePatch, MoveProject, NewCycle, NewEpic, NewIssue,
+    NewProject, ProjectPatch,
 };
 use crate::error::{AppError, AppResult};
 use crate::{notify, store, sync, AppState};
@@ -90,7 +90,9 @@ pub async fn get_epic(
     _user: AuthUser,
     Path(id): Path<i64>,
 ) -> AppResult<Json<EpicView>> {
-    Ok(Json(epic_view(&app, store::get_epic(&app.db, id).await?).await?))
+    Ok(Json(
+        epic_view(&app, store::get_epic(&app.db, id).await?).await?,
+    ))
 }
 
 pub async fn create_epic(
@@ -138,6 +140,19 @@ pub async fn create_cycle(
     Ok((StatusCode::CREATED, Json(cycle)))
 }
 
+pub async fn update_cycle(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+    Json(body): Json<CyclePatch>,
+) -> AppResult<Json<Cycle>> {
+    let cycle = match body.project_ids {
+        Some(ids) => store::update_cycle_projects(&app.db, id, &ids).await?,
+        None => store::get_cycle(&app.db, id).await?,
+    };
+    Ok(Json(cycle))
+}
+
 pub async fn start_cycle(
     State(app): State<AppState>,
     _user: AuthUser,
@@ -150,7 +165,14 @@ pub async fn start_cycle(
         name: cycle.name.clone(),
         issues,
     });
-    notify::emit_bread(&app, &BoardEvent::CycleStarted { id: cycle.id, name: cycle.name.clone(), issues });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::CycleStarted {
+            id: cycle.id,
+            name: cycle.name.clone(),
+            issues,
+        },
+    );
     notify::cycle(&app, cycle.id, &cycle.name, true).await;
     Ok(Json(cycle))
 }
@@ -165,7 +187,13 @@ pub async fn end_cycle(
         id: cycle.id,
         name: cycle.name.clone(),
     });
-    notify::emit_bread(&app, &BoardEvent::CycleEnded { id: cycle.id, name: cycle.name.clone() });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::CycleEnded {
+            id: cycle.id,
+            name: cycle.name.clone(),
+        },
+    );
     notify::cycle(&app, cycle.id, &cycle.name, false).await;
     Ok(Json(cycle))
 }
@@ -210,9 +238,22 @@ pub async fn create_issue(
         });
         notify::assigned(&app, &issue, assignee_id, Some(user.0.id)).await;
     }
-    notify::emit_bread(&app, &BoardEvent::CardCreated { id: issue.id, key: issue.key.clone() });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::CardCreated {
+            id: issue.id,
+            key: issue.key.clone(),
+        },
+    );
     if !issue.body.is_empty() {
-        notify::mentions(&app, &issue, &issue.body, Some(user.0.id), "the description").await;
+        notify::mentions(
+            &app,
+            &issue,
+            &issue.body,
+            Some(user.0.id),
+            "the description",
+        )
+        .await;
     }
     Ok((StatusCode::CREATED, Json(issue)))
 }
@@ -242,7 +283,8 @@ pub async fn add_comment(
         return Err(crate::error::AppError::bad_request("comment body is empty"));
     }
     let issue = store::get_issue_by_key(&app.db, &key).await?;
-    let comment = store::create_comment(&app.db, issue.id, Some(user.0.id), body.body.trim()).await?;
+    let comment =
+        store::create_comment(&app.db, issue.id, Some(user.0.id), body.body.trim()).await?;
     app.bus.publish(BoardEvent::CardUpdated {
         id: issue.id,
         key: issue.key.clone(),
@@ -310,11 +352,21 @@ pub async fn patch_issue(
     if issue.updated_at != before.updated_at {
         notify::emit_bread(
             &app,
-            &BoardEvent::CardUpdated { id: issue.id, key: issue.key.clone() },
+            &BoardEvent::CardUpdated {
+                id: issue.id,
+                key: issue.key.clone(),
+            },
         );
     }
     if patch.body.is_some() && issue.body != before.body {
-        notify::mentions(&app, &issue, &issue.body, Some(user.0.id), "the description").await;
+        notify::mentions(
+            &app,
+            &issue,
+            &issue.body,
+            Some(user.0.id),
+            "the description",
+        )
+        .await;
     }
 
     // Push synced-field changes back to Forgejo (no-op if not linked/enabled).
@@ -398,7 +450,11 @@ pub async fn add_repo(
         return Err(AppError::bad_request("repo must be `owner/name`"));
     }
     let name = body.name.unwrap_or_else(|| {
-        body.repo.split('/').next_back().unwrap_or(&body.repo).to_string()
+        body.repo
+            .split('/')
+            .next_back()
+            .unwrap_or(&body.repo)
+            .to_string()
     });
     let project = store::upsert_project_for_repo(&app.db, &body.key, &name, &body.repo).await?;
     store::upsert_repo(&app.db, &body.repo, true).await?;
@@ -433,16 +489,21 @@ pub async fn remove_repo(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Serialize)]
+pub struct ReconcileResponse {
+    ok: bool,
+}
+
 pub async fn reconcile_now(
     State(app): State<AppState>,
     _user: AuthUser,
-) -> AppResult<StatusCode> {
+) -> AppResult<(StatusCode, Json<ReconcileResponse>)> {
     tokio::spawn(async move {
         if let Err(e) = sync::reconcile_once(&app).await {
             tracing::warn!(error = %e, "manual reconcile failed");
         }
     });
-    Ok(StatusCode::ACCEPTED)
+    Ok((StatusCode::ACCEPTED, Json(ReconcileResponse { ok: true })))
 }
 
 // --- notifications ------------------------------------------------------

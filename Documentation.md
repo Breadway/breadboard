@@ -106,16 +106,17 @@ Link kinds: `blocks` · `blocked-by` · `relates-to`.
 
 ## HTTP
 
-Base URL: the server's `public_url`. JSON in/out. `/healthz` and `/events` are
-public; everything under `/api` requires auth: a session cookie (`bb_session`,
-web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
+Base URL: the server's `public_url`. JSON in/out. `/healthz` is public;
+`/events` and everything under `/api` require auth: a session cookie
+(`bb_session`, web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when
+neither is valid.
 
 ### Implemented
 
 | Method | Path | Notes |
 | --- | --- | --- |
 | `GET` | `/healthz` | `{ status, version, db, dev_login }`; `503` if the DB is unreachable |
-| `GET` | `/events` | SSE stream of `BoardEvent` (see below) |
+| `GET` | `/events` | Authenticated SSE stream of `BoardEvent` (see below); browser EventSource sends the session cookie, CLI/TUI clients use a bearer token |
 | `GET` | `/auth/login` | redirect to Forgejo OAuth2 authorize (sets a state cookie) |
 | `GET` | `/auth/callback` | exchange code, upsert user, set session, redirect to `/` |
 | `POST` | `/auth/logout` | clear the session; `204` |
@@ -131,10 +132,17 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `PATCH` | `/api/epics/{id}` | `{ title?, description?, archived? }` |
 | `DELETE` | `/api/epics/{id}` | `204` (child issues keep running, `epic_id` cleared) |
 | `GET` | `/api/cycles` | list |
-| `POST` | `/api/cycles` | `{ name, starts_on, ends_on }` (ISO dates); `201` |
+| `POST` | `/api/cycles` | `{ name, starts_on, ends_on, project_ids? }` (ISO dates; project ids whose new issues default to this cycle); `201` |
+| `PATCH` | `/api/cycles/{id}` | `{ project_ids }` replaces selected project defaults; existing issues are not moved |
 | `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
 | `POST` | `/api/cycles/{id}/end` | sets `closed`, emits `cycle.ended` |
 | `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
+
+When creating an issue without `cycle_id`, Breadboard assigns the sole open cycle
+selecting that project's id. No selected cycle means no default. Multiple matching
+open cycles return `409 conflict`; callers must provide `cycle_id`. Explicit cycle
+assignment always takes precedence. Changing project selections never moves existing
+issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. `201` |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
@@ -151,8 +159,8 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
-| `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202` |
-| `POST` | `/api/import` | `{ project, markdown, dry_run? }`: `##` headings → epics, `- [ ]`/`- [x]` items → issues; returns what was created / skipped |
+| `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202 { "ok": true }` |
+| `POST` | `/api/import` | `{ project, markdown, dry_run?, repair? }`: headings → epics, checklist items → issues (`[x]` creates closed/done remotely too); returns created/skipped entries, `remote_would_create[]`, and `pending_writebacks[]` (`key`, `error`). Ordinary imports mirror only cards created in that request. Set `repair: true` to retry existing unlinked matches; combine with `dry_run: true` to list local keys that would be created remotely without writing. Duplicate item titles in one outline and multiply-matched existing cards are rejected as ambiguous. |
 | `POST` | `/webhooks/forgejo` | inbound sync: **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
 
 **IssuePatch**: every field optional; absent = unchanged. `title`, `body`,
@@ -195,6 +203,9 @@ exactly one digest.
 
 `GET /events` emits one JSON object per change, tagged by `type`. Each maps to a
 `bread.board.*` event on the bread bus (milestone 7).
+If a client falls behind the broadcast buffer, the server closes that SSE
+connection so `EventSource` reconnects; clients should reload the board snapshot
+after reconnecting to recover missed changes.
 
 | SSE `type` | bread event | payload |
 | --- | --- | --- |
@@ -231,6 +242,9 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 - creating an issue in a project mapped to an enabled repo also creates it on
   Forgejo and links it (`forgejo_ref`); issues in a repo-less project (e.g. the
   roadmap) stay breadboard-only.
+- retried writebacks carry a stable hidden local-key marker so a timeout or
+  link race can find the already-created Forgejo issue rather than POSTing a
+  duplicate. Forgejo requests have a bounded timeout.
 - a `PATCH /api/issues/{key}` that changes a synced field on a linked issue is
   pushed (`PATCH issue` for title/body/state/assignees, `PUT labels` otherwise).
 - adding a comment on a linked issue is pushed.
@@ -247,7 +261,7 @@ issues **and** PRs); apply anything the webhook path missed, then advance
 | `links` (`blocks`/`blocked-by`/`relates-to`) | n/a | breadboard-only |
 | `links` (`closes`/`closed-by`) | a synced PR's body: closing keywords (Forgejo/GitHub convention) followed by either a Forgejo issue number ("Closes #4") or breadboard's own key ("Fixes ECO-4", agents/humans naturally reference the key they can see) | inbound-derived; re-parsed on every sync of that PR, not just import |
 | comments | issue/PR comments | both (see **Comment echo suppression** below) |
-| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). `merged` or `closed` → `done`. A PR's closing references become `closes`/`closed-by` links, and a PR with one is hidden from the board/backlog; its state surfaces as a badge on the issue's own card instead. When the PR itself flips to `done`, every issue it closes is cascaded to `done` too (best-effort closing their Forgejo issue): Forgejo only reliably auto-closes the *first* issue in a comma-separated "Closes #a, #b" list, so breadboard doesn't rely on that |
+| PRs | title / state / labels / assignee / milestone | inbound; writeback limited to **labels** (PRs are read-mostly). A closed PR (merged or closed-unmerged) appears as `done`. A PR's closing references become `closes`/`closed-by` links, and a PR with one is hidden from the board/backlog; its state surfaces as a badge on the issue's own card instead. When a merged PR flips to `done`, its closing targets are cascaded to `done` (or `review` if labelled `verify-before-done`); a closed-unmerged PR never cascades `done` to targets (targets stay put, or a previously-cascaded `done` is reverted to `review`). Forgejo only reliably auto-closes the *first* issue in a comma-separated "Closes #a, #b" list, so breadboard doesn't rely on that |
 | `milestone` | milestone title (plain string on the issue) | inbound only |
 
 **Conflict resolution:** per-field, the side with the newer issue-level

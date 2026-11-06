@@ -3,6 +3,7 @@
 //! (the same path the CLI device flow will populate).
 
 mod common;
+use breadboard_client::Client;
 use common as tu;
 use serde_json::{json, Value};
 
@@ -24,9 +25,11 @@ async fn issue_lifecycle_and_events() {
         .unwrap();
     assert_eq!(health["db"], json!(true));
 
-    // /api requires auth.
+    // /api and /events require auth.
     let unauth = c.get(format!("{base}/api/issues")).send().await.unwrap();
     assert_eq!(unauth.status(), 401);
+    let unauth_events = c.get(format!("{base}/events")).send().await.unwrap();
+    assert_eq!(unauth_events.status(), 401);
 
     // No project is seeded: create the one this work belongs to.
     let project: Value = c
@@ -42,7 +45,7 @@ async fn issue_lifecycle_and_events() {
     assert_eq!(project["key"], "BREAD");
 
     // Open the SSE stream before mutating so we capture the events.
-    let mut events = tu::EventStream::connect(&base).await;
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
 
     // Create an issue with just a title.
     let created: Value = c
@@ -83,10 +86,11 @@ async fn issue_lifecycle_and_events() {
     assert!(seen.contains("card.updated"), "got {seen:?}");
 
     // sync_log recorded the status + labels change (synced fields).
-    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM sync_log WHERE field IN ('status','labels')")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
     assert_eq!(n, 2);
 
     // Detail view includes (empty) comments.
@@ -139,6 +143,136 @@ async fn issue_lifecycle_and_events() {
 }
 
 #[tokio::test]
+async fn cycle_project_defaults_only_apply_to_new_issues_and_explicit_cycle_wins() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let project: Value = c
+        .post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({"key":"CYCLE","name":"Cycle project"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let project_id = project["id"].as_i64().unwrap();
+    let cycle: Value = c
+        .post(format!("{base}/api/cycles"))
+        .header("authorization", &auth)
+        .json(&json!({"name":"Default", "starts_on":"2026-10-01", "ends_on":"2026-10-31"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let cycle_id = cycle["id"].as_i64().unwrap();
+    assert_eq!(cycle["project_ids"], json!([]));
+    let preexisting: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"before selection", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preexisting["cycle_id"], Value::Null);
+    let selected_resp = c
+        .patch(format!("{base}/api/cycles/{cycle_id}"))
+        .header("authorization", &auth)
+        .json(&json!({"project_ids":[project_id]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(selected_resp.status().is_success());
+    let selected: Value = selected_resp.json().await.unwrap();
+    assert_eq!(selected["project_ids"], json!([project_id]));
+    let created: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"inherited", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(created["cycle_id"], json!(cycle_id));
+    let second: Value = c.post(format!("{base}/api/cycles")).header("authorization", &auth)
+        .json(&json!({"name":"Also default", "starts_on":"2026-11-01", "ends_on":"2026-11-30", "project_ids":[project_id]}))
+        .send().await.unwrap().json().await.unwrap();
+    let explicit: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"explicit", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit["cycle_id"], second["id"]);
+    let ambiguous = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"ambiguous", "project":"CYCLE"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ambiguous.status(), reqwest::StatusCode::CONFLICT);
+    let explicit_id: Value = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({"title":"chosen", "project":"CYCLE", "cycle_id":second["id"]}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit_id["cycle_id"], second["id"]);
+    let update = c
+        .patch(format!("{base}/api/cycles/{cycle_id}"))
+        .header("authorization", &auth)
+        .json(&json!({"project_ids":[]}))
+        .send()
+        .await
+        .unwrap();
+    assert!(update.status().is_success());
+    let old: Value = c
+        .get(format!(
+            "{base}/api/issues/{}",
+            created["key"].as_str().unwrap()
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(old["cycle_id"], json!(cycle_id));
+    let unchanged: Value = c
+        .get(format!(
+            "{base}/api/issues/{}",
+            preexisting["key"].as_str().unwrap()
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(unchanged["cycle_id"], Value::Null);
+}
+
+#[tokio::test]
 async fn cycle_start_end_events() {
     let app = tu::spawn().await;
     let c = reqwest::Client::new();
@@ -157,7 +291,7 @@ async fn cycle_start_end_events() {
         .unwrap();
     let id = cycle["id"].as_i64().unwrap();
 
-    let mut events = tu::EventStream::connect(&base).await;
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
 
     c.post(format!("{base}/api/cycles/{id}/start"))
         .header("authorization", &auth)
@@ -238,4 +372,65 @@ async fn issue_requires_a_project_once_there_is_a_choice() {
     let err = body["error"].as_str().unwrap();
     assert!(err.contains("project is required"), "{err}");
     assert!(err.contains("ONLY") && err.contains("OTHER"), "{err}");
+}
+
+#[tokio::test]
+async fn reconcile_returns_json_body() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let resp = c
+        .post(format!("{base}/api/sync/reconcile"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], json!(true));
+}
+
+#[tokio::test]
+async fn client_reconcile_tolerates_json_body() {
+    let app = tu::spawn().await;
+    let base = format!("http://{}", app.addr);
+    let client = Client::new(&base, Some(app.token.clone()));
+    // must not panic or return Err on a 202 with body
+    client.reconcile().await.unwrap();
+}
+
+#[tokio::test]
+async fn events_accept_session_cookie_for_browser_clients() {
+    let app = tu::spawn().await;
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let mut events = tu::EventStream::connect_with_cookie(&base, &app.session_token).await;
+
+    // No seeded catch-all: this test files into its own project.
+    c_ok(
+        reqwest::Client::new()
+            .post(format!("{base}/api/projects"))
+            .header("authorization", &auth)
+            .json(&json!({ "key": "EVT", "name": "Events" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+    );
+
+    let response = reqwest::Client::new()
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({ "title": "cookie client event", "project": "EVT" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(events.next_type().await, "card.created");
+}
+
+fn c_ok(status: reqwest::StatusCode) {
+    assert!(status.is_success(), "setup failed: {status}");
 }

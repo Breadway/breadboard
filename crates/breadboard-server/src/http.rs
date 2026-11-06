@@ -21,7 +21,10 @@ use crate::{api, auth, device, webhook, AppState};
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
         .route("/me", get(auth::me))
-        .route("/projects", get(api::list_projects).post(api::create_project))
+        .route(
+            "/projects",
+            get(api::list_projects).post(api::create_project),
+        )
         .route(
             "/projects/{id}",
             get(api::get_project).patch(api::update_project),
@@ -34,6 +37,7 @@ pub fn router(state: AppState) -> Router {
                 .delete(api::delete_epic),
         )
         .route("/cycles", get(api::list_cycles).post(api::create_cycle))
+        .route("/cycles/{id}", axum::routing::patch(api::update_cycle))
         .route("/cycles/{id}/start", post(api::start_cycle))
         .route("/cycles/{id}/end", post(api::end_cycle))
         .route("/issues", get(api::list_issues).post(api::create_issue))
@@ -47,7 +51,10 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
-        .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
+        .route(
+            "/repos/{owner}/{name}",
+            axum::routing::delete(api::remove_repo),
+        )
         .route("/agents", get(api::list_agents))
         .route("/agents/status", get(api::agent_status))
         .route(
@@ -63,8 +70,14 @@ pub fn router(state: AppState) -> Router {
         .route("/sync/reconcile", post(api::reconcile_now))
         .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))
-        .route("/notifications/read-all", post(api::mark_all_notifications_read))
-        .route("/notifications/{id}/read", post(api::mark_notification_read))
+        .route(
+            "/notifications/read-all",
+            post(api::mark_all_notifications_read),
+        )
+        .route(
+            "/notifications/{id}/read",
+            post(api::mark_notification_read),
+        )
         .route(
             "/notifications/prefs",
             get(api::get_notification_prefs).put(api::set_notification_prefs),
@@ -91,9 +104,8 @@ pub fn router(state: AppState) -> Router {
     if let Some(dir) = &state.config.web_dir {
         if dir.is_dir() {
             let index = dir.join("index.html");
-            router = router.fallback_service(
-                ServeDir::new(dir).not_found_service(ServeFile::new(index)),
-            );
+            router = router
+                .fallback_service(ServeDir::new(dir).not_found_service(ServeFile::new(index)));
             tracing::info!(dir = %dir.display(), "serving web SPA");
         } else {
             tracing::warn!(dir = %dir.display(), "web_dir does not exist: not serving SPA");
@@ -132,11 +144,53 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 /// Server-sent events: every [`breadboard_core::BoardEvent`] as it is published.
 async fn events(
     State(state): State<AppState>,
+    _user: auth::AuthUser,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    let stream = BroadcastStream::new(state.bus.subscribe()).filter_map(|msg| match msg {
-        Ok(event) => Some(Ok(Event::default().json_data(&event).unwrap_or_default())),
-        Err(_) => None,
-    });
+    let mut shutdown = state.shutdown.subscribe();
+    let shutdown = async move {
+        if !*shutdown.borrow() {
+            let _ = shutdown.changed().await;
+        }
+    };
+    let stream = futures::StreamExt::take_until(event_stream(state.bus.subscribe()), shutdown);
 
     Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+}
+
+fn event_stream(
+    receiver: tokio::sync::broadcast::Receiver<breadboard_core::BoardEvent>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    BroadcastStream::new(receiver)
+        // A lagged receiver has missed board changes. End the response so
+        // EventSource reconnects and the client can fetch a fresh snapshot.
+        .take_while(|msg| msg.is_ok())
+        .map(|msg| match msg {
+            Ok(event) => Ok(Event::default().json_data(&event).unwrap_or_default()),
+            Err(_) => unreachable!("broadcast errors end the event stream"),
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::event_stream;
+    use breadboard_core::BoardEvent;
+    use futures::StreamExt;
+
+    #[tokio::test]
+    async fn broadcast_lag_ends_event_stream_for_resync() {
+        let (tx, receiver) = tokio::sync::broadcast::channel(1);
+        tx.send(BoardEvent::CardCreated {
+            id: 1,
+            key: "BREAD-1".into(),
+        })
+        .unwrap();
+        tx.send(BoardEvent::CardCreated {
+            id: 2,
+            key: "BREAD-2".into(),
+        })
+        .unwrap();
+
+        let mut stream = Box::pin(event_stream(receiver));
+        assert!(stream.next().await.is_none());
+    }
 }

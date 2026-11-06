@@ -83,20 +83,19 @@ pub struct PollRequest {
     device_code: String,
 }
 
-pub async fn poll(
-    State(app): State<AppState>,
-    Json(body): Json<PollRequest>,
-) -> Response {
-    let row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT expires_at, token FROM device_codes WHERE device_code = ?1",
-    )
-    .bind(&body.device_code)
-    .fetch_optional(&app.db)
-    .await
-    .unwrap_or(None);
+pub async fn poll(State(app): State<AppState>, Json(body): Json<PollRequest>) -> Response {
+    let row: Option<(String, Option<String>)> =
+        sqlx::query_as("SELECT expires_at, token FROM device_codes WHERE device_code = ?1")
+            .bind(&body.device_code)
+            .fetch_optional(&app.db)
+            .await
+            .unwrap_or(None);
 
     let Some((expires_at, token)) = row else {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "invalid device_code" })))
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "invalid device_code" })),
+        )
             .into_response();
     };
 
@@ -160,12 +159,11 @@ pub async fn approve(
         code
     };
 
-    let row: Option<(String, Option<i64>)> = sqlx::query_as(
-        "SELECT expires_at, approved_by FROM device_codes WHERE user_code = ?1",
-    )
-    .bind(&code)
-    .fetch_optional(&app.db)
-    .await?;
+    let row: Option<(String, Option<i64>)> =
+        sqlx::query_as("SELECT expires_at, approved_by FROM device_codes WHERE user_code = ?1")
+            .bind(&code)
+            .fetch_optional(&app.db)
+            .await?;
     let Some((expires_at, approved_by)) = row else {
         return Err(AppError::bad_request("unknown code"));
     };

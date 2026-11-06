@@ -52,6 +52,11 @@ export interface Cycle {
   starts_on: string;
   ends_on: string;
   closed: boolean;
+  project_ids: number[];
+}
+
+export interface NewCycle {
+  name: string; starts_on: string; ends_on: string; project_ids?: number[];
 }
 
 export interface ForgejoRef {
@@ -153,12 +158,15 @@ export interface ImportRequest {
   project: string;
   markdown: string;
   dry_run?: boolean;
+  repair?: boolean;
 }
 
 export interface ImportResult {
   epics_created: string[];
   issues_created: string[];
   skipped: string[];
+  remote_would_create: string[];
+  pending_writebacks: { key: string; error: string }[];
 }
 
 export interface NewIssue {
@@ -364,7 +372,16 @@ export class BreadboardClient {
       throw new ApiError(res.status, msg);
     }
     if (res.status === 204) return undefined as T;
-    return res.json() as Promise<T>;
+    const text = await res.text();
+    if (!text || text.trim() === "") {
+      return undefined as T;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      // tolerate empty or non-JSON body for void endpoints (e.g. older reconcile)
+      return undefined as T;
+    }
   }
 
   health = () => this.req<Health>("GET", "/healthz");
@@ -405,8 +422,10 @@ export class BreadboardClient {
   deleteEpic = (id: number) => this.req<void>("DELETE", `/api/epics/${id}`);
 
   listCycles = () => this.req<Cycle[]>("GET", "/api/cycles");
-  createCycle = (c: { name: string; starts_on: string; ends_on: string }) =>
+  createCycle = (c: NewCycle) =>
     this.req<Cycle>("POST", "/api/cycles", c);
+  updateCycle = (id: number, patch: { project_ids: number[] }) =>
+    this.req<Cycle>("PATCH", `/api/cycles/${id}`, patch);
   startCycle = (id: number) => this.req<Cycle>("POST", `/api/cycles/${id}/start`);
   endCycle = (id: number) => this.req<Cycle>("POST", `/api/cycles/${id}/end`);
 

@@ -1,0 +1,11 @@
+name = "breadboard-desktop"
+description = "Native desktop shell for breadboard"
+binaries = ["breadboard-desktop"]
+system_deps = ["webkit2gtk-4.1", "gtk3", "libsoup3", "openssl"]
+optional_system_deps = []
+bread_deps = []
+license_file = "LICENSE"
+desktop_file = "breadboard-desktop.desktop"
+
+[install]
+post_install = []

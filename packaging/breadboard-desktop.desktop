@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=breadboard
+Comment=Issue tracker for the bread ecosystem
+Exec=breadboard-desktop
+Icon=applications-development
+Terminal=false
+Categories=Development;

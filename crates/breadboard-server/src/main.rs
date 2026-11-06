@@ -5,6 +5,7 @@
 //! sync engine (webhooks, reconcile, writeback) lands in milestone 4.
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use anyhow::Context;
 use breadboard_server::{auth, config::Config, db, http, notify, store, sync, AppState};
@@ -20,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let started = Instant::now();
     let config = Config::load().context("loading breadboard.toml")?;
     tracing::info!(
         listen = %config.listen,
@@ -34,7 +36,15 @@ async fn main() -> anyhow::Result<()> {
     let db = db::connect(&config.database_url())
         .await
         .context("opening database")?;
+    tracing::info!(
+        elapsed_ms = elapsed_ms(started),
+        "startup stage: database ready"
+    );
     store::ensure_seed(&db).await?;
+    tracing::info!(
+        elapsed_ms = elapsed_ms(started),
+        "startup stage: seed checked"
+    );
 
     if auth::dev_login_enabled() {
         tracing::warn!("BREADBOARD_DEV_LOGIN=1: /auth/dev-login is enabled (insecure, dev only)");
@@ -42,6 +52,10 @@ async fn main() -> anyhow::Result<()> {
 
     let listen = config.listen.clone();
     let state = AppState::new(db, config).context("building app state")?;
+    tracing::info!(
+        elapsed_ms = elapsed_ms(started),
+        "startup stage: app state built"
+    );
 
     if state.forgejo.is_configured() {
         sync::spawn_reconcile(state.clone());
@@ -61,23 +75,52 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    let shutdown = state.shutdown.clone();
     let app = http::router(state);
+    tracing::info!(
+        elapsed_ms = elapsed_ms(started),
+        "startup stage: router built"
+    );
 
     let addr: SocketAddr = listen.parse().context("parsing listen address")?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("binding {addr}"))?;
-    tracing::info!(%addr, "listening");
+    let bound = listener.local_addr().context("local_addr after bind")?;
+    tracing::info!(
+        requested = %addr,
+        %bound,
+        elapsed_ms = elapsed_ms(started),
+        "listening"
+    );
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
         .context("server error")?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+async fn shutdown_signal(shutdown: tokio::sync::watch::Sender<bool>) {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut terminate = signal(SignalKind::terminate()).expect("register SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {},
+            _ = terminate.recv() => {},
+        }
+    }
+
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await.ok();
+
     tracing::info!("shutdown signal received");
+    shutdown.send_replace(true);
 }

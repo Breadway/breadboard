@@ -126,12 +126,13 @@ pub async fn list_projects(db: &SqlitePool) -> AppResult<Vec<Project>> {
 }
 
 pub async fn get_project(db: &SqlitePool, id: i64) -> AppResult<Project> {
-    let row: ProjectRow =
-        sqlx::query_as(&format!("SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"))
-            .bind(id)
-            .fetch_optional(db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: ProjectRow = sqlx::query_as(&format!(
+        "SELECT {PROJECT_COLS} FROM projects WHERE id = ?1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
     Ok(row.into())
 }
 
@@ -288,14 +289,12 @@ impl From<EpicRow> for Epic {
     }
 }
 
-const EPIC_COLS: &str =
-    "id, key, title, description, project_id, archived, created_at, updated_at";
+const EPIC_COLS: &str = "id, key, title, description, project_id, archived, created_at, updated_at";
 
 pub async fn list_epics(db: &SqlitePool) -> AppResult<Vec<Epic>> {
-    let rows: Vec<EpicRow> =
-        sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
-            .fetch_all(db)
-            .await?;
+    let rows: Vec<EpicRow> = sqlx::query_as(&format!("SELECT {EPIC_COLS} FROM epics ORDER BY key"))
+        .fetch_all(db)
+        .await?;
     Ok(rows.into_iter().map(Into::into).collect())
 }
 
@@ -400,13 +399,17 @@ pub async fn delete_epic(db: &SqlitePool, id: i64) -> AppResult<()> {
 /// Per-status child-issue counts for an epic (or, with `epic_id = None`, for
 /// issues with no epic; the backlog).
 pub async fn epic_progress(db: &SqlitePool, epic_id: i64) -> AppResult<[(String, i64); 5]> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status",
-    )
-    .bind(epic_id)
-    .fetch_all(db)
-    .await?;
-    let count = |s: &str| rows.iter().find(|(st, _)| st == s).map(|(_, n)| *n).unwrap_or(0);
+    let rows: Vec<(String, i64)> =
+        sqlx::query_as("SELECT status, COUNT(*) FROM issues WHERE epic_id = ?1 GROUP BY status")
+            .bind(epic_id)
+            .fetch_all(db)
+            .await?;
+    let count = |s: &str| {
+        rows.iter()
+            .find(|(st, _)| st == s)
+            .map(|(_, n)| *n)
+            .unwrap_or(0)
+    };
     Ok([
         ("backlog".into(), count("backlog")),
         ("todo".into(), count("todo")),
@@ -429,26 +432,36 @@ struct CycleRow {
     closed: i64,
 }
 
-impl From<CycleRow> for Cycle {
-    fn from(r: CycleRow) -> Self {
-        Cycle {
-            id: r.id,
-            name: r.name,
-            starts_on: r.starts_on.parse().unwrap_or_default(),
-            ends_on: r.ends_on.parse().unwrap_or_default(),
-            closed: r.closed != 0,
-        }
-    }
+async fn hydrate_cycle(db: &SqlitePool, r: CycleRow) -> AppResult<Cycle> {
+    let project_ids = sqlx::query_scalar(
+        "SELECT project_id FROM cycle_projects WHERE cycle_id = ?1 ORDER BY project_id",
+    )
+    .bind(r.id)
+    .fetch_all(db)
+    .await?;
+    Ok(Cycle {
+        id: r.id,
+        name: r.name,
+        starts_on: r.starts_on.parse().unwrap_or_default(),
+        ends_on: r.ends_on.parse().unwrap_or_default(),
+        closed: r.closed != 0,
+        project_ids,
+    })
 }
 
 const CYCLE_COLS: &str = "id, name, starts_on, ends_on, closed";
 
 pub async fn list_cycles(db: &SqlitePool) -> AppResult<Vec<Cycle>> {
-    let rows: Vec<CycleRow> =
-        sqlx::query_as(&format!("SELECT {CYCLE_COLS} FROM cycles ORDER BY starts_on DESC"))
-            .fetch_all(db)
-            .await?;
-    Ok(rows.into_iter().map(Into::into).collect())
+    let rows: Vec<CycleRow> = sqlx::query_as(&format!(
+        "SELECT {CYCLE_COLS} FROM cycles ORDER BY starts_on DESC"
+    ))
+    .fetch_all(db)
+    .await?;
+    let mut cycles = Vec::with_capacity(rows.len());
+    for row in rows {
+        cycles.push(hydrate_cycle(db, row).await?);
+    }
+    Ok(cycles)
 }
 
 pub async fn get_cycle(db: &SqlitePool, id: i64) -> AppResult<Cycle> {
@@ -457,7 +470,7 @@ pub async fn get_cycle(db: &SqlitePool, id: i64) -> AppResult<Cycle> {
         .fetch_optional(db)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(row.into())
+    hydrate_cycle(db, row).await
 }
 
 pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
@@ -465,17 +478,85 @@ pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
         return Err(AppError::bad_request("name is required"));
     }
     if new.ends_on < new.starts_on {
-        return Err(AppError::bad_request("ends_on must be on or after starts_on"));
+        return Err(AppError::bad_request(
+            "ends_on must be on or after starts_on",
+        ));
     }
+    let mut tx = db.begin().await?;
     let row: CycleRow = sqlx::query_as(&format!(
         "INSERT INTO cycles (name, starts_on, ends_on) VALUES (?1, ?2, ?3) RETURNING {CYCLE_COLS}"
     ))
     .bind(&new.name)
     .bind(new.starts_on.to_string())
     .bind(new.ends_on.to_string())
-    .fetch_one(db)
+    .fetch_one(&mut *tx)
     .await?;
-    Ok(row.into())
+    for project_id in new
+        .project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists == 0 {
+            return Err(AppError::bad_request("unknown project id"));
+        }
+        sqlx::query("INSERT INTO cycle_projects (cycle_id, project_id) VALUES (?1, ?2)")
+            .bind(row.id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_cycle(db, row.id).await
+}
+
+pub async fn update_cycle_projects(
+    db: &SqlitePool,
+    id: i64,
+    project_ids: &[i64],
+) -> AppResult<Cycle> {
+    let mut tx = db.begin().await?;
+    let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cycles WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if exists == 0 {
+        return Err(AppError::NotFound);
+    }
+    for project_id in project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects WHERE id = ?1")
+            .bind(project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if exists == 0 {
+            return Err(AppError::bad_request("unknown project id"));
+        }
+    }
+    sqlx::query("DELETE FROM cycle_projects WHERE cycle_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    for project_id in project_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+    {
+        sqlx::query("INSERT INTO cycle_projects (cycle_id, project_id) VALUES (?1, ?2)")
+            .bind(id)
+            .bind(project_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_cycle(db, id).await
 }
 
 pub async fn set_cycle_closed(db: &SqlitePool, id: i64, closed: bool) -> AppResult<Cycle> {
@@ -533,8 +614,14 @@ const ISSUE_COLS: &str = "id, key, project_id, title, body, status, priority, ty
 /// Fields whose changes are recorded in `sync_log`. Of these, `title` / `body` /
 /// `status` / `assignee_id` / `labels` also drive Forgejo writeback;
 /// `milestone` is inbound-only.
-pub const SYNCED_FIELDS: &[&str] =
-    &["title", "body", "status", "assignee_id", "labels", "milestone"];
+pub const SYNCED_FIELDS: &[&str] = &[
+    "title",
+    "body",
+    "status",
+    "assignee_id",
+    "labels",
+    "milestone",
+];
 
 async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
     let labels: Vec<String> =
@@ -591,12 +678,11 @@ pub async fn get_issue(db: &SqlitePool, id: i64) -> AppResult<Issue> {
 }
 
 pub async fn get_issue_by_key(db: &SqlitePool, key: &str) -> AppResult<Issue> {
-    let row: IssueRow =
-        sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
-            .bind(key)
-            .fetch_optional(db)
-            .await?
-            .ok_or(AppError::NotFound)?;
+    let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE key = ?1"))
+        .bind(key)
+        .fetch_optional(db)
+        .await?
+        .ok_or(AppError::NotFound)?;
     hydrate(db, row).await
 }
 
@@ -694,6 +780,28 @@ pub async fn create_issue(
         }
     };
 
+    let cycle_id = if let Some(explicit) = new.cycle_id {
+        Some(explicit)
+    } else {
+        let matches: Vec<i64> = sqlx::query_scalar(
+            "SELECT c.id FROM cycles c JOIN cycle_projects cp ON cp.cycle_id = c.id \
+             WHERE cp.project_id = ?1 AND c.closed = 0 ORDER BY c.id",
+        )
+        .bind(project.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        match matches.as_slice() {
+            [] => None,
+            [id] => Some(*id),
+            _ => {
+                return Err(AppError::Conflict(format!(
+                    "project {} is selected by multiple open cycles; specify cycle_id explicitly",
+                    project.key
+                )))
+            }
+        }
+    };
+
     let number: i64 = project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(project.id)
@@ -719,7 +827,7 @@ pub async fn create_issue(
     .bind(new.assignee_id)
     .bind(reporter_id)
     .bind(new.epic_id)
-    .bind(new.cycle_id)
+    .bind(cycle_id)
     .bind(&ts)
     .fetch_one(&mut *tx)
     .await?;
@@ -764,12 +872,22 @@ pub async fn update_issue(
             return Err(AppError::bad_request("title must not be empty"));
         }
         if *title != before.title {
-            set_col!("title", title.trim(), Some(before.title.clone()), Some(title.clone()));
+            set_col!(
+                "title",
+                title.trim(),
+                Some(before.title.clone()),
+                Some(title.clone())
+            );
         }
     }
     if let Some(body) = &patch.body {
         if *body != before.body {
-            set_col!("body", body.as_str(), Some(before.body.clone()), Some(body.clone()));
+            set_col!(
+                "body",
+                body.as_str(),
+                Some(before.body.clone()),
+                Some(body.clone())
+            );
         }
     }
     if let Some(status) = patch.status {
@@ -988,12 +1106,14 @@ pub async fn add_link(
     target_id: i64,
     kind: LinkKind,
 ) -> AppResult<()> {
-    sqlx::query("INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)")
-        .bind(issue_id)
-        .bind(target_id)
-        .bind(kind.as_str())
-        .execute(db)
-        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, ?3)",
+    )
+    .bind(issue_id)
+    .bind(target_id)
+    .bind(kind.as_str())
+    .execute(db)
+    .await?;
     Ok(())
 }
 
@@ -1035,6 +1155,25 @@ pub async fn import_issue(
     source: SyncSource,
 ) -> AppResult<Issue> {
     let mut tx = db.begin().await?;
+    // Only genuinely new, current issues inherit defaults. Reconcile imports
+    // of older backlog are historical and must not be retroactively scheduled;
+    // PRs are read-mostly and never inherit issue scheduling defaults.
+    let cycle_id = if !is_pr && is_current_external_issue(created_at, updated_at) {
+        let matches: Vec<i64> = sqlx::query_scalar(
+            "SELECT c.id FROM cycles c JOIN cycle_projects cp ON cp.cycle_id = c.id \
+             WHERE cp.project_id = ?1 AND c.closed = 0 ORDER BY c.id",
+        )
+        .bind(project.id)
+        .fetch_all(&mut *tx)
+        .await?;
+        match matches.as_slice() {
+            [] => None,
+            [id] => Some(*id),
+            _ => None, // Ambiguous defaults require an explicit local choice.
+        }
+    } else {
+        None
+    };
     let n: i64 = project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(project.id)
@@ -1044,9 +1183,9 @@ pub async fn import_issue(
 
     let row: IssueRow = sqlx::query_as(&format!(
         "INSERT INTO issues
-            (key, project_id, title, body, status, priority, type, assignee_id,
+            (key, project_id, title, body, status, priority, type, assignee_id, cycle_id,
              forgejo_repo, forgejo_number, milestone, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'none', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
          RETURNING {ISSUE_COLS}"
     ))
     .bind(&key)
@@ -1056,6 +1195,7 @@ pub async fn import_issue(
     .bind(status.as_str())
     .bind(if is_pr { "pr" } else { "issue" })
     .bind(assignee_id)
+    .bind(cycle_id)
     .bind(repo)
     .bind(number)
     .bind(milestone)
@@ -1085,6 +1225,18 @@ pub async fn import_issue(
 
     tx.commit().await?;
     hydrate(db, row).await
+}
+
+fn is_current_external_issue(created_at: &str, updated_at: &str) -> bool {
+    let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+        return false;
+    };
+    let Ok(updated) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    let now = chrono::Utc::now();
+    created.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
+        && updated.with_timezone(&chrono::Utc) >= now - chrono::Duration::days(30)
 }
 
 /// Insert or update a synced comment (matched by `(issue_id, external_id)`).
@@ -1172,24 +1324,30 @@ pub async fn link_issue(
     number: i64,
 ) -> AppResult<Issue> {
     let ts = now_rfc3339();
-    sqlx::query(
-        "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1",
-    )
-    .bind(issue_id)
-    .bind(repo)
-    .bind(number)
-    .bind(&ts)
-    .execute(db)
-    .await?;
-    sqlx::query(
-        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
-         VALUES (?1, 'created', NULL, ?2, 'breadboard', NULL, ?3)",
-    )
-    .bind(issue_id)
-    .bind(format!("{repo}#{number}"))
-    .bind(&ts)
-    .execute(db)
-    .await?;
+    let mut tx = db.begin().await?;
+    let result = sqlx::query(
+        "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1 AND forgejo_repo IS NULL",
+    ).bind(issue_id).bind(repo).bind(number).bind(&ts).execute(&mut *tx).await;
+    // A concurrent webhook may have linked the exact same remote issue. Only
+    // interpret a uniqueness conflict as success when that link exists.
+    if let Err(error) = result {
+        tx.rollback().await?;
+        if let Some(already) = find_issue_by_forgejo(db, repo, number).await? {
+            return Ok(already);
+        }
+        return Err(error.into());
+    }
+    let affected = result.unwrap().rows_affected();
+    if affected == 0 {
+        tx.rollback().await?;
+        if let Some(already) = find_issue_by_forgejo(db, repo, number).await? {
+            return Ok(already);
+        }
+        return Err(AppError::Conflict("issue was linked concurrently".into()));
+    }
+    sqlx::query("INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at) VALUES (?1, 'created', NULL, ?2, 'breadboard', NULL, ?3)")
+        .bind(issue_id).bind(format!("{repo}#{number}")).bind(&ts).execute(&mut *tx).await?;
+    tx.commit().await?;
     let row: IssueRow = sqlx::query_as(&format!("SELECT {ISSUE_COLS} FROM issues WHERE id = ?1"))
         .bind(issue_id)
         .fetch_one(db)
@@ -1198,7 +1356,7 @@ pub async fn link_issue(
 }
 
 /// Claim a local, not-yet-linked issue that matches an incoming Forgejo issue
-/// by project + exact title, created moments ago. This closes a race between
+/// by project + exact title, regardless of age. This closes a race between
 /// `writeback_new_issue`'s own `link_issue` call and the webhook for the issue
 /// it just created arriving back at us first: without this, both paths insert
 /// their own row for the same Forgejo issue, producing a duplicate.
@@ -1209,19 +1367,23 @@ pub async fn claim_unlinked_issue(
     repo: &str,
     number: i64,
 ) -> AppResult<Option<Issue>> {
-    let cutoff = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
-    let row: Option<IssueRow> = sqlx::query_as(&format!(
+    let mut rows: Vec<IssueRow> = sqlx::query_as(&format!(
         "SELECT {ISSUE_COLS} FROM issues
-         WHERE project_id = ?1 AND forgejo_repo IS NULL AND title = ?2 AND created_at >= ?3
-         ORDER BY created_at DESC LIMIT 1"
+         WHERE project_id = ?1 AND forgejo_repo IS NULL AND title = ?2
+         ORDER BY created_at DESC"
     ))
     .bind(project_id)
     .bind(title)
-    .bind(&cutoff)
-    .fetch_optional(db)
+    .fetch_all(db)
     .await?;
-    let Some(row) = row else { return Ok(None) };
-    link_issue(db, row.id, repo, number).await.map(Some)
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    rows.truncate(1);
+    match link_issue(db, rows[0].id, repo, number).await {
+        Ok(issue) => Ok(Some(issue)),
+        Err(_) => find_issue_by_forgejo(db, repo, number).await,
+    }
 }
 
 pub async fn set_comment_external_id(
@@ -1489,7 +1651,12 @@ pub struct NotificationPrefs {
 
 impl Default for NotificationPrefs {
     fn default() -> Self {
-        Self { assigned: true, mention: true, cycle: true, digest: false }
+        Self {
+            assigned: true,
+            mention: true,
+            cycle: true,
+            digest: false,
+        }
     }
 }
 

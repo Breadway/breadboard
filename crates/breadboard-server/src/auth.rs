@@ -14,11 +14,11 @@ use axum::{Json, RequestPartsExt};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use breadboard_core::User;
 use chrono::{Duration, Utc};
-use time::Duration as CookieDuration;
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use time::Duration as CookieDuration;
 
 use crate::error::{AppError, AppResult};
 use crate::{store, AppState};
@@ -80,12 +80,11 @@ where
         if let Some(value) = parts.headers.get(header::AUTHORIZATION) {
             if let Some(token) = value.to_str().ok().and_then(|v| v.strip_prefix("Bearer ")) {
                 let hash = sha256_hex(token.trim());
-                let user_id: Option<i64> = sqlx::query_scalar(
-                    "SELECT user_id FROM api_tokens WHERE token_hash = ?1",
-                )
-                .bind(&hash)
-                .fetch_optional(&app.db)
-                .await?;
+                let user_id: Option<i64> =
+                    sqlx::query_scalar("SELECT user_id FROM api_tokens WHERE token_hash = ?1")
+                        .bind(&hash)
+                        .fetch_optional(&app.db)
+                        .await?;
                 if let Some(uid) = user_id {
                     sqlx::query("UPDATE api_tokens SET last_used = ?2 WHERE token_hash = ?1")
                         .bind(&hash)
@@ -103,12 +102,11 @@ where
         let jar = parts.extract::<CookieJar>().await.unwrap_or_default();
         if let Some(cookie) = jar.get(SESSION_COOKIE) {
             let hash = sha256_hex(cookie.value());
-            let row: Option<(i64, String)> = sqlx::query_as(
-                "SELECT user_id, expires_at FROM sessions WHERE token_hash = ?1",
-            )
-            .bind(&hash)
-            .fetch_optional(&app.db)
-            .await?;
+            let row: Option<(i64, String)> =
+                sqlx::query_as("SELECT user_id, expires_at FROM sessions WHERE token_hash = ?1")
+                    .bind(&hash)
+                    .fetch_optional(&app.db)
+                    .await?;
             if let Some((uid, expires_at)) = row {
                 let live = chrono::DateTime::parse_from_rfc3339(&expires_at)
                     .map(|e| e > Utc::now())
@@ -312,7 +310,11 @@ pub async fn logout(State(app): State<AppState>, jar: CookieJar) -> Response {
             .await
             .ok();
     }
-    (jar.remove(clear_cookie(SESSION_COOKIE)), StatusCode::NO_CONTENT).into_response()
+    (
+        jar.remove(clear_cookie(SESSION_COOKIE)),
+        StatusCode::NO_CONTENT,
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]

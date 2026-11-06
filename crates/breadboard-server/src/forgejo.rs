@@ -71,6 +71,9 @@ impl FgIssue {
     pub fn is_closed(&self) -> bool {
         self.state == "closed"
     }
+    pub fn is_merged(&self) -> bool {
+        self.pull_request.as_ref().is_some_and(|p| p.merged)
+    }
     pub fn label_names(&self) -> Vec<String> {
         self.labels.iter().map(|l| l.name.clone()).collect()
     }
@@ -133,9 +136,15 @@ impl Forgejo {
         &self,
         rb: reqwest::RequestBuilder,
     ) -> anyhow::Result<T> {
-        let resp = rb.send().await.context("forgejo request failed")?;
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(20), rb.send())
+            .await
+            .context("forgejo request timed out")?
+            .context("forgejo request failed")?;
         let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
+        let body = tokio::time::timeout(std::time::Duration::from_secs(20), resp.text())
+            .await
+            .context("forgejo response body timed out")?
+            .unwrap_or_default();
         if !status.is_success() {
             return Err(anyhow!("forgejo {status}: {body}"));
         }
@@ -152,8 +161,7 @@ impl Forgejo {
     ) -> anyhow::Result<Vec<FgIssue>> {
         let mut out = Vec::new();
         for page in 1..=50u32 {
-            let mut url =
-                format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page={page}");
+            let mut url = format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page={page}");
             if let Some(s) = since {
                 url.push_str(&format!("&since={}", urlencoding::encode(s)));
             }
@@ -173,6 +181,21 @@ impl Forgejo {
             &format!("/repos/{owner}/{repo}/issues/{number}"),
         ))
         .await
+    }
+
+    pub async fn find_import_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        marker: &str,
+    ) -> anyhow::Result<Option<FgIssue>> {
+        let issues: Vec<FgIssue> = self
+            .json(self.req(
+                reqwest::Method::GET,
+                &format!("/repos/{owner}/{repo}/issues?state=all&limit=50&page=1"),
+            ))
+            .await?;
+        Ok(issues.into_iter().find(|issue| issue.body.contains(marker)))
     }
 
     pub async fn issue_comments(
@@ -346,12 +369,18 @@ impl FgPrObject {
             number: self.number,
             title: self.title,
             body: self.body,
-            state: if self.merged { "closed".into() } else { self.state },
+            state: if self.merged {
+                "closed".into()
+            } else {
+                self.state
+            },
             labels: self.labels,
             assignees: self.assignees,
             milestone: self.milestone,
             user: self.user,
-            pull_request: Some(FgPullRequestStub { merged: self.merged }),
+            pull_request: Some(FgPullRequestStub {
+                merged: self.merged,
+            }),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

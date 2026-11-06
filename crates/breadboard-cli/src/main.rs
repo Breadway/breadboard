@@ -18,7 +18,8 @@ fn parse_status(s: &str) -> std::result::Result<Status, String> {
 }
 
 fn parse_priority(s: &str) -> std::result::Result<Priority, String> {
-    Priority::parse(s).ok_or_else(|| format!("unknown priority {s:?} (none|low|medium|high|urgent)"))
+    Priority::parse(s)
+        .ok_or_else(|| format!("unknown priority {s:?} (none|low|medium|high|urgent)"))
 }
 
 fn parse_claim_mode(s: &str) -> std::result::Result<ClaimMode, String> {
@@ -44,7 +45,11 @@ enum AgentsAction {
 }
 
 #[derive(Parser)]
-#[command(name = "breadboard", version, about = "Issue tracker for the bread ecosystem")]
+#[command(
+    name = "breadboard",
+    version,
+    about = "Issue tracker for the bread ecosystem"
+)]
 struct Cli {
     /// Server base URL (overrides config / $BREADBOARD_SERVER).
     #[arg(long, global = true, env = "BREADBOARD_SERVER")]
@@ -137,13 +142,15 @@ enum Command {
     },
     /// Run a Forgejo reconcile pass now.
     Sync,
-    /// Import a markdown outline (## headings → epics, `- [ ]` items → issues).
+    /// Import a markdown outline (## headings → epics, `- [ ]` items → issues; --repair retries existing unlinked cards).
     Import {
         file: std::path::PathBuf,
         #[arg(long)]
         project: String,
         #[arg(long)]
         dry_run: bool,
+        #[arg(long)]
+        repair: bool,
     },
     /// Open the full-screen terminal board.
     Tui,
@@ -279,8 +286,12 @@ enum CycleAction {
         /// YYYY-MM-DD
         ends_on: chrono::NaiveDate,
     },
-    Start { name: String },
-    End { name: String },
+    Start {
+        name: String,
+    },
+    End {
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -396,7 +407,13 @@ async fn main() -> Result<()> {
             for a in client.issue_activity(&key).await? {
                 let who = a.actor.unwrap_or_else(|| a.source.clone());
                 let val = a.new_value.unwrap_or_else(|| "—".into());
-                println!("{}  {:<12} {} → {}  ({who})", a.at, a.field, a.old_value.unwrap_or_else(|| "—".into()), val);
+                println!(
+                    "{}  {:<12} {} → {}  ({who})",
+                    a.at,
+                    a.field,
+                    a.old_value.unwrap_or_else(|| "—".into()),
+                    val
+                );
             }
         }
         Command::Inbox { read } => {
@@ -406,7 +423,12 @@ async fn main() -> Result<()> {
             } else {
                 let box_ = client.inbox(false).await?;
                 for n in &box_.notifications {
-                    println!("{}  {}{}", n.created_at, if n.read { "  " } else { "• " }, n.body);
+                    println!(
+                        "{}  {}{}",
+                        n.created_at,
+                        if n.read { "  " } else { "• " },
+                        n.body
+                    );
                 }
                 println!("\n{} unread", box_.unread);
             }
@@ -519,15 +541,32 @@ async fn main() -> Result<()> {
             println!("released {key}");
         }
         Command::Agents { action } => agents(&client, action).await?,
-        Command::Import { file, project, dry_run } => {
+        Command::Import {
+            file,
+            project,
+            dry_run,
+            repair,
+        } => {
             let md = std::fs::read_to_string(&file)
                 .with_context(|| format!("reading {}", file.display()))?;
-            let r = client.import(&project, &md, dry_run).await?;
+            let r = client.import(&project, &md, dry_run, repair).await?;
             if dry_run {
                 println!("(dry run)");
             }
             println!("epics:   {}", r.epics_created.join(", "));
             println!("issues:  {} created", r.issues_created.len());
+            if !r.remote_would_create.is_empty() {
+                println!(
+                    "would create remotely: {}",
+                    r.remote_would_create.join(", ")
+                );
+            }
+            if !r.pending_writebacks.is_empty() {
+                for pending in r.pending_writebacks {
+                    eprintln!("writeback pending for {}: {}", pending.key, pending.error);
+                }
+                anyhow::bail!("one or more Forgejo writebacks were denied or failed");
+            }
             if !r.skipped.is_empty() {
                 println!("skipped: {} (already present)", r.skipped.len());
             }
@@ -553,7 +592,10 @@ async fn auth(client: &Client, cfg: &mut CliConfig, action: AuthAction) -> Resul
             println!("signed out (local token cleared)");
         }
         AuthAction::Login => {
-            let start = client.device_start().await.context("starting device auth")?;
+            let start = client
+                .device_start()
+                .await
+                .context("starting device auth")?;
             println!("\n  Open:  {}", start.verification_uri_complete);
             println!("  Code:  {}\n", start.user_code);
             let _ = std::process::Command::new("xdg-open")
@@ -569,12 +611,16 @@ async fn auth(client: &Client, cfg: &mut CliConfig, action: AuthAction) -> Resul
                 match client.device_poll(&start.device_code).await? {
                     DevicePoll::Pending => print!("."),
                     DevicePoll::Approved(t) => break t,
-                    DevicePoll::Expired => bail!("\nthe code expired: run `breadboard auth login` again"),
+                    DevicePoll::Expired => {
+                        bail!("\nthe code expired: run `breadboard auth login` again")
+                    }
                 }
             };
             cfg.token = Some(token);
             cfg.save()?;
-            let who = Client::new(cfg.server.clone(), cfg.token.clone()).me().await?;
+            let who = Client::new(cfg.server.clone(), cfg.token.clone())
+                .me()
+                .await?;
             println!("\nsigned in as {}", who.login);
         }
     }
@@ -635,7 +681,11 @@ async fn set_archived(client: &Client, key: &str, archived: bool) -> Result<()> 
             },
         )
         .await?;
-    println!("{} {}", if p.archived { "archived" } else { "unarchived" }, p.key);
+    println!(
+        "{} {}",
+        if p.archived { "archived" } else { "unarchived" },
+        p.key
+    );
     Ok(())
 }
 
@@ -658,7 +708,11 @@ async fn epics(client: &Client, action: EpicAction) -> Result<()> {
                 );
             }
         }
-        EpicAction::New { key, title, project } => {
+        EpicAction::New {
+            key,
+            title,
+            project,
+        } => {
             let project_id = match project {
                 Some(p) => Some(resolve_project(client, &p).await?),
                 None => None,
@@ -676,7 +730,13 @@ async fn epics(client: &Client, action: EpicAction) -> Result<()> {
         EpicAction::Rename { key, title } => {
             let id = resolve_epic(client, &key).await?;
             let e = client
-                .update_epic(id, &EpicPatch { title: Some(title), ..Default::default() })
+                .update_epic(
+                    id,
+                    &EpicPatch {
+                        title: Some(title),
+                        ..Default::default()
+                    },
+                )
                 .await?;
             println!("renamed {} → {}", e.key, e.title);
         }
@@ -689,9 +749,19 @@ async fn epics(client: &Client, action: EpicAction) -> Result<()> {
 async fn set_epic_archived(client: &Client, key: &str, archived: bool) -> Result<()> {
     let id = resolve_epic(client, key).await?;
     let e = client
-        .update_epic(id, &EpicPatch { archived: Some(archived), ..Default::default() })
+        .update_epic(
+            id,
+            &EpicPatch {
+                archived: Some(archived),
+                ..Default::default()
+            },
+        )
         .await?;
-    println!("{} {}", if e.archived { "archived" } else { "unarchived" }, e.key);
+    println!(
+        "{} {}",
+        if e.archived { "archived" } else { "unarchived" },
+        e.key
+    );
     Ok(())
 }
 
@@ -732,6 +802,7 @@ async fn cycles(client: &Client, action: CycleAction) -> Result<()> {
                     name,
                     starts_on,
                     ends_on,
+                    project_ids: Vec::new(),
                 })
                 .await?;
             println!("created cycle {} ({})", c.id, c.name);

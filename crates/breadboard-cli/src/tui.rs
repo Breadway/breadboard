@@ -11,7 +11,9 @@ use anyhow::Result;
 use breadboard_client::Client;
 use breadboard_core::{Issue, Status};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
+use crossterm::terminal::{
+    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+};
 use crossterm::ExecutableCommand;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -38,7 +40,9 @@ impl App {
     fn selected(&self) -> Option<&Issue> {
         let status = Status::ALL[self.col];
         let col = self.column_issues(status);
-        self.rows[self.col].selected().and_then(|i| col.get(i).copied())
+        self.rows[self.col]
+            .selected()
+            .and_then(|i| col.get(i).copied())
     }
 
     async fn refresh(&mut self) {
@@ -81,7 +85,9 @@ impl App {
     }
 
     async fn move_card(&mut self, delta: isize) {
-        let Some(issue) = self.selected().cloned() else { return };
+        let Some(issue) = self.selected().cloned() else {
+            return;
+        };
         let target = (self.col as isize + delta).clamp(0, 4) as usize;
         if target == self.col {
             return;
@@ -132,7 +138,10 @@ pub async fn run(client: Client) -> Result<()> {
     res
 }
 
-async fn event_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
+async fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    app: &mut App,
+) -> Result<()> {
     loop {
         terminal.draw(|f| draw(f, app))?;
 
@@ -190,7 +199,11 @@ fn draw(f: &mut Frame, app: &App) {
         let focused = idx == app.col;
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" {} ({}) ", labels[idx], app.column_issues(status).len()))
+            .title(format!(
+                " {} ({}) ",
+                labels[idx],
+                app.column_issues(status).len()
+            ))
             .border_style(if focused {
                 Style::new().fg(Color::Rgb(0xd9, 0x8a, 0x3d))
             } else {
@@ -240,7 +253,10 @@ fn detail_popup(f: &mut Frame, issue: &Issue) {
         }
     }
     lines.push(Line::raw(""));
-    lines.push(Line::from(Span::styled("any key to close", Style::new().dim())));
+    lines.push(Line::from(Span::styled(
+        "any key to close",
+        Style::new().dim(),
+    )));
 
     f.render_widget(Clear, area);
     f.render_widget(

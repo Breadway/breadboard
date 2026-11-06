@@ -3,8 +3,8 @@
 mod common;
 
 use breadboard_core::NotificationKind;
-use breadboard_server::store::{self, NotificationPrefs};
 use breadboard_server::notify;
+use breadboard_server::store::{self, NotificationPrefs};
 
 fn prefs(digest: bool) -> NotificationPrefs {
     NotificationPrefs {
@@ -50,14 +50,23 @@ async fn digest_window_selection_and_empty_skip() {
 
     // 1. Nothing pending: no digest, and no last-sent time recorded.
     notify::send_daily_digest(&app.state).await;
-    assert!(store::list_notifications(db, u1, false).await.unwrap().is_empty());
+    assert!(store::list_notifications(db, u1, false)
+        .await
+        .unwrap()
+        .is_empty());
     assert!(last_digest_at(db, u1).await.is_none());
 
     // 2. Three unread items for u1, one for the opted-out u2.
     for i in 0..3 {
-        store::create_notification(db, u1, NotificationKind::Assigned, None, &format!("item {i}"))
-            .await
-            .unwrap();
+        store::create_notification(
+            db,
+            u1,
+            NotificationKind::Assigned,
+            None,
+            &format!("item {i}"),
+        )
+        .await
+        .unwrap();
     }
     store::create_notification(db, u2, NotificationKind::Assigned, None, "for other")
         .await
@@ -68,7 +77,11 @@ async fn digest_window_selection_and_empty_skip() {
     let n1 = store::list_notifications(db, u1, false).await.unwrap();
     let bodies = digest_bodies(&n1);
     assert_eq!(bodies.len(), 1, "one digest for u1");
-    assert!(bodies[0].contains("3 unread updates"), "body: {}", bodies[0]);
+    assert!(
+        bodies[0].contains("3 unread updates"),
+        "body: {}",
+        bodies[0]
+    );
     assert!(bodies[0].contains("item 0") && bodies[0].contains("item 2"));
 
     let n2 = store::list_notifications(db, u2, false).await.unwrap();
@@ -79,7 +92,11 @@ async fn digest_window_selection_and_empty_skip() {
     //    digest row is excluded from its own window, so nothing new is sent.
     notify::send_daily_digest(&app.state).await;
     let n1 = store::list_notifications(db, u1, false).await.unwrap();
-    assert_eq!(digest_bodies(&n1).len(), 1, "no second digest without new items");
+    assert_eq!(
+        digest_bodies(&n1).len(),
+        1,
+        "no second digest without new items"
+    );
 
     // 4. One new unread item: the next digest covers only that one.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -92,7 +109,11 @@ async fn digest_window_selection_and_empty_skip() {
     let bodies = digest_bodies(&n1);
     assert_eq!(bodies.len(), 2, "second digest sent for the new item");
     // list_notifications orders newest first.
-    assert!(bodies[0].contains("1 unread update\n"), "body: {}", bodies[0]);
+    assert!(
+        bodies[0].contains("1 unread update\n"),
+        "body: {}",
+        bodies[0]
+    );
     assert!(bodies[0].contains("fresh mention"));
 }
 

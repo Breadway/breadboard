@@ -453,9 +453,19 @@ server.tool(
     name: z.string(),
     starts_on: z.string().describe("cycle start date in YYYY-MM-DD form"),
     ends_on: z.string().describe("cycle end date in YYYY-MM-DD form"),
+    project_ids: z.array(z.number().int()).optional().describe("projects whose new issues default to this cycle"),
   },
-  ({ name, starts_on, ends_on }) => run(() => client.createCycle({ name, starts_on, ends_on })),
+  ({ name, starts_on, ends_on, project_ids }) => run(() => client.createCycle({ name, starts_on, ends_on, project_ids })),
 );
+
+server.tool("update_cycle_projects", "Replace the projects selected for a cycle's new-issue defaults. Existing issues are not moved.", {
+  cycle: z.string().describe("cycle name or id"),
+  project_ids: z.array(z.number().int()),
+}, ({ cycle, project_ids }) => run(async () => {
+  const id = await resolveCycleId(cycle);
+  if (id === undefined) throw new Error("cycle name or id is required");
+  return client.updateCycle(id, { project_ids });
+}));
 
 server.tool(
   "start_cycle",
@@ -642,8 +652,9 @@ server.tool(
     project: z.string(),
     markdown: z.string(),
     dry_run: z.boolean().optional(),
+    repair: z.boolean().optional().describe("Retry existing unlinked local cards; use dry_run first to list remote keys."),
   },
-  ({ project, markdown, dry_run }) => run(() => client.importMarkdown({ project, markdown, dry_run })),
+  ({ project, markdown, dry_run, repair }) => run(() => client.importMarkdown({ project, markdown, dry_run, repair })),
 );
 
 server.tool(

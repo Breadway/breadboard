@@ -231,6 +231,7 @@ pub struct Cycle {
     pub starts_on: chrono::NaiveDate,
     pub ends_on: chrono::NaiveDate,
     pub closed: bool,
+    pub project_ids: Vec<i64>,
 }
 
 /// Reference to the Forgejo issue or PR an issue is synced with.

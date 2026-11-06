@@ -18,7 +18,9 @@ use crate::forgejo::{split_repo, FgComment, FgIssue, FgIssuePatch, FgUser};
 use crate::{store, AppState};
 
 fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 /// Forgejo only tracks open/closed; breadboard's finer statuses survive except
@@ -131,15 +133,30 @@ fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
 }
 
 /// Sync a PR's "closes" relationships: link it to the issue(s) its body
-/// references (so the board shows the connection instead of two
-/// seemingly-unrelated cards), and, since Forgejo doesn't reliably
-/// auto-close every issue in a comma-separated "Closes #a, #b" list
-/// (confirmed: only the first one actually closes), cascade breadboard's
-/// own `done` status onto all of them once the PR itself is merged/closed,
-/// best-effort closing their Forgejo issues too. Idempotent (`add_link` is
-/// `INSERT OR IGNORE`, and the status cascade no-ops once already done):
-/// safe to call on every sync of a PR, not just its creation.
-async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &str, pr_done: bool) {
+/// references, and handle status cascade for its closing targets.
+///
+/// Rules (documented in Documentation.md):
+/// - Links are always created/ensured.
+/// - A closed PR (merged or not) appears as `done` on the board.
+/// - On merge (`pr_merged`): targets go to `done`, unless the target carries
+///   the label `verify-before-done` (case-insensitive), in which case the
+///   target goes to `review` instead.
+/// - On closed-unmerged (`pr_closed && !pr_merged`): never move targets to
+///   `done`. Targets stay in their current status. If a target is `done`,
+///   move it to `review` (undoing a completion the rejected PR had caused).
+/// - An open PR only maintains links; it does not change target statuses.
+/// - Reopening a PR (now open) does not cascade done; a later merge can.
+/// - Non-PR issues continue to mirror close/reopen to done/todo as before.
+///
+/// Idempotent and safe to call on every PR sync.
+async fn sync_pr_closes(
+    state: &AppState,
+    repo: &str,
+    pr_issue_id: i64,
+    body: &str,
+    pr_closed: bool,
+    pr_merged: bool,
+) {
     let mut targets = Vec::new();
     for number in parse_closes_refs(body) {
         if let Ok(Some(t)) = store::find_issue_by_forgejo(&state.db, repo, number).await {
@@ -148,7 +165,8 @@ async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &s
     }
     if let Ok(project) = store::get_project_by_repo(&state.db, repo).await {
         for n in parse_closes_key_refs(body, &project.key) {
-            if let Ok(t) = store::get_issue_by_key(&state.db, &format!("{}-{n}", project.key)).await {
+            if let Ok(t) = store::get_issue_by_key(&state.db, &format!("{}-{n}", project.key)).await
+            {
                 targets.push(t);
             }
         }
@@ -162,39 +180,112 @@ async fn sync_pr_closes(state: &AppState, repo: &str, pr_issue_id: i64, body: &s
         let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
         let _ = store::add_link(&state.db, target.id, pr_issue_id, LinkKind::ClosedBy).await;
 
-        if !pr_done || target.status == Status::Done {
+        if !pr_closed {
+            // Open PR: just the links; no status effect on targets.
             continue;
         }
-        let patch = IssuePatch {
-            status: Some(Status::Done),
-            ..Default::default()
-        };
-        let Ok(updated) =
-            store::update_issue(&state.db, &target.key, &patch, None, SyncSource::ForgejoWebhook)
-                .await
-        else {
-            continue;
-        };
-        emit_change_events(state, &target, &updated);
-        let Some(fref) = &updated.forgejo_ref else { continue };
-        if !state.forgejo.is_configured() {
-            continue;
-        }
-        if let Ok((owner, r)) = split_repo(&fref.repo) {
-            if let Err(e) = state
-                .forgejo
-                .patch_issue(
-                    owner,
-                    r,
-                    fref.number,
-                    FgIssuePatch {
-                        state: Some("closed"),
-                        ..Default::default()
-                    },
-                )
-                .await
-            {
-                tracing::warn!(key = %updated.key, error = %e, "closing cascaded issue on forgejo failed");
+
+        let has_verify = target
+            .labels
+            .iter()
+            .any(|l| l.eq_ignore_ascii_case("verify-before-done"));
+
+        if pr_merged {
+            let desired = if has_verify {
+                Status::Review
+            } else {
+                Status::Done
+            };
+            if target.status == desired {
+                continue;
+            }
+            let patch = IssuePatch {
+                status: Some(desired),
+                ..Default::default()
+            };
+            let Ok(updated) = store::update_issue(
+                &state.db,
+                &target.key,
+                &patch,
+                None,
+                SyncSource::ForgejoWebhook,
+            )
+            .await
+            else {
+                continue;
+            };
+            emit_change_events(state, &target, &updated);
+            let Some(fref) = &updated.forgejo_ref else {
+                continue;
+            };
+            if !state.forgejo.is_configured() {
+                continue;
+            }
+            if let Ok((owner, r)) = split_repo(&fref.repo) {
+                let want_state = if desired == Status::Done {
+                    "closed"
+                } else {
+                    "open"
+                };
+                if let Err(e) = state
+                    .forgejo
+                    .patch_issue(
+                        owner,
+                        r,
+                        fref.number,
+                        FgIssuePatch {
+                            state: Some(want_state),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(key = %updated.key, error = %e, "cascaded status writeback to forgejo failed");
+                }
+            }
+        } else {
+            // closed-unmerged: never complete; revert done targets to review.
+            if target.status != Status::Done {
+                continue;
+            }
+            let patch = IssuePatch {
+                status: Some(Status::Review),
+                ..Default::default()
+            };
+            let Ok(updated) = store::update_issue(
+                &state.db,
+                &target.key,
+                &patch,
+                None,
+                SyncSource::ForgejoWebhook,
+            )
+            .await
+            else {
+                continue;
+            };
+            emit_change_events(state, &target, &updated);
+            let Some(fref) = &updated.forgejo_ref else {
+                continue;
+            };
+            if !state.forgejo.is_configured() {
+                continue;
+            }
+            if let Ok((owner, r)) = split_repo(&fref.repo) {
+                if let Err(e) = state
+                    .forgejo
+                    .patch_issue(
+                        owner,
+                        r,
+                        fref.number,
+                        FgIssuePatch {
+                            state: Some("open"),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(key = %updated.key, error = %e, "reopening cascaded target on forgejo failed");
+                }
             }
         }
     }
@@ -262,7 +353,15 @@ pub async fn apply_issue(
         )
         .await?;
         if fg.is_pr() {
-            sync_pr_closes(state, repo, issue.id, &fg.body, status == Status::Done).await;
+            sync_pr_closes(
+                state,
+                repo,
+                issue.id,
+                &fg.body,
+                fg.is_closed(),
+                fg.is_merged(),
+            )
+            .await;
         }
         state.bus.publish(BoardEvent::CardCreated {
             id: issue.id,
@@ -310,33 +409,51 @@ pub async fn apply_issue(
     }
 
     let fg_title = fg.title.trim();
-    field!("title", fg_title != before.title, before.title.clone(), fg_title.to_string(), {
-        patch.title = Some(fg_title.to_string());
-    });
+    field!(
+        "title",
+        fg_title != before.title,
+        before.title.clone(),
+        fg_title.to_string(),
+        {
+            patch.title = Some(fg_title.to_string());
+        }
+    );
     let (fg_body, before_body) = (norm_body(&fg.body), norm_body(&before.body));
-    field!("body", fg_body != before_body, before_body.clone(), fg_body.clone(), {
-        patch.body = Some(fg_body.clone());
-    });
+    field!(
+        "body",
+        fg_body != before_body,
+        before_body.clone(),
+        fg_body.clone(),
+        {
+            patch.body = Some(fg_body.clone());
+        }
+    );
     field!(
         "status",
         target_status != before.status,
         before.status.as_str().to_string(),
         target_status.as_str().to_string(),
-        { patch.status = Some(target_status); }
+        {
+            patch.status = Some(target_status);
+        }
     );
     field!(
         "assignee_id",
         assignee_id != before.assignee_id,
         opt_id(before.assignee_id),
         opt_id(assignee_id),
-        { patch.assignee_id = Some(assignee_id); }
+        {
+            patch.assignee_id = Some(assignee_id);
+        }
     );
     field!(
         "labels",
         !same_set(&labels, &before.labels),
         before.labels.join(", "),
         labels.join(", "),
-        { patch.labels = Some(labels.clone()); }
+        {
+            patch.labels = Some(labels.clone());
+        }
     );
     let fg_milestone = fg.milestone.as_ref().map(|m| m.title.clone());
     field!(
@@ -344,7 +461,9 @@ pub async fn apply_issue(
         fg_milestone != before.milestone,
         before.milestone.clone().unwrap_or_default(),
         fg_milestone.clone().unwrap_or_default(),
-        { patch.milestone = Some(fg_milestone.clone()); }
+        {
+            patch.milestone = Some(fg_milestone.clone());
+        }
     );
 
     if !drift.is_empty() {
@@ -376,7 +495,15 @@ pub async fn apply_issue(
         }
     }
     if after.issue_type == IssueType::Pr {
-        sync_pr_closes(state, repo, after.id, &after.body, after.status == Status::Done).await;
+        sync_pr_closes(
+            state,
+            repo,
+            after.id,
+            &after.body,
+            after.status == Status::Done,
+            fg.is_merged(),
+        )
+        .await;
     }
     Ok(())
 }
@@ -413,7 +540,9 @@ pub async fn apply_comment(
 /// The webhook echo this generates is absorbed by the equality check in
 /// [`apply_issue`].
 pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
-    let Some(fref) = &after.forgejo_ref else { return };
+    let Some(fref) = &after.forgejo_ref else {
+        return;
+    };
     if !state.forgejo.is_configured() {
         return;
     }
@@ -421,7 +550,9 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
         Ok(true) => {}
         _ => return,
     }
-    let Ok((owner, repo)) = split_repo(&fref.repo) else { return };
+    let Ok((owner, repo)) = split_repo(&fref.repo) else {
+        return;
+    };
 
     // Labels round-trip for both issues and PRs; the rest is issues-only
     // (PRs are mirrored read-mostly).
@@ -440,13 +571,16 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
 
     let title = (after.title != before.title).then_some(after.title.as_str());
     let body = (norm_body(&after.body) != norm_body(&before.body)).then(|| norm_body(&after.body));
-    let state_change = if after.status != before.status
-        && after.status.is_closed() != before.status.is_closed()
-    {
-        Some(if after.status.is_closed() { "closed" } else { "open" })
-    } else {
-        None
-    };
+    let state_change =
+        if after.status != before.status && after.status.is_closed() != before.status.is_closed() {
+            Some(if after.status.is_closed() {
+                "closed"
+            } else {
+                "open"
+            })
+        } else {
+            None
+        };
     let assignees: Option<Vec<String>> = if after.assignee_id != before.assignee_id {
         match after.assignee_id {
             Some(id) => match store::get_user(&state.db, id).await {
@@ -480,17 +614,44 @@ pub async fn writeback(state: &AppState, before: &Issue, after: &Issue) {
 /// repo, create it on Forgejo too and link it. Returns the linked issue (or the
 /// original if nothing was pushed). Best-effort: logs on failure.
 pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
-    if issue.forgejo_ref.is_some() || !state.forgejo.is_configured() {
-        return issue;
+    writeback_new_issue_result(state, issue).await.0
+}
+
+/// Create and link a new issue, retaining a useful failure reason for callers
+/// that need to expose a retryable pending-writeback state.
+pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issue, Option<String>) {
+    if issue.forgejo_ref.is_some() {
+        return (issue, None);
     }
     let Ok(project) = store::get_project(&state.db, issue.project_id).await else {
-        return issue;
+        return (issue, None);
     };
-    let Some(repo) = project.forgejo_repo else { return issue };
+    let Some(repo) = project.forgejo_repo else {
+        return (issue, None);
+    };
     if !matches!(store::repo_enabled(&state.db, &repo).await, Ok(true)) {
-        return issue;
+        return (issue, None);
     }
-    let Ok((owner, name)) = split_repo(&repo) else { return issue };
+    if !state.forgejo.is_configured() {
+        return (
+            issue,
+            Some(format!("Forgejo writeback is not configured for {repo}")),
+        );
+    }
+    let (owner, name) = match split_repo(&repo) {
+        Ok(parts) => parts,
+        Err(e) => return (issue, Some(e.to_string())),
+    };
+
+    // Embed a stable, private HTML comment so a timed-out POST can be
+    // discovered on retry rather than creating another Forgejo issue.
+    let marker = format!("<!-- breadboard-import:{} -->", issue.key);
+    if let Ok(Some(found)) = state.forgejo.find_import_issue(owner, name, &marker).await {
+        return match store::link_issue(&state.db, issue.id, &repo, found.number).await {
+            Ok(linked) => (linked, None),
+            Err(error) => (issue, Some(error.to_string())),
+        };
+    }
 
     let assignees: Vec<String> = match issue.assignee_id {
         Some(id) => match store::get_user(&state.db, id).await {
@@ -500,17 +661,22 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
         None => vec![],
     };
 
+    let remote_body = format!("{}\n\n{}", issue.body, marker);
     let fg = match state
         .forgejo
-        .create_issue(owner, name, &issue.title, &issue.body, &assignees)
+        .create_issue(owner, name, &issue.title, &remote_body, &assignees)
         .await
     {
         Ok(fg) => fg,
         Err(e) => {
             tracing::warn!(key = %issue.key, error = %e, "forgejo issue creation failed");
-            return issue;
+            return (issue, Some(e.to_string()));
         }
     };
+
+    // Link immediately after creation. If the webhook wins the race, its
+    // atomic claim links this exact pending card and this operation observes
+    // the existing link instead of creating an orphaned duplicate.
 
     if !issue.labels.is_empty() {
         if let Err(e) = state
@@ -524,12 +690,34 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
 
     match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
         Ok(linked) => {
+            if linked.status == Status::Done {
+                if let Err(error) = state
+                    .forgejo
+                    .patch_issue(
+                        owner,
+                        name,
+                        fg.number,
+                        FgIssuePatch {
+                            state: Some("closed"),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
+                }
+            }
             tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
-            linked
+            (linked, None)
         }
         Err(e) => {
+            if let Ok(Some(linked)) =
+                store::find_issue_by_forgejo(&state.db, &repo, fg.number).await
+            {
+                return (linked, None);
+            }
             tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
-            issue
+            (issue, Some(e.to_string()))
         }
     }
 }
@@ -538,11 +726,7 @@ pub async fn writeback_new_issue(state: &AppState, issue: Issue) -> Issue {
 /// issue (it belongs to the old project's repo, if any) with a note pointing
 /// at the new key, then re-creates it fresh on the new project's repo via
 /// `writeback_new_issue` if one is mapped.
-pub async fn move_project(
-    state: &AppState,
-    key: &str,
-    new_project: &Project,
-) -> AppResult<Issue> {
+pub async fn move_project(state: &AppState, key: &str, new_project: &Project) -> AppResult<Issue> {
     let (issue, old_ref) = store::move_issue_project(&state.db, key, new_project).await?;
 
     if let Some(old) = old_ref {
@@ -582,15 +766,23 @@ pub async fn move_project(
 /// Push a breadboard-authored comment to Forgejo, recording the returned id so
 /// the webhook echo is deduped. Best-effort: logs on failure.
 pub async fn writeback_comment(state: &AppState, issue: &Issue, comment_id: i64, body: &str) {
-    let Some(fref) = &issue.forgejo_ref else { return };
+    let Some(fref) = &issue.forgejo_ref else {
+        return;
+    };
     if !state.forgejo.is_configured() {
         return;
     }
     if !matches!(store::repo_enabled(&state.db, &fref.repo).await, Ok(true)) {
         return;
     }
-    let Ok((owner, repo)) = split_repo(&fref.repo) else { return };
-    match state.forgejo.create_comment(owner, repo, fref.number, body).await {
+    let Ok((owner, repo)) = split_repo(&fref.repo) else {
+        return;
+    };
+    match state
+        .forgejo
+        .create_comment(owner, repo, fref.number, body)
+        .await
+    {
         Ok(created) => {
             store::set_comment_external_id(&state.db, comment_id, created.id)
                 .await
@@ -629,7 +821,9 @@ pub async fn reconcile_once(state: &AppState) -> anyhow::Result<()> {
                         tracing::warn!(%repo, number = fg.number, error = %e, "reconcile apply failed");
                     }
                 }
-                store::set_repo_synced_at(&state.db, &repo, &started).await.ok();
+                store::set_repo_synced_at(&state.db, &repo, &started)
+                    .await
+                    .ok();
                 tracing::info!(%repo, count, "reconcile pass complete");
             }
             Err(e) => tracing::warn!(%repo, error = %e, "reconcile fetch failed"),
@@ -642,8 +836,7 @@ pub async fn reconcile_once(state: &AppState) -> anyhow::Result<()> {
 pub fn spawn_reconcile(state: AppState) {
     let interval_mins = state.config.forgejo.reconcile_interval_mins.max(1);
     tokio::spawn(async move {
-        let mut tick =
-            tokio::time::interval(std::time::Duration::from_secs(interval_mins * 60));
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_mins * 60));
         loop {
             tick.tick().await;
             if let Err(e) = reconcile_once(&state).await {

@@ -160,7 +160,7 @@ async fn claim_events_flow_over_sse() {
     let created = create_issue(&c, &base, &auth, "sse claim item").await;
     let key = created["key"].as_str().unwrap().to_string();
 
-    let mut events = tu::EventStream::connect(&base).await;
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
     c.post(format!("{base}/api/issues/{key}/claim"))
         .header("authorization", &auth)
         .json(&json!({ "agent_name": "opencode" }))

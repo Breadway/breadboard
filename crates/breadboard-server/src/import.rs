@@ -7,10 +7,17 @@
 
 use breadboard_core::{Status, SyncSource};
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, OnceLock},
+};
 
 use crate::dto::{NewEpic, NewIssue};
 use crate::error::{AppError, AppResult};
 use crate::{store, AppState};
+
+static IMPORT_LOCKS: OnceLock<std::sync::Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 pub struct ImportRequest {
@@ -19,6 +26,10 @@ pub struct ImportRequest {
     pub markdown: String,
     #[serde(default)]
     pub dry_run: bool,
+    /// Repair existing local cards without a Forgejo link. Ordinary imports
+    /// only mirror cards created by that request.
+    #[serde(default)]
+    pub repair: bool,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -26,6 +37,15 @@ pub struct ImportResult {
     pub epics_created: Vec<String>,
     pub issues_created: Vec<String>,
     pub skipped: Vec<String>,
+    pub remote_would_create: Vec<String>,
+    /// Issues that remain local because Forgejo creation or linking failed.
+    pub pending_writebacks: Vec<PendingWriteback>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PendingWriteback {
+    pub key: String,
+    pub error: String,
 }
 
 struct ParsedEpic {
@@ -52,7 +72,10 @@ fn parse(md: &str) -> Vec<ParsedEpic> {
             .or_else(|| line.strip_prefix("* "))
             .or_else(|| line.strip_prefix("+ "));
         if let Some(item) = checkbox {
-            let (done, text) = if let Some(t) = item.strip_prefix("[x]").or_else(|| item.strip_prefix("[X]")) {
+            let (done, text) = if let Some(t) = item
+                .strip_prefix("[x]")
+                .or_else(|| item.strip_prefix("[X]"))
+            {
                 (true, t.trim())
             } else if let Some(t) = item.strip_prefix("[ ]") {
                 (false, t.trim())
@@ -106,30 +129,62 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
     let project = store::get_project_by_key(&state.db, &req.project)
         .await
         .map_err(|_| AppError::bad_request(format!("unknown project `{}`", req.project)))?;
+    let lock = IMPORT_LOCKS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .entry(project.id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().await;
 
     let parsed = parse(&req.markdown);
-    let existing_issues: std::collections::HashSet<String> = store::list_issues(
+    let issue_list = store::list_issues(
         &state.db,
         &crate::dto::IssueFilter {
             project: Some(project.key.clone()),
             ..Default::default()
         },
     )
-    .await?
-    .into_iter()
-    .map(|i| i.title.to_lowercase())
-    .collect();
-    let existing_epics: std::collections::HashSet<String> = store::list_epics(&state.db)
-        .await?
-        .into_iter()
-        .map(|e| e.title.to_lowercase())
-        .collect();
+    .await?;
+    let mut existing_issues: std::collections::HashMap<String, Vec<breadboard_core::Issue>> =
+        HashMap::new();
+    for issue in issue_list {
+        existing_issues
+            .entry(issue.title.to_lowercase())
+            .or_default()
+            .push(issue);
+    }
+    let mut titles = std::collections::HashSet::new();
+    for epic in &parsed {
+        for (title, _) in &epic.issues {
+            if !titles.insert(title.to_lowercase()) {
+                return Err(AppError::bad_request(format!(
+                    "duplicate import item title `{title}` is ambiguous"
+                )));
+            }
+        }
+    }
+    let mut existing_epics: std::collections::HashMap<String, Vec<i64>> = HashMap::new();
+    for epic in store::list_epics(&state.db).await? {
+        existing_epics
+            .entry(epic.title.to_lowercase())
+            .or_default()
+            .push(epic.id);
+    }
 
     let mut result = ImportResult::default();
     let mut ep_seq = 1;
 
     for pe in parsed {
-        let epic_id = if existing_epics.contains(&pe.title.to_lowercase()) {
+        let epic_matches = existing_epics.get(&pe.title.to_lowercase());
+        if epic_matches.is_some_and(|matches| matches.len() > 1) {
+            return Err(AppError::bad_request(format!(
+                "multiple existing epics match `{}`; refusing ambiguous import",
+                pe.title
+            )));
+        }
+        let epic_id = if epic_matches.is_some() {
             result.skipped.push(format!("epic: {}", pe.title));
             store::list_epics(&state.db)
                 .await?
@@ -162,12 +217,52 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
         };
 
         for (title, done) in pe.issues {
-            if existing_issues.contains(&title.to_lowercase()) {
+            if let Some(matches) = existing_issues.get(&title.to_lowercase()) {
+                if matches.len() > 1 {
+                    return Err(AppError::bad_request(format!(
+                        "multiple existing cards match `{title}`; refusing ambiguous import"
+                    )));
+                }
+            }
+            if let Some(existing) = existing_issues
+                .get(&title.to_lowercase())
+                .and_then(|v| (v.len() == 1).then(|| v[0].clone()))
+            {
                 result.skipped.push(format!("issue: {title}"));
+                let repair_key = existing.key.clone();
+                let is_unlinked = existing.forgejo_ref.is_none();
+                if req.repair && !req.dry_run && existing.forgejo_ref.is_none() {
+                    let (linked, error) =
+                        crate::sync::writeback_new_issue_result(state, existing).await;
+                    if let Some(error) = error {
+                        result.pending_writebacks.push(PendingWriteback {
+                            key: linked.key,
+                            error,
+                        });
+                    } else if linked.forgejo_ref.is_some() {
+                        existing_issues.insert(title.to_lowercase(), vec![linked]);
+                    }
+                }
+                let repo_enabled = if let Some(repo) = &project.forgejo_repo {
+                    matches!(store::repo_enabled(&state.db, repo).await, Ok(true))
+                } else {
+                    false
+                };
+                if req.repair && req.dry_run && is_unlinked && repo_enabled {
+                    result.remote_would_create.push(repair_key);
+                }
                 continue;
             }
             if req.dry_run {
-                result.issues_created.push(title);
+                result.issues_created.push(title.clone());
+                let repo_enabled = if let Some(repo) = &project.forgejo_repo {
+                    matches!(store::repo_enabled(&state.db, repo).await, Ok(true))
+                } else {
+                    false
+                };
+                if repo_enabled {
+                    result.remote_would_create.push(title.clone());
+                }
                 continue;
             }
             let issue = store::create_issue(
@@ -193,7 +288,15 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
             .execute(&state.db)
             .await
             .ok();
-            result.issues_created.push(issue.key);
+            let (issue, error) = crate::sync::writeback_new_issue_result(state, issue).await;
+            if let Some(error) = error {
+                result.pending_writebacks.push(PendingWriteback {
+                    key: issue.key.clone(),
+                    error,
+                });
+            }
+            result.issues_created.push(issue.key.clone());
+            existing_issues.insert(title.to_lowercase(), vec![issue]);
         }
     }
     Ok(result)
@@ -218,7 +321,10 @@ mod tests {
         assert_eq!(epics.len(), 2);
         assert_eq!(epics[0].title, "Ecosystem platform pass");
         assert_eq!(epics[0].issues.len(), 2);
-        assert_eq!(epics[0].issues[0], ("pin bread-theme tag in breadclip".into(), false));
+        assert_eq!(
+            epics[0].issues[0],
+            ("pin bread-theme tag in breadclip".into(), false)
+        );
         assert_eq!(epics[0].issues[1].0, "fix the OSD bug in breadbar");
         assert!(epics[0].issues[1].1);
         assert_eq!(epics[1].issues[0].0, "breadbox sync flakiness");
