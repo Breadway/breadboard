@@ -482,7 +482,7 @@ pub async fn create_cycle(db: &SqlitePool, new: &NewCycle) -> AppResult<Cycle> {
             "ends_on must be on or after starts_on",
         ));
     }
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let row: CycleRow = sqlx::query_as(&format!(
         "INSERT INTO cycles (name, starts_on, ends_on) VALUES (?1, ?2, ?3) RETURNING {CYCLE_COLS}"
     ))
@@ -519,7 +519,7 @@ pub async fn update_cycle_projects(
     id: i64,
     project_ids: &[i64],
 ) -> AppResult<Cycle> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cycles WHERE id = ?1")
         .bind(id)
         .fetch_one(&mut *tx)
@@ -730,7 +730,7 @@ pub async fn create_issue(
 ) -> AppResult<Issue> {
     new.validate().map_err(AppError::BadRequest)?;
 
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
 
     let project: ProjectRow = match &new.project {
         Some(p) if p.parse::<i64>().is_ok() => sqlx::query_as(&format!(
@@ -853,7 +853,7 @@ pub async fn update_issue(
     source: SyncSource,
 ) -> AppResult<Issue> {
     let before = get_issue_by_key(db, key).await?;
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let mut changed: Vec<(&str, Option<String>, Option<String>)> = Vec::new();
 
     macro_rules! set_col {
@@ -1061,7 +1061,7 @@ pub async fn move_issue_project(
     }
     let old_ref = before.forgejo_ref.clone();
 
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let n: i64 = new_project.next_number;
     sqlx::query("UPDATE projects SET next_number = next_number + 1 WHERE id = ?1")
         .bind(new_project.id)
@@ -1117,6 +1117,108 @@ pub async fn add_link(
     Ok(())
 }
 
+/// Record a PR's `closes`/`closed-by` links to one target and, when `status`
+/// differs, apply the cascaded status move in the same transaction.
+///
+/// Links and closing status are written atomically: a busy database or a
+/// mid-write error can never leave a card linked but not closed (or closed
+/// without the link that explains why). Returns the updated target only when a
+/// status change was applied.
+pub async fn sync_pr_close_target(
+    db: &SqlitePool,
+    pr_issue_id: i64,
+    target_id: i64,
+    status: Option<Status>,
+    source: SyncSource,
+) -> AppResult<Option<Issue>> {
+    // Reconcile calls this repeatedly for unchanged PRs. Skip taking the write
+    // lock when both links and the status already match.
+    let links: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM issue_links \
+         WHERE (issue_id = ?1 AND target_id = ?2 AND kind = 'closes') \
+            OR (issue_id = ?2 AND target_id = ?1 AND kind = 'closed-by')",
+    )
+    .bind(pr_issue_id)
+    .bind(target_id)
+    .fetch_one(db)
+    .await?;
+    let current: Option<String> = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
+        .bind(target_id)
+        .fetch_optional(db)
+        .await?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    let needs_status = status.is_some_and(|s| s.as_str() != current);
+    if links >= 2 && !needs_status {
+        return Ok(None);
+    }
+
+    let mut tx = crate::db::begin_write(db).await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, 'closes')",
+    )
+    .bind(pr_issue_id)
+    .bind(target_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, 'closed-by')",
+    )
+    .bind(target_id)
+    .bind(pr_issue_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let Some(status) = status else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    // Re-read inside the write transaction: a concurrent writer may have moved
+    // the target between the optimistic check above and acquiring the lock.
+    let (key, current): (String, String) =
+        sqlx::query_as("SELECT key, status FROM issues WHERE id = ?1")
+            .bind(target_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if current == status.as_str() {
+        tx.commit().await?;
+        return Ok(None);
+    }
+
+    let ts = now_rfc3339();
+    sqlx::query("UPDATE issues SET status = ?2, updated_at = ?3 WHERE id = ?1")
+        .bind(target_id)
+        .bind(status.as_str())
+        .bind(&ts)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+         VALUES (?1, 'status', ?2, ?3, ?4, NULL, ?5)",
+    )
+    .bind(target_id)
+    .bind(&current)
+    .bind(status.as_str())
+    .bind(source.as_str())
+    .bind(&ts)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    let _ = sqlx::query(
+        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
+    )
+    .bind(target_id)
+    .bind(status.as_str())
+    .bind(&ts)
+    .execute(db)
+    .await;
+
+    let after = get_issue_by_key(db, &key).await?;
+    Ok(Some(after))
+}
+
 pub async fn find_issue_by_forgejo(
     db: &SqlitePool,
     repo: &str,
@@ -1154,7 +1256,7 @@ pub async fn import_issue(
     updated_at: &str,
     source: SyncSource,
 ) -> AppResult<Issue> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     // Only genuinely new, current issues inherit defaults. Reconcile imports
     // of older backlog are historical and must not be retroactively scheduled;
     // PRs are read-mostly and never inherit issue scheduling defaults.
@@ -1324,7 +1426,7 @@ pub async fn link_issue(
     number: i64,
 ) -> AppResult<Issue> {
     let ts = now_rfc3339();
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let result = sqlx::query(
         "UPDATE issues SET forgejo_repo = ?2, forgejo_number = ?3, updated_at = ?4 WHERE id = ?1 AND forgejo_repo IS NULL",
     ).bind(issue_id).bind(repo).bind(number).bind(&ts).execute(&mut *tx).await;
@@ -2089,7 +2191,7 @@ async fn update_claim_row(
     // One transaction so a partial multi-column update can never leave a
     // half-applied claim behind, and the heartbeat is always refreshed with
     // the changes it accompanies.
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
 
     if let Some(agent_name) = &input.agent_name {
         let name = agent_name.trim();
@@ -2846,7 +2948,7 @@ pub async fn find_or_create_dm(
         return get_chat_room(db, id).await;
     }
 
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let id: i64 = sqlx::query_scalar(
         "INSERT INTO chat_rooms (kind, dm_key, created_at) VALUES ('dm', ?1, ?2) RETURNING id",
     )
@@ -2903,7 +3005,7 @@ pub async fn post_chat_message(
     uploads: &[i64],
     uploader_user_id: i64,
 ) -> AppResult<ChatMessage> {
-    let mut tx = db.begin().await?;
+    let mut tx = crate::db::begin_write(db).await?;
     let row: ChatMessageRow = sqlx::query_as(
         "INSERT INTO chat_messages
             (room_id, author_member, author_display, author_kind, body, created_at)
