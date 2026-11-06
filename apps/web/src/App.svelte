@@ -111,7 +111,7 @@
     <h1>breadboard</h1>
     <p class="dim">Planning for the bread ecosystem, synced both ways with Forgejo.</p>
     <a class="btn primary big" href="/auth/login">Sign in with git.breadway.dev</a>
-    {#if store.isDev}
+    {#if store.isDev || store.devLoginAllowed}
       <div class="dev">
         <span class="dim">Dev login</span>
         <input class="field" bind:value={devLoginName} aria-label="Dev login name" />

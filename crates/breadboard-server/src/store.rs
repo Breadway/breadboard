@@ -661,14 +661,37 @@ pub async fn create_issue(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(AppError::bad_request("unknown project"))?,
-        None => sqlx::query_as(&format!(
-            "SELECT {PROJECT_COLS} FROM projects WHERE archived = 0 ORDER BY id LIMIT 1"
-        ))
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(AppError::bad_request(
-            "no project exists yet: create one first",
-        ))?,
+        // No silent default once there is a choice. Filing into whichever
+        // project happens to be first is how unrelated work ends up in a
+        // repo's tracker or in the catch-all roadmap project.
+        None => {
+            let candidates: Vec<ProjectRow> = sqlx::query_as(&format!(
+                "SELECT {PROJECT_COLS} FROM projects WHERE archived = 0 ORDER BY key"
+            ))
+            .fetch_all(&mut *tx)
+            .await?;
+            match candidates.len() {
+                // Unambiguous: the only project there is.
+                1 => candidates.into_iter().next().unwrap(),
+                0 => {
+                    return Err(AppError::bad_request(
+                        "no project exists yet: create one first (POST /api/projects). \
+                         Use a repo-backed project for that repo's code, or a native \
+                         project for work that has no repo yet.",
+                    ))
+                }
+                _ => {
+                    let keys: Vec<&str> = candidates.iter().map(|p| p.key.as_str()).collect();
+                    return Err(AppError::bad_request(format!(
+                        "project is required: file the issue where the work actually lives. \
+                         Available: {}. Use a repo-backed project only for that repo's code; \
+                         create a native project for local config, tooling, or a project not \
+                         yet on Forgejo.",
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
     };
 
     let number: i64 = project.next_number;
@@ -1826,17 +1849,22 @@ pub async fn refresh_claim_board_status(
     Ok(())
 }
 
-/// Seed a default project on an empty database so the API is usable immediately.
+/// Startup sanity check: there is deliberately no catch-all default project.
+///
+/// Seeding `ROAD` made it the silent destination for every title-only issue,
+/// including work that belonged to a repo or to a project of its own. The
+/// first issue on a fresh database now requires creating the right project
+/// (`POST /api/projects`), which keeps repo trackers and native projects
+/// honest.
 pub async fn ensure_seed(db: &SqlitePool) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
         .fetch_one(db)
         .await
         .context("counting projects")?;
     if count == 0 {
-        sqlx::query("INSERT INTO projects (key, name) VALUES ('ROAD', 'Roadmap')")
-            .execute(db)
-            .await?;
-        tracing::info!("seeded default project ROAD (Roadmap)");
+        tracing::info!(
+            "no projects yet: create one with POST /api/projects before filing issues"
+        );
     }
     Ok(())
 }

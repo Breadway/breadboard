@@ -439,7 +439,8 @@
             Agent
             {#if claim}
               <span class="agent-pill" class:stale={claimStaleFlag} style="--agent:{agentColor(claim.agent_name)}" title="Last heartbeat: {claim.last_heartbeat}">
-                🤖 {claim.agent_name} · {claim.state}{claimStaleFlag ? " · stale" : ""}
+                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                {claim.agent_name} · {claim.state}{claimStaleFlag ? " · stale" : ""}
               </span>
             {/if}
             <span class="grow"></span>
@@ -450,13 +451,29 @@
             {/if}
           </h3>
           {#if claim}
-            <p class="agent-line">
-              {claim.claimed_by_login}{claim.session_id ? ` · ${claim.session_id}` : ""}{claim.branch ? ` · ⑂ ${claim.branch}` : ""}{claim.pr_url
-                ? ` · PR`
-                : claim.pr_number
-                  ? ` · PR #${claim.pr_number}`
-                  : ""}{claim.head_sha ? ` · ${claim.head_sha.slice(0, 7)}` : ""}
-            </p>
+            <div class="agent-chips">
+              {#if claim.claimed_by_login !== store.me?.login}
+                <span class="achip" title="Claimed with this user's token">{claim.claimed_by_login}</span>
+              {/if}
+              {#if claim.session_id}
+                <span class="achip mono" title="Agent session">{claim.session_id.slice(0, 8)}</span>
+              {/if}
+              {#if claim.branch}
+                <span class="achip mono" title="Branch">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="11.5" cy="6" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4.5 5.1v5.8M11.5 7.6c0 2.2-2 2.6-4.6 3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+                  {claim.branch}
+                </span>
+              {/if}
+              {#if claim.pr_url}
+                <a class="achip mono link" href={claim.pr_url} target="_blank" rel="noreferrer" title="Pull request">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  PR{claim.pr_number ? ` #${claim.pr_number}` : ""}
+                </a>
+              {:else if claim.pr_number}
+                <span class="achip mono">PR #{claim.pr_number}</span>
+              {/if}
+              {#if claim.head_sha}<span class="achip mono" title="Head commit">{claim.head_sha.slice(0, 7)}</span>{/if}
+            </div>
             {#if claim.note}<p class="agent-note">{claim.note}</p>{/if}
             {#if claim.claimed_by !== store.me?.id}
               <p class="dim small">Claimed by someone else. Only {claim.claimed_by_login} can heartbeat or release it.</p>
@@ -820,6 +837,9 @@
   }
   .agent-sec .grow { flex: 1; }
   .agent-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     font: 600 9.5px/1 var(--font-mono);
     letter-spacing: 0.03em;
     color: var(--agent, var(--ok));
@@ -828,14 +848,46 @@
     border-radius: 5px;
     text-transform: none;
   }
+  .agent-pill svg {
+    width: 11px;
+    height: 11px;
+  }
   .agent-pill.stale {
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
-  .agent-line {
-    margin: 0;
-    font: 400 11px/1.5 var(--font-mono);
+  .agent-chips {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .achip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 10.5px;
     color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 4%, transparent);
+    border: 1px solid var(--line);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .achip svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+  }
+  .achip.link {
+    color: var(--status-review);
+    text-decoration: none;
+  }
+  .achip.link:hover {
+    border-color: color-mix(in srgb, var(--status-review) 45%, transparent);
   }
   .agent-note {
     margin: 0;

@@ -54,4 +54,20 @@ or in `.mcp.json`:
 (`kind` one of `blocks`/`blocked-by`/`relates-to`, `target` an issue key or
 id); synced `closes`/`closed-by` links are never touched.
 
+## Where to file an issue
+
+Projects are routing, not labels. Agents must pick the right one:
+
+- **Repo-backed projects** are for that repo's code only. Their cards sync to
+  the repo's tracker, so local config, dotfiles, environment problems, or a
+  misbehaving bread module do not belong there.
+- **Native (repo-less) projects** hold machine, tooling, and cross-repo work.
+- **A new project with no Forgejo repo yet** gets its own native project via
+  `create_project` now, and the repo is attached later.
+- **No catch-all.** Do not use `ROAD` (or any roadmap project) as a dumping
+  ground; if nothing fits, create the right project first.
+
+`create_issue` therefore requires `project` as soon as more than one project
+exists (a 400 lists the available keys).
+
 Mutating tools go through your MCP client's own confirmation flow.

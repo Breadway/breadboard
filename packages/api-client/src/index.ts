@@ -15,6 +15,7 @@ export interface Health {
   status: string;
   version: string;
   db: boolean;
+  dev_login?: boolean;
 }
 
 export interface User {

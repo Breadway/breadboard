@@ -135,6 +135,14 @@
       const priority = q.priority ?? optPriority;
       if (priority) input.priority = priority;
       const project = q.project ?? optProject;
+      // No silent default when there is a choice: a title-only card must not
+      // land in whichever project happens to be first (or in a repo tracker
+      // it doesn't belong to). Ask instead.
+      if (!project && store.projects.filter((p) => !p.archived).length > 1) {
+        showOptions = true;
+        store.flash("Choose a project for this issue", "error");
+        return;
+      }
       if (project) input.project = project;
       if (optEpic) input.epic_id = optEpic;
       if (optCycle) input.cycle_id = optCycle;

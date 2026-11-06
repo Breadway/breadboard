@@ -38,6 +38,28 @@ status and only removes the tint. A claim with no heartbeat for 5+ minutes
 reads as **stale** on the Agents page but never auto-expires: only an explicit
 release (or a new claim after release) removes it.
 
+### Where work belongs
+
+A project is the routing decision, not a label. File an issue where the work
+actually lives:
+
+- **Repo-backed projects** (`forgejo_repo` set, e.g. `BREAD` → `Breadway/bread`)
+  are for that repo's code. Their cards sync to the repo's tracker, so local
+  machine config, dotfiles, environment breakage, or a misbehaving bread module
+  do **not** belong there: they would pollute the repo's issue list.
+- **Native (repo-less) projects** are for work that has no repo of its own:
+  the machine, tooling, homelab operations, or several repos at once.
+- **A new project that is not on Forgejo yet** gets its own native project in
+  breadboard now and is tracked there; attach the repo later
+  (`PATCH /api/projects/{id}` with `forgejo_repo`, or `POST /api/repos`).
+- **No catch-all.** `ROAD` is no longer seeded and must not be used as a
+  dumping ground for unrelated work. On an existing database where it holds
+  cards, move each one to the project that owns it (`PUT
+  /api/issues/{key}/project`) rather than adding more.
+
+If no existing project clearly owns the work, create the right one instead of
+guessing; an issue filed in the wrong project is worse than a new project key.
+
 Priority: `none` · `low` · `medium` · `high` · `urgent`.
 
 Issue type: `issue` · `pr` (PRs are mirrored read-mostly).
@@ -56,7 +78,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/healthz` | `{ status, version, db }`; `503` if the DB is unreachable |
+| `GET` | `/healthz` | `{ status, version, db, dev_login }`; `503` if the DB is unreachable |
 | `GET` | `/events` | SSE stream of `BoardEvent` (see below) |
 | `GET` | `/auth/login` | redirect to Forgejo OAuth2 authorize (sets a state cookie) |
 | `GET` | `/auth/callback` | exchange code, upsert user, set session, redirect to `/` |
@@ -77,7 +99,7 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
 | `POST` | `/api/cycles/{id}/end` | sets `closed`, emits `cycle.ended` |
 | `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
-| `POST` | `/api/issues` | create; only `title` required. `project` defaults to the first non-archived project; key allocated from that project's counter. `201` |
+| `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. `201` |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
@@ -239,7 +261,8 @@ repo with no mapped project are skipped with a warning.
 | `ping` | connectivity check |
 | `auth login` | device flow: prints a code + URL, opens the browser, polls until approved |
 | `auth logout` · `auth status` | |
-| `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name |
+| `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name; `--project` is required once more than one project exists |
+| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project, the right home for a new project that has no repo yet |
 | `mv <key> <status>` | |
 | `claim <key> --agent NAME [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | exclusive agent claim (first wins); claiming from backlog/todo moves to doing + assigns to you |
 | `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID]` | heartbeat / update your claim (refreshes the live signal) |
@@ -252,7 +275,7 @@ repo with no mapped project are skipped with a warning.
 | `activity <key>` | change history |
 | `inbox [--read]` | your notifications; `--read` marks all read |
 | `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
-| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project |
+| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project, the right home for a new project that has no repo yet |
 | `epic list` · `epic new <KEY> <TITLE> [--project]` · `epic rename <KEY> <TITLE>` · `epic archive`/`unarchive <KEY>` | `list` shows done/total |
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |

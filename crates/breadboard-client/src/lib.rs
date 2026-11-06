@@ -28,6 +28,8 @@ pub struct Health {
     pub status: String,
     pub version: String,
     pub db: bool,
+    #[serde(default)]
+    pub dev_login: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]

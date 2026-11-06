@@ -193,13 +193,22 @@ server.tool(
 
 server.tool(
   "create_issue",
-  "Create an issue. Only title is required. If the project maps to a synced repo it is also created on Forgejo. " +
+  "Create an issue. Title is required, and so is the right project once there is more than one. " +
+    "ROUTING RULES (important): file the issue where the work actually lives. " +
+    "(1) A repo-backed project is for that repo's code and issues only; its cards sync to the repo's tracker, " +
+    "so never put local machine config, dotfiles, environment breakage, or a misbehaving bread module there. " +
+    "(2) Work about the machine, tooling, or several repos at once belongs in a native (repo-less) project; " +
+    "create one with create_project if none fits. " +
+    "(3) A brand-new project that is not on Forgejo yet should get its own native breadboard project now and be " +
+    "tracked there; attach the repo later with update_project or add_repo. " +
+    "(4) Do not use a catch-all/roadmap project (for example ROAD) as a dumping ground. " +
+    "If no existing project clearly owns the work, stop and create the right one rather than guessing. " +
     "If you later open a PR that resolves this issue, reference its key with a closing keyword in the PR body " +
     "(e.g. \"Closes ECO-17\" or \"Closes #17\"); breadboard links the PR to the issue and collapses them into " +
     "one card instead of showing two unrelated ones.",
   {
     title: z.string(),
-    project: z.string().optional().describe("project key; defaults to the first project"),
+    project: z.string().optional().describe("project key, e.g. BREAD; required when more than one project exists"),
     body: z.string().optional(),
     priority: z.enum(PRIORITIES as [string, ...string[]]).optional(),
     estimate: z.number().optional(),
@@ -420,12 +429,14 @@ server.tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => cli
 
 server.tool(
   "create_project",
-  "Create a project. Repo-less by default (for planning items); pass forgejo_repo to also map a "
-    + "synced Forgejo repo at creation time (equivalent to add_repo right after).",
+  "Create a project. Repo-less by default, which is the right choice for a new project that does not have a " +
+    "Forgejo repo yet, and for work about the machine/tooling rather than one repo's code. " +
+    "Pass forgejo_repo only when this project tracks an actual repo (equivalent to add_repo right after). " +
+    "Prefer creating a focused project over filing unrelated work into another project's tracker.",
   {
     key: z.string(),
     name: z.string(),
-    forgejo_repo: z.string().optional().describe("owner/name"),
+    forgejo_repo: z.string().optional().describe("owner/name, only for a project that tracks that repo"),
   },
   ({ key, name, forgejo_repo }) =>
     run(() => client.createProject({ key: key.toUpperCase(), name, forgejo_repo })),

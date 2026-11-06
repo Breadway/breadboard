@@ -7,13 +7,26 @@ use serde_json::{json, Value};
 async fn create_issue(c: &reqwest::Client, base: &str, auth: &str, title: &str) -> Value {
     c.post(format!("{base}/api/issues"))
         .header("authorization", auth)
-        .json(&json!({ "title": title, "project": "ROAD" }))
+        .json(&json!({ "title": title, "project": "AGENT" }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap()
+}
+
+/// A fresh database has no projects (no catch-all ROAD), so tests create the
+/// one their issues belong to.
+async fn ensure_project(c: &reqwest::Client, base: &str, auth: &str) {
+    let resp = c
+        .post(format!("{base}/api/projects"))
+        .header("authorization", auth)
+        .json(&json!({ "key": "AGENT", "name": "Agent work" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "project setup failed: {}", resp.status());
 }
 
 #[tokio::test]
@@ -23,6 +36,7 @@ async fn claim_lifecycle() {
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);
 
+    ensure_project(&c, &base, &auth).await;
     let created = create_issue(&c, &base, &auth, "agent work item").await;
     let key = created["key"].as_str().unwrap().to_string();
     assert_eq!(created["status"], "backlog");
@@ -142,6 +156,7 @@ async fn claim_events_flow_over_sse() {
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);
 
+    ensure_project(&c, &base, &auth).await;
     let created = create_issue(&c, &base, &auth, "sse claim item").await;
     let key = created["key"].as_str().unwrap().to_string();
 

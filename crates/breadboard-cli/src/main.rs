@@ -62,6 +62,8 @@ enum Command {
     /// Create an issue.
     Add {
         title: String,
+        /// Project key or id. Required once more than one project exists:
+        /// file the issue where the work actually lives, not in a catch-all.
         #[arg(long)]
         project: Option<String>,
         #[arg(long)]

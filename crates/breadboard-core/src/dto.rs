@@ -96,12 +96,17 @@ pub struct NewCycle {
 }
 
 /// Only `title` is required: the "create a card with just a title" rule.
+/// `project` is required as soon as there is more than one project, so a
+/// title-only card cannot silently land in the wrong tracker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NewIssue {
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body: String,
-    /// Project key (`BREAD`) or id. Defaults to the first non-archived project.
+    /// Project key (`BREAD`) or id. Required once more than one project
+    /// exists: there is no catch-all default. Use a repo-backed project only
+    /// for that repo's code; create a native project for local config,
+    /// tooling, or a project that has no repo yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

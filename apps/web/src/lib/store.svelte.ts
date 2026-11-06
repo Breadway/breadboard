@@ -55,6 +55,8 @@ class Store {
   me = $state<User | null>(null);
   auth = $state<AuthState>("loading");
   authError = $state<string | null>(null);
+  /** True when the server allows POST /auth/dev-login (local demos). */
+  devLoginAllowed = $state(false);
   issues = $state<Issue[]>([]);
   projects = $state<Project[]>([]);
   cycles = $state<Cycle[]>([]);
@@ -153,6 +155,12 @@ class Store {
 
   async init() {
     clearTimeout(this.#retry);
+    try {
+      const h = await api.health();
+      this.devLoginAllowed = h.dev_login ?? false;
+    } catch {
+      /* backend unreachable: init below reports it */
+    }
     try {
       this.me = await api.me();
     } catch (e) {

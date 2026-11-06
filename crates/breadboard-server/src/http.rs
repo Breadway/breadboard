@@ -118,6 +118,9 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
             "status": if db_ok { "ok" } else { "degraded" },
             "version": env!("CARGO_PKG_VERSION"),
             "db": db_ok,
+            // Public so the SPA can decide whether to offer the dev-login
+            // form (local demos); it 403s unless BREADBOARD_DEV_LOGIN=1.
+            "dev_login": crate::auth::dev_login_enabled(),
         })),
     )
 }

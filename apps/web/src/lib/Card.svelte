@@ -58,7 +58,10 @@
         title={stale
           ? `Claimed by ${claim.agent_name} · stale (no heartbeat for 5+ min) · ${claim.state}`
           : `Claimed by ${claim.agent_name} · ${claim.state} · heartbeat ${claim.last_heartbeat}`}
-      >🤖 {claim.agent_name}</span>
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {claim.agent_name}
+      </span>
     {/if}
     <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
@@ -137,16 +140,24 @@
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent);
   }
   .agent {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font: 600 9px/1 var(--font-mono);
     letter-spacing: 0.04em;
-    padding: 2px 5px;
-    border-radius: 3px;
-    max-width: 130px;
+    padding: 3px 6px 3px 5px;
+    border-radius: 4px;
+    max-width: 140px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     color: var(--agent, var(--ok));
-    background: color-mix(in srgb, var(--agent, var(--ok)) 14%, transparent);
+    background: color-mix(in srgb, var(--agent, var(--ok)) 13%, transparent);
+  }
+  .agent svg {
+    width: 10px;
+    height: 10px;
+    flex: none;
   }
   .agent.stale {
     color: var(--danger);
