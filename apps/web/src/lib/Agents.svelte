@@ -193,7 +193,12 @@
               {#if ownerDiffers}<span class="alogin" title="Claims use this user's token">{g.login}</span>{/if}
             </div>
             <span class="gbadge live" class:off={g.live === 0}>{g.live} live</span>
-            {#if g.stale > 0}<span class="gbadge stale">{g.stale} stale</span>{/if}
+            {#if g.stale > 0}
+              <span class="gbadge stale" title="No heartbeat for a while; these claims may be abandoned">
+                <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                {g.stale} stale
+              </span>
+            {/if}
             {#if g.intents.length > 0}<span class="gbadge queued">{g.intents.length} queued</span>{/if}
             <span class="grow"></span>
             {#if g.work.length}
@@ -217,7 +222,12 @@
                 {#if c.mode === "intent"}<span class="queued-pill">queued</span>{/if}
                 <span class="title">{c.issue_title}</span>
                 <span class="state {tone(c.state)}">{stateLabel(c.state)}</span>
-                {#if stale}<span class="stale-pill">stale</span>{/if}
+                {#if stale}
+                  <span class="stale-pill" title="Last heartbeat {ago(c.last_heartbeat, now)}; claim may be abandoned">
+                    <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                    stale
+                  </span>
+                {/if}
                 {#if pr}
                   <a class="chip-pr" href={pr} target="_blank" rel="noreferrer" title="Pull request">
                     <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
@@ -229,8 +239,18 @@
                     {c.branch}
                   </span>
                 {/if}
-                <span class="hb" class:stale title="Last heartbeat: {c.last_heartbeat}">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l1.7-4 2.6 8 1.7-4h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                <span
+                  class="hb"
+                  class:stale
+                  title={stale
+                    ? `Last heartbeat ${ago(c.last_heartbeat, now)}; claim may be abandoned`
+                    : `Last heartbeat ${ago(c.last_heartbeat, now)} ago`}
+                >
+                  {#if stale}
+                    <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                  {:else}
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l1.7-4 2.6 8 1.7-4h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  {/if}
                   {ago(c.last_heartbeat, now)}
                 </span>
                 <span class="acts">
@@ -493,6 +513,9 @@
     color: var(--ink-3);
   }
   .gbadge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     font: 600 9px/1 var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -618,6 +641,9 @@
     border-radius: 4px;
   }
   .stale-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
     flex: none;
     font: 600 9px/1 var(--font-mono);
     text-transform: uppercase;
@@ -665,9 +691,11 @@
     font: 400 10px/1 var(--font-mono);
     color: var(--ink-3);
   }
-  .hb svg {
+  .hb svg,
+  .clock {
     width: 10px;
     height: 10px;
+    flex: none;
   }
   .hb.stale {
     color: var(--danger);
