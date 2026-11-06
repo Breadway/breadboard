@@ -177,6 +177,14 @@
       grid-template-columns: minmax(0, 1fr) auto;
       margin: 12px 14px 2px;
     }
+    .focus {
+      display: none;
+    }
+    h2 {
+      max-width: 55vw;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
     .stack {
       grid-row: auto;
       grid-column: 1 / -1;
