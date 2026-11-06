@@ -241,16 +241,21 @@ const server = new McpServer({ name: "breadboard", version: "0.1.0" });
 // logging notifications so the client sees them without polling tools.
 
 let chatPoller: ReturnType<typeof setInterval> | undefined;
+let pollerAgent: string | undefined;
 let lastPushId = 0;
 
 function stopChatPoller() {
   if (chatPoller) clearInterval(chatPoller);
   chatPoller = undefined;
+  pollerAgent = undefined;
 }
 
-function ensureChatPoller() {
-  if (chatPoller || !autoAgentName) return;
-  const name = autoAgentName;
+function ensureChatPoller(explicit?: string) {
+  const name = explicit?.trim() || autoAgentName;
+  if (!name) return;
+  if (chatPoller && pollerAgent === name) return;
+  if (chatPoller) clearInterval(chatPoller);
+  pollerAgent = name;
   chatPoller = setInterval(() => {
     void (async () => {
       try {
@@ -711,7 +716,7 @@ server.tool(
       try {
         const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
         startKeepalive(key, created.agent_name);
-        ensureChatPoller();
+        ensureChatPoller(created.agent_name);
         return created;
       } catch (e) {
         // Re-claiming your own claim after a restart is not a conflict: find
@@ -725,7 +730,7 @@ server.tool(
           if (mine) {
             const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
             startKeepalive(key, resumed.agent_name);
-            ensureChatPoller();
+            ensureChatPoller(resumed.agent_name);
             return { ...resumed, resumed: true };
           }
         }
@@ -783,7 +788,7 @@ server.tool(
     run(async () => {
       const name = agent_name?.trim() || autoAgentName;
       if (!name) throw new Error("no agent name yet: pass agent_name or call claim_issue first");
-      ensureChatPoller();
+      ensureChatPoller(name);
       return client.setAgentMessage(name, message);
     }),
 );
@@ -861,7 +866,7 @@ server.tool(
   ({ room, enabled, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
-      ensureChatPoller();
+      ensureChatPoller(name);
       await client.setChatPushSub(room, enabled, name);
       return `${enabled ? "push on" : "push off"} for ${room}`;
     }),
@@ -879,7 +884,7 @@ server.tool(
   ({ after, ack, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
-      ensureChatPoller();
+      ensureChatPoller(name);
       const pushes = await client.listChatPushes(name, after, 100);
       if (ack && pushes.length) {
         await client.ackChatPushes(pushes[pushes.length - 1].id, name);
@@ -897,7 +902,7 @@ server.tool(
   ({ agent_name }) =>
     run(() => {
       const name = chatAgent(agent_name);
-      ensureChatPoller();
+      ensureChatPoller(name);
       return client.listChatRooms(name);
     }),
 );
@@ -916,7 +921,7 @@ server.tool(
   ({ room, with: peer, after, limit, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
-      ensureChatPoller();
+      ensureChatPoller(name);
       const roomId = await resolveChatRoom(name, room, peer);
       const messages = await client.listChatMessages(roomId, { agent: name, after, limit });
       return { room_id: roomId, messages };
@@ -980,7 +985,7 @@ server.tool(
       if (!body?.trim() && !uploads?.length) {
         throw new Error("message needs text or at least one upload");
       }
-      ensureChatPoller();
+      ensureChatPoller(agent_name?.trim());
       return client.postChatMessage({
         body: body ?? "",
         to,
