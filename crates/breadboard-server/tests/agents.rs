@@ -546,3 +546,48 @@ async fn claim_security_and_resolution() {
         .collect();
     assert_eq!(solo.len(), 1, "exclusive replaced the redundant intent");
 }
+
+/// Completion follows the board: a card in Done counts even when the agent has
+/// not heartbeated its lifecycle state yet.
+#[tokio::test]
+async fn completion_follows_board_done() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "finish me").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "finisher" }))
+        .send()
+        .await
+        .unwrap();
+
+    c.patch(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .json(&json!({ "status": "done" }))
+        .send()
+        .await
+        .unwrap();
+
+    let status: Value = c
+        .get(format!("{base}/api/agents/status"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["total"], 1);
+    assert_eq!(status["done"], 1, "board Done counts as done");
+    assert!(status["line"].as_str().unwrap().contains("BB 1/1 done"));
+
+    let claim = &status["claims"][0];
+    assert_eq!(claim["board_status"], "done");
+    assert_ne!(claim["state"], "done", "the lifecycle state is still the agent's");
+}
