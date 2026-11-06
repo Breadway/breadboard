@@ -9,7 +9,7 @@
 //! both values and the winning side: the live signal that a webhook was missed.
 
 use anyhow::Context;
-use breadboard_core::{BoardEvent, Issue, IssueType, LinkKind, Project, Status, SyncSource};
+use breadboard_core::{BoardEvent, Issue, IssueType, Project, Status, SyncSource};
 use chrono::{DateTime, Utc};
 
 use crate::dto::IssuePatch;
@@ -180,122 +180,83 @@ async fn sync_pr_closes(
         if target.id == pr_issue_id || !seen.insert(target.id) {
             continue;
         }
-        let _ = store::add_link(&state.db, pr_issue_id, target.id, LinkKind::Closes).await;
-        let _ = store::add_link(&state.db, target.id, pr_issue_id, LinkKind::ClosedBy).await;
-
-        if !pr_closed {
-            // Open PR: just the links; no status effect on targets.
-            continue;
-        }
-
         let has_verify = target
             .labels
             .iter()
             .any(|l| l.eq_ignore_ascii_case("verify-before-done"));
 
-        if pr_merged {
+        // `desired` is only the cascade *change*: links are always ensured by
+        // the same atomic write, whether or not the target moves.
+        let desired = if !pr_closed {
+            // Open PR: just the links; no status effect on targets.
+            None
+        } else if pr_merged {
             // A labelled target is held in review when the merge is first
             // seen. Once it has been verified and moved to done, later syncs
             // must not drag it back to review.
-            if has_verify && !just_closed && target.status == Status::Done {
-                continue;
-            }
             let desired = if has_verify {
                 Status::Review
             } else {
                 Status::Done
             };
-            if target.status == desired {
-                continue;
+            if (has_verify && !just_closed && target.status == Status::Done)
+                || target.status == desired
+            {
+                None
+            } else {
+                Some(desired)
             }
-            let patch = IssuePatch {
-                status: Some(desired),
-                ..Default::default()
-            };
-            let Ok(updated) = store::update_issue(
-                &state.db,
-                &target.key,
-                &patch,
-                None,
-                SyncSource::ForgejoWebhook,
-            )
-            .await
-            else {
-                continue;
-            };
-            emit_change_events(state, &target, &updated);
-            let Some(fref) = &updated.forgejo_ref else {
-                continue;
-            };
-            if !state.forgejo.is_configured() {
-                continue;
-            }
-            if let Ok((owner, r)) = split_repo(&fref.repo) {
-                let want_state = if desired == Status::Done {
-                    "closed"
-                } else {
-                    "open"
-                };
-                if let Err(e) = state
-                    .forgejo
-                    .patch_issue(
-                        owner,
-                        r,
-                        fref.number,
-                        FgIssuePatch {
-                            state: Some(want_state),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(key = %updated.key, error = %e, "cascaded status writeback to forgejo failed");
-                }
-            }
-        } else {
+        } else if target.status == Status::Done && just_closed {
             // closed-unmerged: never complete; revert a done target to review
             // only when the rejection is first observed, not on every sync.
-            if target.status != Status::Done || !just_closed {
+            Some(Status::Review)
+        } else {
+            None
+        };
+
+        let updated = match store::sync_pr_close_target(
+            &state.db,
+            pr_issue_id,
+            target.id,
+            desired,
+            SyncSource::ForgejoWebhook,
+        )
+        .await
+        {
+            Ok(Some(updated)) => updated,
+            Ok(None) => continue,
+            Err(e) => {
+                tracing::warn!(key = %target.key, error = %e, "cascading PR close failed; a later sync will heal it");
                 continue;
             }
-            let patch = IssuePatch {
-                status: Some(Status::Review),
-                ..Default::default()
+        };
+        emit_change_events(state, &target, &updated);
+        let Some(fref) = &updated.forgejo_ref else {
+            continue;
+        };
+        if !state.forgejo.is_configured() {
+            continue;
+        }
+        if let Ok((owner, r)) = split_repo(&fref.repo) {
+            let want_state = if updated.status.is_closed() {
+                "closed"
+            } else {
+                "open"
             };
-            let Ok(updated) = store::update_issue(
-                &state.db,
-                &target.key,
-                &patch,
-                None,
-                SyncSource::ForgejoWebhook,
-            )
-            .await
-            else {
-                continue;
-            };
-            emit_change_events(state, &target, &updated);
-            let Some(fref) = &updated.forgejo_ref else {
-                continue;
-            };
-            if !state.forgejo.is_configured() {
-                continue;
-            }
-            if let Ok((owner, r)) = split_repo(&fref.repo) {
-                if let Err(e) = state
-                    .forgejo
-                    .patch_issue(
-                        owner,
-                        r,
-                        fref.number,
-                        FgIssuePatch {
-                            state: Some("open"),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(key = %updated.key, error = %e, "reopening cascaded target on forgejo failed");
-                }
+            if let Err(e) = state
+                .forgejo
+                .patch_issue(
+                    owner,
+                    r,
+                    fref.number,
+                    FgIssuePatch {
+                        state: Some(want_state),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(key = %updated.key, error = %e, "cascaded status writeback to forgejo failed");
             }
         }
     }
@@ -495,6 +456,22 @@ pub async fn apply_issue(
     }
 
     if patch.is_empty() {
+        // An unchanged PR still owns its closing links. A target imported
+        // after the PR, or a link write lost to a busy database, would
+        // otherwise stay unlinked until some field changed. Reconcile re-runs
+        // the idempotent link pass instead.
+        if is_reconcile && before.issue_type == IssueType::Pr {
+            sync_pr_closes(
+                state,
+                repo,
+                before.id,
+                &before.body,
+                fg.is_closed(),
+                fg.is_merged(),
+                false,
+            )
+            .await;
+        }
         return Ok(());
     }
 
@@ -659,7 +636,7 @@ pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issu
     // discovered on retry rather than creating another Forgejo issue.
     let marker = format!("<!-- breadboard-import:{} -->", issue.key);
     if let Ok(Some(found)) = state.forgejo.find_import_issue(owner, name, &marker).await {
-        return match store::link_issue(&state.db, issue.id, &repo, found.number).await {
+        return match link_and_apply_done(state, &issue, owner, name, &repo, found.number).await {
             Ok(linked) => (linked, None),
             Err(error) => (issue, Some(error.to_string())),
         };
@@ -700,37 +677,67 @@ pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issu
         }
     }
 
-    match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
+    match link_and_apply_done(state, &issue, owner, name, &repo, fg.number).await {
         Ok(linked) => {
-            if linked.status == Status::Done {
-                if let Err(error) = state
-                    .forgejo
-                    .patch_issue(
-                        owner,
-                        name,
-                        fg.number,
-                        FgIssuePatch {
-                            state: Some("closed"),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
-                }
-            }
             tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
             (linked, None)
         }
         Err(e) => {
+            // A concurrent webhook may have linked the created issue first.
+            // Apply the Done close to that row too rather than leaving the
+            // remote issue open.
             if let Ok(Some(linked)) =
                 store::find_issue_by_forgejo(&state.db, &repo, fg.number).await
             {
+                close_remote_if_done(state, &linked, owner, name, fg.number).await;
                 return (linked, None);
             }
             tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
             (issue, Some(e.to_string()))
         }
+    }
+}
+
+/// Link a local card to a remote issue that already exists and, when the card
+/// is `Done`, close that remote issue. Every retry path uses this so a retry
+/// that only restores the link cannot leave local and remote state divergent.
+async fn link_and_apply_done(
+    state: &AppState,
+    issue: &Issue,
+    owner: &str,
+    name: &str,
+    repo: &str,
+    number: i64,
+) -> AppResult<Issue> {
+    let linked = store::link_issue(&state.db, issue.id, repo, number).await?;
+    close_remote_if_done(state, &linked, owner, name, number).await;
+    Ok(linked)
+}
+
+async fn close_remote_if_done(
+    state: &AppState,
+    linked: &Issue,
+    owner: &str,
+    name: &str,
+    number: i64,
+) {
+    if linked.status != Status::Done {
+        return;
+    }
+    if let Err(error) = state
+        .forgejo
+        .patch_issue(
+            owner,
+            name,
+            number,
+            FgIssuePatch {
+                state: Some("closed"),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
     }
 }
 
