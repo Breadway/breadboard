@@ -509,7 +509,7 @@
               </div>
               <input
                 class="field"
-                placeholder="Agent name (default: your login)"
+                placeholder="Fun agent name (e.g. Toasty Pretzel)"
                 bind:value={claimAgent}
                 aria-label="Agent name"
               />

@@ -53,6 +53,39 @@ const client = new BreadboardClient(cfg.server, cfg.token);
 // agent does not have to remember: claim_issue starts a 60s timer, and
 // release_claim (or the process exiting) stops it.
 
+const FUN_ADJECTIVES = [
+  "Toasty", "Crumbly", "Buttery", "Golden", "Flaky", "Zesty", "Plucky",
+  "Snazzy", "Bouncy", "Peppy", "Crusty", "Doughy", "Spry", "Merry",
+  "Brazen", "Nimble", "Frosted", "Saucy", "Hearty", "Sprightly",
+];
+
+const FUN_NOUNS = [
+  "Pretzel", "Baguette", "Crumpet", "Brioche", "Scone", "Bagel",
+  "Focaccia", "Pumpernickel", "Croissant", "Muffin", "Churro", "Bun",
+  "Loaf", "Waffle", "Pita", "Ciabatta", "Biscuit", "Rye", "Pumper",
+  "Roll",
+];
+
+/** One playful name per MCP process, so an agent's claims group together. */
+let autoAgentName: string | undefined;
+
+function pickFunName(): string {
+  const a = FUN_ADJECTIVES[Math.floor(Math.random() * FUN_ADJECTIVES.length)];
+  const n = FUN_NOUNS[Math.floor(Math.random() * FUN_NOUNS.length)];
+  return `${a} ${n}`;
+}
+
+function defaultAgentName(): string {
+  autoAgentName ??= pickFunName();
+  return autoAgentName;
+}
+
+function suggestNames(count: number): string[] {
+  const out = new Set<string>();
+  while (out.size < count) out.add(pickFunName());
+  return [...out];
+}
+
 const KEEPALIVE_MS = 60_000;
 const keepalives = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -571,6 +604,9 @@ server.tool(
   "claim_issue",
   "Claim an issue as an agent. REQUIRED FIRST STEP before any implementation work: " +
     "no code changes without holding the claim. " +
+    "NAME YOURSELF: agent names are free-form and should be fun and memorable " +
+    "(Toasty Pretzel, Crumb Baron, Saucy Baguette). Reuse the same name across issues so the " +
+    "Agents tab groups your work; omit agent_name to get one playful name for this MCP process. " +
     "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
     "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
     "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
@@ -579,7 +615,10 @@ server.tool(
     "call release_claim when done and update_claim to report state/PR progress.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
-    agent_name: z.string().describe("agent-chosen name, e.g. opencode, bb-worker-2"),
+    agent_name: z
+      .string()
+      .optional()
+      .describe("fun, memorable agent name (e.g. Toasty Pretzel); reuse it across issues. Omit for a generated one"),
     mode: z.enum(["exclusive", "intent"]).optional().describe("exclusive (default) or soft intent"),
     session_id: z.string().optional().describe("agent session id for ownership checks"),
     state: z.enum(AGENT_STATES).optional().describe("lifecycle state, default implementing"),
@@ -591,9 +630,12 @@ server.tool(
     pr_number: z.number().optional(),
     head_sha: z.string().optional(),
   },
-  ({ key, ...claim }) =>
+  ({ key, agent_name, ...claim }) =>
     run(async () => {
-      const created = await client.claimIssue(key, claim as never);
+      const created = await client.claimIssue(key, {
+        ...claim,
+        agent_name: agent_name?.trim() || defaultAgentName(),
+      } as never);
       startKeepalive(key, created.agent_name);
       return created;
     }),
@@ -628,10 +670,19 @@ server.tool(
   },
   ({ key, agent_name }) =>
     run(async () => {
-      await client.releaseClaim(key, agent_name);
-      stopKeepalive(key, agent_name);
+      const who = agent_name?.trim() || autoAgentName;
+      await client.releaseClaim(key, who);
+      stopKeepalive(key, who);
       return `released ${key}`;
     }),
+);
+
+server.tool(
+  "suggest_agent_names",
+  "Get a handful of fun, memorable agent names to choose from. Names are characters, not hosts: " +
+    "pick one and reuse it on every issue so the Agents tab keeps you as one agent.",
+  { count: z.number().min(1).max(20).optional().describe("how many names, default 8") },
+  ({ count }) => ok(suggestNames(count ?? 8)),
 );
 
 server.tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>
