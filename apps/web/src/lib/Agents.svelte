@@ -631,21 +631,18 @@
   }
   .amessage {
     font-size: 11px;
-    line-height: 1.3;
+    line-height: 1.35;
     color: var(--ink-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .mmessage {
     margin: 3px 0 0;
     font-size: 12px;
-    line-height: 1.4;
+    line-height: 1.45;
     color: var(--ink-dim);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .stale-badge,
   .queued-badge {
