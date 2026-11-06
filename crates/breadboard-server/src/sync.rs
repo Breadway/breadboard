@@ -144,8 +144,9 @@ fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
 ///   close is first observed (`just_closed`); a later, explicit move to `done`
 ///   is not reverted by subsequent syncs.
 /// - On closed-unmerged (`pr_closed && !pr_merged`): never move targets to
-///   `done`. Targets stay in their current status. If a target is `done`,
-///   move it to `review` (undoing a completion the rejected PR had caused).
+///   `done` and never change their status. Only a merged PR's closing
+///   transition, or an explicit reopen of the target, may change it; an
+///   abandoned PR must not undo work completed by a different merged PR.
 /// - An open PR only maintains links; it does not change target statuses.
 /// - Reopening a PR (now open) does not cascade done; a later merge can.
 /// - Non-PR issues continue to mirror close/reopen to done/todo as before.
@@ -206,11 +207,11 @@ async fn sync_pr_closes(
             } else {
                 Some(desired)
             }
-        } else if target.status == Status::Done && just_closed {
-            // closed-unmerged: never complete; revert a done target to review
-            // only when the rejection is first observed, not on every sync.
-            Some(Status::Review)
         } else {
+            // closed-unmerged: never complete and never undo a completion.
+            // Only a merged PR's closing transition, or an explicit reopen of
+            // the target, may change its status. Reverting `done` here used to
+            // undo work that a different, merged PR had completed.
             None
         };
 

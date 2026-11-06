@@ -1010,6 +1010,128 @@ async fn contended_closing_transition_links_and_status_land_together() {
     );
 }
 
+/// A merged PR completes the target; a later abandoned (closed-unmerged) PR
+/// that also references it must not revert the accepted completion to review.
+#[tokio::test]
+async fn abandoned_pr_does_not_revert_done_completed_by_merged_pr() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 900, "completed by a merged PR", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    // PR A is merged and completes TST-1.
+    let merged = pr_issue(
+        910,
+        "the accepted fix",
+        true,
+        true,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &merged, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done
+    );
+
+    // PR B is abandoned and closed unmerged later, also referencing TST-1.
+    let abandoned = pr_issue(
+        911,
+        "the rejected attempt",
+        true,
+        false,
+        "Closes TST-1",
+        Utc::now() + Duration::seconds(5),
+    );
+    sync::apply_issue(&app.state, repo, &abandoned, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let after = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(
+        after.status,
+        Status::Done,
+        "an abandoned PR must not revert work completed by a merged PR"
+    );
+    let pr_b = store::find_issue_by_forgejo(&app.db, repo, 911)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        after
+            .links
+            .iter()
+            .any(|l| l.kind == LinkKind::ClosedBy && l.target_id == pr_b.id),
+        "the abandoned PR still records its closing link"
+    );
+
+    // A later title change on the abandoned PR must not revert it either.
+    let mut retitled = abandoned.clone();
+    retitled.title = "rejected attempt (retitled)".into();
+    retitled.updated_at = (Utc::now() + Duration::seconds(10)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &retitled, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done
+    );
+}
+
+/// The same rule without a merged PR: an abandoned PR never changes a target
+/// that a human moved to done.
+#[tokio::test]
+async fn abandoned_pr_does_not_revert_a_manually_done_target() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 920, "manually completed", &[]).await;
+    store::update_issue(
+        &app.db,
+        &target.key,
+        &breadboard_core::dto::IssuePatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        },
+        None,
+        SyncSource::Breadboard,
+    )
+    .await
+    .unwrap();
+
+    let abandoned = pr_issue(
+        921,
+        "abandoned attempt",
+        true,
+        false,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &abandoned, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done,
+        "only a merged PR's closing transition or an explicit reopen changes done"
+    );
+}
+
 // --- helpers ---
 
 fn user(login: &str, id: i64) -> FgUser {
