@@ -297,6 +297,49 @@ async fn repair_retry_finds_remote_marker_after_webhook_echo_and_link_failure() 
         .is_some());
 }
 
+/// BB-113: a Done card repaired through the marker-retry path links to the
+/// existing remote issue, so it must also apply the closing transition there.
+/// Before the fix this returned after the link and left the remote issue open.
+#[tokio::test]
+async fn repair_done_card_closes_existing_marker_issue() {
+    let (app, fake) = harness(false).await;
+    let local = store::create_issue(
+        &app.db,
+        &breadboard_server::dto::NewIssue {
+            project: Some("TST".into()),
+            title: "Task".into(),
+            status: Some(breadboard_core::Status::Done),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    let marker = format!("<!-- breadboard-import:{} -->", local.key);
+    fake.issues.lock().unwrap().push(json!({
+        "number": 41, "title": "Task", "body": marker, "state": "open", "labels": [],
+        "assignees": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
+    }));
+
+    let mut req = request();
+    req.repair = true;
+    let result = import::run(&app.state, &req).await.unwrap();
+
+    assert!(result.pending_writebacks.is_empty());
+    assert_eq!(
+        fake.creates.load(Ordering::SeqCst),
+        0,
+        "reused the marker issue"
+    );
+    let repaired = store::get_issue_by_key(&app.db, &local.key).await.unwrap();
+    assert_eq!(repaired.forgejo_ref.unwrap().number, 41);
+    assert_eq!(
+        &*fake.states.lock().unwrap(),
+        &["closed"],
+        "the Done retry closes the existing remote issue, not just links it"
+    );
+}
+
 #[tokio::test]
 async fn checked_import_item_is_done_locally_and_closed_remotely() {
     let (app, fake) = harness(false).await;

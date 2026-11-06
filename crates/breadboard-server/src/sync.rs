@@ -636,7 +636,7 @@ pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issu
     // discovered on retry rather than creating another Forgejo issue.
     let marker = format!("<!-- breadboard-import:{} -->", issue.key);
     if let Ok(Some(found)) = state.forgejo.find_import_issue(owner, name, &marker).await {
-        return match store::link_issue(&state.db, issue.id, &repo, found.number).await {
+        return match link_and_apply_done(state, &issue, owner, name, &repo, found.number).await {
             Ok(linked) => (linked, None),
             Err(error) => (issue, Some(error.to_string())),
         };
@@ -677,37 +677,67 @@ pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issu
         }
     }
 
-    match store::link_issue(&state.db, issue.id, &repo, fg.number).await {
+    match link_and_apply_done(state, &issue, owner, name, &repo, fg.number).await {
         Ok(linked) => {
-            if linked.status == Status::Done {
-                if let Err(error) = state
-                    .forgejo
-                    .patch_issue(
-                        owner,
-                        name,
-                        fg.number,
-                        FgIssuePatch {
-                            state: Some("closed"),
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
-                }
-            }
             tracing::info!(key = %linked.key, number = fg.number, %repo, "created on forgejo");
             (linked, None)
         }
         Err(e) => {
+            // A concurrent webhook may have linked the created issue first.
+            // Apply the Done close to that row too rather than leaving the
+            // remote issue open.
             if let Ok(Some(linked)) =
                 store::find_issue_by_forgejo(&state.db, &repo, fg.number).await
             {
+                close_remote_if_done(state, &linked, owner, name, fg.number).await;
                 return (linked, None);
             }
             tracing::warn!(key = %issue.key, error = %e, "linking new forgejo issue failed");
             (issue, Some(e.to_string()))
         }
+    }
+}
+
+/// Link a local card to a remote issue that already exists and, when the card
+/// is `Done`, close that remote issue. Every retry path uses this so a retry
+/// that only restores the link cannot leave local and remote state divergent.
+async fn link_and_apply_done(
+    state: &AppState,
+    issue: &Issue,
+    owner: &str,
+    name: &str,
+    repo: &str,
+    number: i64,
+) -> AppResult<Issue> {
+    let linked = store::link_issue(&state.db, issue.id, repo, number).await?;
+    close_remote_if_done(state, &linked, owner, name, number).await;
+    Ok(linked)
+}
+
+async fn close_remote_if_done(
+    state: &AppState,
+    linked: &Issue,
+    owner: &str,
+    name: &str,
+    number: i64,
+) {
+    if linked.status != Status::Done {
+        return;
+    }
+    if let Err(error) = state
+        .forgejo
+        .patch_issue(
+            owner,
+            name,
+            number,
+            FgIssuePatch {
+                state: Some("closed"),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        tracing::warn!(key = %linked.key, error = %error, "closing done imported issue on forgejo failed");
     }
 }
 
