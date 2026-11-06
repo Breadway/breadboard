@@ -595,6 +595,13 @@ fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
     let mut verifying = 0i64;
     let mut blocked = 0i64;
     for c in &work {
+        // Completion follows the issue's board status: a card in Done is done,
+        // even if the agent has not heartbeated its lifecycle state yet. This
+        // keeps the Agents tiles and the x/y done count saying the same thing.
+        if c.board_status == breadboard_core::Status::Done {
+            done += 1;
+            continue;
+        }
         match c.state {
             AgentState::Done => done += 1,
             AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,
@@ -649,6 +656,10 @@ pub async fn agent_status(
     let mut verifying = 0i64;
     let mut blocked = 0i64;
     for c in &work {
+        if c.board_status == breadboard_core::Status::Done {
+            done += 1;
+            continue;
+        }
         match c.state {
             AgentState::Done => done += 1,
             AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,

@@ -32,7 +32,7 @@
   const tallies = $derived.by(() => {
     const t = { active: 0, review: 0, verifying: 0, blocked: 0, done: 0 };
     for (const c of work) {
-      if (c.state === "done") t.done++;
+      if (c.board_status === "done") t.done++;
       else if (c.state === "implementing" || c.state === "reworking" || c.state === "planned") t.active++;
       else if (c.state === "awaiting-review" || c.state === "awaiting-ci" || c.state === "awaiting-merge") t.review++;
       else if (c.state === "verifying") t.verifying++;
@@ -80,7 +80,7 @@
       if (c.mode === "intent") g.intents.push(c);
       else {
         g.work.push(c);
-        if (c.state === "done") g.done++;
+        if (c.board_status === "done") g.done++;
         if (claimStale(c.last_heartbeat, now)) g.stale++;
         else g.live++;
       }
