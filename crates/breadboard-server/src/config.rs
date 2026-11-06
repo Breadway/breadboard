@@ -21,6 +21,9 @@ pub struct Config {
     pub public_url: String,
     /// Path to the SQLite database file.
     pub database_path: PathBuf,
+    /// Directory for chat uploads. Defaults to `uploads/` beside the database
+    /// (inside the data volume in the container).
+    pub upload_dir: Option<PathBuf>,
     /// Directory of the built web SPA to serve at `/`. When unset (or missing),
     /// only the API is served; the Vite dev server handles the UI in dev.
     pub web_dir: Option<PathBuf>,
@@ -68,6 +71,7 @@ impl Default for Config {
             listen: "127.0.0.1:7280".to_string(),
             public_url: "http://127.0.0.1:7280".to_string(),
             database_path: default_data_dir().join("breadboard.db"),
+            upload_dir: None,
             web_dir: None,
             forgejo: ForgejoConfig::default(),
             notifications: NotificationConfig::default(),
@@ -123,6 +127,9 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_DATABASE_PATH") {
             self.database_path = PathBuf::from(v);
         }
+        if let Ok(v) = std::env::var("BREADBOARD_UPLOAD_DIR") {
+            self.upload_dir = Some(PathBuf::from(v));
+        }
         if let Ok(v) = std::env::var("BREADBOARD_WEB_DIR") {
             self.web_dir = Some(PathBuf::from(v));
         }
@@ -154,6 +161,17 @@ impl Config {
                 self.notifications.digest_hour = n.min(23);
             }
         }
+    }
+
+    /// Where chat attachments are written. Persisted on the same volume as
+    /// the database by default.
+    pub fn uploads_dir(&self) -> PathBuf {
+        self.upload_dir.clone().unwrap_or_else(|| {
+            self.database_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("uploads")
+        })
     }
 
     /// SQLite connection string with `?mode=rwc` so the file is created on first run.

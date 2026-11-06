@@ -2280,6 +2280,437 @@ pub async fn log_claim_event(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// chat
+// ---------------------------------------------------------------------------
+
+use breadboard_core::{ChatAuthorKind, ChatMessage, ChatRoom, ChatRoomKind};
+
+pub fn agent_member(name: &str) -> String {
+    format!("agent:{}", name.trim().to_lowercase())
+}
+
+pub fn human_member(login: &str) -> String {
+    format!("human:{}", login.trim().to_lowercase())
+}
+
+#[derive(FromRow)]
+struct ChatRoomRow {
+    id: i64,
+    kind: String,
+    name: Option<String>,
+    description: Option<String>,
+}
+
+#[derive(FromRow)]
+struct ChatMessageRow {
+    id: i64,
+    room_id: i64,
+    author_member: String,
+    author_display: String,
+    author_kind: String,
+    body: String,
+    created_at: String,
+}
+
+impl From<ChatMessageRow> for ChatMessage {
+    fn from(r: ChatMessageRow) -> Self {
+        ChatMessage {
+            id: r.id,
+            room_id: r.room_id,
+            author_member: r.author_member,
+            author_display: r.author_display,
+            author_kind: ChatAuthorKind::parse(&r.author_kind).unwrap_or(ChatAuthorKind::Human),
+            body: r.body,
+            attachments: Vec::new(),
+            created_at: parse_ts(&r.created_at),
+        }
+    }
+}
+
+#[derive(FromRow)]
+struct ChatUploadRow {
+    id: i64,
+    filename: String,
+    mime: String,
+    size: i64,
+}
+
+#[derive(FromRow)]
+struct ChatUploadJoinRow {
+    message_id: i64,
+    id: i64,
+    filename: String,
+    mime: String,
+    size: i64,
+}
+
+impl From<ChatUploadRow> for breadboard_core::ChatUpload {
+    fn from(r: ChatUploadRow) -> Self {
+        breadboard_core::ChatUpload {
+            id: r.id,
+            filename: r.filename,
+            mime: r.mime,
+            size: r.size,
+        }
+    }
+}
+
+/// Attachments for a set of messages, in one query.
+async fn attachments_for(
+    db: &SqlitePool,
+    message_ids: &[i64],
+) -> AppResult<std::collections::HashMap<i64, Vec<breadboard_core::ChatUpload>>> {
+    let mut out: std::collections::HashMap<i64, Vec<breadboard_core::ChatUpload>> =
+        std::collections::HashMap::new();
+    if message_ids.is_empty() {
+        return Ok(out);
+    }
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT message_id, id, filename, mime, size FROM chat_uploads WHERE message_id IN (",
+    );
+    let mut sep = qb.separated(", ");
+    for id in message_ids {
+        sep.push_bind(id);
+    }
+    qb.push(") ORDER BY id");
+    let rows: Vec<ChatUploadJoinRow> = qb.build_query_as().fetch_all(db).await?;
+    for row in rows {
+        let message_id = row.message_id;
+        out.entry(message_id).or_default().push(
+            ChatUploadRow {
+                id: row.id,
+                filename: row.filename,
+                mime: row.mime,
+                size: row.size,
+            }
+            .into(),
+        );
+    }
+    Ok(out)
+}
+
+async fn hydrate_messages(db: &SqlitePool, rows: Vec<ChatMessageRow>) -> AppResult<Vec<ChatMessage>> {
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+    let mut attachments = attachments_for(db, &ids).await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let mut message: ChatMessage = row.into();
+            message.attachments = attachments.remove(&message.id).unwrap_or_default();
+            message
+        })
+        .collect())
+}
+
+const CHAT_ROOM_COLS: &str = "id, kind, name, description";
+
+async fn chat_members(db: &SqlitePool, room_id: i64) -> AppResult<Vec<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT member FROM chat_room_members WHERE room_id = ?1 ORDER BY member",
+    )
+    .bind(room_id)
+    .fetch_all(db)
+    .await?)
+}
+
+async fn hydrate_room(db: &SqlitePool, row: ChatRoomRow) -> AppResult<ChatRoom> {
+    let members = chat_members(db, row.id).await?;
+    let last: Option<ChatMessageRow> = sqlx::query_as(
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
+           FROM chat_messages WHERE room_id = ?1 ORDER BY id DESC LIMIT 1",
+    )
+    .bind(row.id)
+    .fetch_optional(db)
+    .await?;
+    let last_message = match last {
+        Some(row) => hydrate_messages(db, vec![row]).await?.pop(),
+        None => None,
+    };
+    Ok(ChatRoom {
+        id: row.id,
+        kind: ChatRoomKind::parse(&row.kind).unwrap_or(ChatRoomKind::Room),
+        name: row.name,
+        description: row.description,
+        members,
+        last_message,
+    })
+}
+
+/// All shared rooms, plus DMs the viewer belongs to. `viewer = None` (a
+/// human) sees everything, including every DM.
+pub async fn chat_rooms(db: &SqlitePool, viewer: Option<&str>) -> AppResult<Vec<ChatRoom>> {
+    let rows: Vec<ChatRoomRow> = sqlx::query_as(&format!(
+        "SELECT {CHAT_ROOM_COLS} FROM chat_rooms ORDER BY kind, name, id"
+    ))
+    .fetch_all(db)
+    .await?;
+    let mut out = Vec::new();
+    for row in rows {
+        if let Some(viewer) = viewer {
+            if row.kind == ChatRoomKind::Dm.as_str() {
+                let is_member: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM chat_room_members WHERE room_id = ?1 AND member = ?2",
+                )
+                .bind(row.id)
+                .bind(viewer)
+                .fetch_one(db)
+                .await?;
+                if is_member == 0 {
+                    continue;
+                }
+            }
+        }
+        out.push(hydrate_room(db, row).await?);
+    }
+    Ok(out)
+}
+
+pub async fn get_chat_room(db: &SqlitePool, id: i64) -> AppResult<ChatRoom> {
+    let row: ChatRoomRow = sqlx::query_as(&format!(
+        "SELECT {CHAT_ROOM_COLS} FROM chat_rooms WHERE id = ?1"
+    ))
+    .bind(id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    hydrate_room(db, row).await
+}
+
+pub async fn chat_room_by_name(db: &SqlitePool, name: &str) -> AppResult<Option<ChatRoom>> {
+    let row: Option<ChatRoomRow> = sqlx::query_as(&format!(
+        "SELECT {CHAT_ROOM_COLS} FROM chat_rooms WHERE name = ?1 AND kind = 'room'"
+    ))
+    .bind(name)
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some(row) => Ok(Some(hydrate_room(db, row).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn create_chat_room(
+    db: &SqlitePool,
+    name: &str,
+    description: Option<&str>,
+) -> AppResult<ChatRoom> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO chat_rooms (kind, name, description, created_at)
+         VALUES ('room', ?1, ?2, ?3) RETURNING id",
+    )
+    .bind(name)
+    .bind(description)
+    .bind(now_rfc3339())
+    .fetch_one(db)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+            AppError::Conflict(format!("room `{name}` already exists"))
+        }
+        other => AppError::Db(other),
+    })?;
+    get_chat_room(db, id).await
+}
+
+pub async fn chat_is_member(db: &SqlitePool, room_id: i64, member: &str) -> AppResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chat_room_members WHERE room_id = ?1 AND member = ?2",
+    )
+    .bind(room_id)
+    .bind(member)
+    .fetch_one(db)
+    .await?;
+    Ok(n > 0)
+}
+
+/// Return the DM room for two members, creating it the first time.
+pub async fn find_or_create_dm(
+    db: &SqlitePool,
+    a: &str,
+    b: &str,
+) -> AppResult<ChatRoom> {
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    let key = format!("{a}|{b}");
+    if let Some(id) = sqlx::query_scalar::<_, i64>("SELECT id FROM chat_rooms WHERE dm_key = ?1")
+        .bind(&key)
+        .fetch_optional(db)
+        .await?
+    {
+        return get_chat_room(db, id).await;
+    }
+
+    let mut tx = db.begin().await?;
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO chat_rooms (kind, dm_key, created_at) VALUES ('dm', ?1, ?2) RETURNING id",
+    )
+    .bind(&key)
+    .bind(now_rfc3339())
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+            AppError::Conflict("dm already exists".into())
+        }
+        other => AppError::Db(other),
+    })?;
+    for member in [a, b] {
+        sqlx::query("INSERT INTO chat_room_members (room_id, member) VALUES (?1, ?2)")
+            .bind(id)
+            .bind(member)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    get_chat_room(db, id).await
+}
+
+pub async fn chat_messages(
+    db: &SqlitePool,
+    room_id: i64,
+    after_id: i64,
+    limit: i64,
+) -> AppResult<Vec<ChatMessage>> {
+    let rows: Vec<ChatMessageRow> = sqlx::query_as(
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
+           FROM chat_messages
+          WHERE room_id = ?1 AND id > ?2
+          ORDER BY id ASC
+          LIMIT ?3",
+    )
+    .bind(room_id)
+    .bind(after_id)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    hydrate_messages(db, rows).await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn post_chat_message(
+    db: &SqlitePool,
+    room_id: i64,
+    author_member: &str,
+    author_display: &str,
+    author_kind: ChatAuthorKind,
+    body: &str,
+    uploads: &[i64],
+    uploader_user_id: i64,
+) -> AppResult<ChatMessage> {
+    let mut tx = db.begin().await?;
+    let row: ChatMessageRow = sqlx::query_as(
+        "INSERT INTO chat_messages
+            (room_id, author_member, author_display, author_kind, body, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         RETURNING id, room_id, author_member, author_display, author_kind, body, created_at",
+    )
+    .bind(room_id)
+    .bind(author_member)
+    .bind(author_display)
+    .bind(author_kind.as_str())
+    .bind(body)
+    .bind(now_rfc3339())
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let mut seen = std::collections::HashSet::new();
+    for upload in uploads {
+        if !seen.insert(*upload) {
+            continue;
+        }
+        let attached = sqlx::query(
+            "UPDATE chat_uploads SET message_id = ?2
+              WHERE id = ?1 AND uploader_user_id = ?3 AND message_id IS NULL",
+        )
+        .bind(upload)
+        .bind(row.id)
+        .bind(uploader_user_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if attached == 0 {
+            return Err(AppError::bad_request(
+                "upload not found, already used, or not yours",
+            ));
+        }
+    }
+    tx.commit().await?;
+
+    let mut message: ChatMessage = row.into();
+    message.attachments = attachments_for(db, &[message.id])
+        .await?
+        .remove(&message.id)
+        .unwrap_or_default();
+    Ok(message)
+}
+
+pub struct StoredUpload {
+    pub upload: breadboard_core::ChatUpload,
+    pub path: String,
+}
+
+pub async fn insert_chat_upload(
+    db: &SqlitePool,
+    uploader_user_id: i64,
+    filename: &str,
+    mime: &str,
+    size: i64,
+    path: &str,
+) -> AppResult<breadboard_core::ChatUpload> {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO chat_uploads (uploader_user_id, filename, mime, size, path, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+    )
+    .bind(uploader_user_id)
+    .bind(filename)
+    .bind(mime)
+    .bind(size)
+    .bind(path)
+    .bind(now_rfc3339())
+    .fetch_one(db)
+    .await?;
+    Ok(breadboard_core::ChatUpload {
+        id,
+        filename: filename.to_string(),
+        mime: mime.to_string(),
+        size,
+    })
+}
+
+pub async fn get_chat_upload(db: &SqlitePool, id: i64) -> AppResult<StoredUpload> {
+    let row: Option<(i64, String, String, i64, String)> = sqlx::query_as(
+        "SELECT id, filename, mime, size, path FROM chat_uploads WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    let (id, filename, mime, size, path) = row.ok_or(AppError::NotFound)?;
+    Ok(StoredUpload {
+        upload: breadboard_core::ChatUpload {
+            id,
+            filename,
+            mime,
+            size,
+        },
+        path,
+    })
+}
+
+/// True when this user has ever claimed or named that agent.
+pub async fn user_has_agent(db: &SqlitePool, user_id: i64, name: &str) -> AppResult<bool> {
+    let name = name.trim().to_lowercase();
+    let n: i64 = sqlx::query_scalar(
+        "SELECT
+           (SELECT COUNT(*) FROM agent_profiles WHERE user_id = ?1 AND agent_name = ?2) +
+           (SELECT COUNT(*) FROM agent_claims WHERE claimed_by = ?1 AND lower(agent_name) = ?2)",
+    )
+    .bind(user_id)
+    .bind(&name)
+    .fetch_one(db)
+    .await?;
+    Ok(n > 0)
+}
+
 /// Startup sanity check: there is deliberately no catch-all default project.
 ///
 /// Seeding `ROAD` made it the silent destination for every title-only issue,

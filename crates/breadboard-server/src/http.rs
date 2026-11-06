@@ -57,6 +57,21 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/agents", get(api::list_agents))
         .route("/agents/message", put(api::set_agent_message))
+        .route("/chat/rooms", get(api::list_chat_rooms).post(api::create_chat_room))
+        .route("/chat/rooms/{id}/messages", get(api::chat_messages))
+        .route("/chat/messages", post(api::post_chat_message))
+        .route(
+            "/chat/uploads",
+            post(api::upload_chat_file)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route(
+            "/chat/uploads/base64",
+            post(api::upload_chat_file_base64)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),
+        )
+        .route("/chat/uploads/{id}", get(api::get_chat_upload))
+        .route("/chat/dm", post(api::open_dm))
         .route("/agents/status", get(api::agent_status))
         .route(
             "/issues/{key}/claim",

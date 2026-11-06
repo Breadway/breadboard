@@ -362,6 +362,67 @@ pub struct AgentMessage {
     pub message: String,
 }
 
+/// `POST /api/chat/messages`. With `agent_name` the author is that agent
+/// (must belong to the caller); without it the author is the signed-in human.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChatMessage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Room id or shared-room name (`lobby`). Ignored when `to` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room: Option<String>,
+    /// Agent name to open/send a DM to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body: String,
+    /// Upload ids from `/api/chat/uploads`, attached to this message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uploads: Vec<i64>,
+}
+
+/// `POST /api/chat/rooms`: create a shared room. The global `lobby` always
+/// exists; anything else is fair game.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewChatRoom {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Room names are slugs: lowercase letters, digits, single hyphens.
+pub fn normalize_room_name(s: &str) -> Result<String, String> {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in s.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash && !out.is_empty() {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        return Err("room name must contain letters or digits".into());
+    }
+    if out.chars().count() > 40 {
+        return Err("room name must be 40 chars or fewer".into());
+    }
+    Ok(out)
+}
+
+/// `POST /api/chat/dm`: open (or fetch) a DM with an agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenDm {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    pub with: String,
+}
+
 /// Server-side roll-up for `GET /api/agents/status`. Counts mirror the
 /// opencode `bb-status` widget line (`BB x/y done, a active, …`), computed
 /// from live claims instead of local session files.

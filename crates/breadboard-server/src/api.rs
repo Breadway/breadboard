@@ -4,8 +4,11 @@
 //! milestone 7 → `bread.board.*`). Synced-field changes are logged to
 //! `sync_log` by the store layer; Forgejo writeback lands in milestone 4.
 
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
+use axum::http::{header, HeaderValue};
+use axum::response::Response;
 use axum::Json;
 use breadboard_core::{BoardEvent, Comment, Cycle, Epic, Issue, Project, SyncSource};
 use serde::{Deserialize, Serialize};
@@ -635,6 +638,379 @@ fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
 
 /// Set or clear the signed-in agent's one-liner. The name is normalised the
 /// same way claims are, so it lands on the same profile the Agents tab groups.
+
+// --- chat -------------------------------------------------------------------
+
+#[derive(Deserialize)]
+pub struct ChatQuery {
+    /// Act as this agent (must belong to the caller) instead of the human.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// Return only messages with id greater than this.
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+/// Resolve who is speaking: an owned agent, or the signed-in human.
+async fn chat_author(
+    app: &AppState,
+    user: &AuthUser,
+    agent_name: Option<&str>,
+) -> AppResult<(String, String, breadboard_core::ChatAuthorKind)> {
+    match agent_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if !store::user_has_agent(&app.db, user.0.id, name).await? {
+                return Err(crate::error::AppError::forbidden());
+            }
+            Ok((
+                store::agent_member(name),
+                name.trim().to_lowercase(),
+                breadboard_core::ChatAuthorKind::Agent,
+            ))
+        }
+        None => Ok((
+            store::human_member(&user.0.login),
+            user.0.login.clone(),
+            breadboard_core::ChatAuthorKind::Human,
+        )),
+    }
+}
+
+async fn resolve_chat_room(app: &AppState, room: Option<&str>) -> AppResult<breadboard_core::ChatRoom> {
+    match room.map(str::trim).filter(|s| !s.is_empty()) {
+        None => store::chat_room_by_name(&app.db, "lobby")
+            .await?
+            .ok_or(crate::error::AppError::NotFound),
+        Some(id) if id.parse::<i64>().is_ok() => {
+            store::get_chat_room(&app.db, id.parse().unwrap()).await
+        }
+        Some(name) => store::chat_room_by_name(&app.db, name)
+            .await?
+            .ok_or(crate::error::AppError::NotFound),
+    }
+}
+
+pub async fn list_chat_rooms(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<ChatQuery>,
+) -> AppResult<Json<Vec<breadboard_core::ChatRoom>>> {
+    let viewer = match q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if !store::user_has_agent(&app.db, user.0.id, name).await? {
+                return Err(crate::error::AppError::forbidden());
+            }
+            Some(store::agent_member(name))
+        }
+        None => None,
+    };
+    Ok(Json(store::chat_rooms(&app.db, viewer.as_deref()).await?))
+}
+
+pub async fn create_chat_room(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<breadboard_core::dto::NewChatRoom>,
+) -> AppResult<(StatusCode, Json<breadboard_core::ChatRoom>)> {
+    let name = breadboard_core::dto::normalize_room_name(&body.name)
+        .map_err(crate::error::AppError::BadRequest)?;
+    let description = body
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty());
+    if let Some(d) = description {
+        if d.chars().count() > 160 {
+            return Err(crate::error::AppError::bad_request(
+                "description must be 160 characters or fewer",
+            ));
+        }
+    }
+    let room = store::create_chat_room(&app.db, &name, description).await?;
+    Ok((StatusCode::CREATED, Json(room)))
+}
+
+pub async fn chat_messages(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+    Query(q): Query<ChatQuery>,
+) -> AppResult<Json<Vec<breadboard_core::ChatMessage>>> {
+    let room = store::get_chat_room(&app.db, id).await?;
+    if let Some(name) = q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        if !store::user_has_agent(&app.db, user.0.id, name).await? {
+            return Err(crate::error::AppError::forbidden());
+        }
+        if room.kind == breadboard_core::ChatRoomKind::Dm
+            && !store::chat_is_member(&app.db, room.id, &store::agent_member(name)).await?
+        {
+            return Err(crate::error::AppError::forbidden());
+        }
+    }
+    let messages = store::chat_messages(
+        &app.db,
+        room.id,
+        q.after.unwrap_or(0),
+        q.limit.unwrap_or(200).clamp(1, 500),
+    )
+    .await?;
+    Ok(Json(messages))
+}
+
+pub async fn open_dm(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::OpenDm>,
+) -> AppResult<Json<breadboard_core::ChatRoom>> {
+    let (author, _, _) =
+        chat_author(&app, &user, body.agent_name.as_deref()).await?;
+    let peer = store::agent_member(&body.with);
+    if peer == author {
+        return Err(crate::error::AppError::bad_request(
+            "cannot open a DM with yourself",
+        ));
+    }
+    if peer == store::agent_member("") {
+        return Err(crate::error::AppError::bad_request("agent name is required"));
+    }
+    Ok(Json(store::find_or_create_dm(&app.db, &author, &peer).await?))
+}
+
+
+// --- chat uploads -----------------------------------------------------------
+
+const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
+
+fn safe_display_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("file");
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '"')
+        .take(120)
+        .collect();
+    if cleaned.trim().is_empty() {
+        "file".into()
+    } else {
+        cleaned
+    }
+}
+
+fn guess_mime(filename: &str, provided: Option<&str>) -> String {
+    if let Some(m) = provided.map(str::trim).filter(|m| !m.is_empty() && *m != "application/octet-stream") {
+        return m.to_string();
+    }
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "json" => "application/json",
+        "zip" => "application/zip",
+        "log" => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn storage_ext(filename: &str) -> String {
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
+    if !ext.is_empty() && ext.len() <= 10 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        ext
+    } else {
+        "bin".into()
+    }
+}
+
+async fn save_upload(
+    app: &AppState,
+    user_id: i64,
+    filename: &str,
+    mime: Option<&str>,
+    bytes: &[u8],
+) -> AppResult<Json<breadboard_core::ChatUpload>> {
+    if bytes.is_empty() {
+        return Err(AppError::bad_request("file is empty"));
+    }
+    if bytes.len() > MAX_UPLOAD_BYTES {
+        return Err(AppError::bad_request("file is larger than 10 MB"));
+    }
+    let display = safe_display_name(filename);
+    let mime = guess_mime(&display, mime);
+    let stored = format!("{}.{}", crate::auth::random_token(), storage_ext(&display));
+    let dir = app.config.uploads_dir();
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("creating upload dir: {e}")))?;
+    tokio::fs::write(dir.join(&stored), bytes)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("writing upload: {e}")))?;
+    let upload = store::insert_chat_upload(
+        &app.db,
+        user_id,
+        &display,
+        &mime,
+        bytes.len() as i64,
+        &stored,
+    )
+    .await?;
+    Ok(Json(upload))
+}
+
+pub async fn upload_chat_file(
+    State(app): State<AppState>,
+    user: AuthUser,
+    mut multipart: Multipart,
+) -> AppResult<(StatusCode, Json<breadboard_core::ChatUpload>)> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::bad_request(format!("bad multipart: {e}")))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let filename = field.file_name().unwrap_or("file").to_string();
+        let mime = field.content_type().map(str::to_string);
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|e| AppError::bad_request(format!("reading file: {e}")))?;
+        let saved = save_upload(&app, user.0.id, &filename, mime.as_deref(), &bytes).await?;
+        return Ok((StatusCode::CREATED, saved));
+    }
+    Err(AppError::bad_request("no file field"))
+}
+
+#[derive(Deserialize)]
+pub struct UploadBase64 {
+    pub filename: String,
+    #[serde(default)]
+    pub mime: Option<String>,
+    pub data_base64: String,
+}
+
+/// Base64 variant for MCP/CLI clients that cannot send multipart.
+pub async fn upload_chat_file_base64(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<UploadBase64>,
+) -> AppResult<(StatusCode, Json<breadboard_core::ChatUpload>)> {
+    use base64::Engine as _;
+    let raw = body
+        .data_base64
+        .split_once("base64,")
+        .map(|(_, rest)| rest)
+        .unwrap_or(&body.data_base64);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(raw.trim())
+        .map_err(|_| AppError::bad_request("data_base64 is not valid base64"))?;
+    let saved = save_upload(
+        &app,
+        user.0.id,
+        &body.filename,
+        body.mime.as_deref(),
+        &bytes,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, saved))
+}
+
+pub async fn get_chat_upload(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<Response> {
+    let stored = store::get_chat_upload(&app.db, id).await?;
+    let path = app.config.uploads_dir().join(&stored.path);
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|_| AppError::NotFound)?;
+    let inline = matches!(
+        stored.upload.mime.as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    );
+    let mut builder = Response::builder()
+        .header(header::CONTENT_TYPE, &stored.upload.mime)
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "private, max-age=86400");
+    if !inline {
+        let name = safe_display_name(&stored.upload.filename);
+        builder = builder.header(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).map_err(|_| {
+                AppError::bad_request("invalid filename")
+            })?,
+        );
+    }
+    builder
+        .body(Body::from(bytes))
+        .map_err(|e| AppError::Other(anyhow::anyhow!("building upload response: {e}")))
+}
+pub async fn post_chat_message(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::NewChatMessage>,
+) -> AppResult<(StatusCode, Json<breadboard_core::ChatMessage>)> {
+    let text = body.body.trim();
+    if text.is_empty() && body.uploads.is_empty() {
+        return Err(crate::error::AppError::bad_request("message is empty"));
+    }
+    if text.chars().count() > 2000 {
+        return Err(crate::error::AppError::bad_request(
+            "message must be 2000 characters or fewer",
+        ));
+    }
+    let (author, display, kind) = chat_author(&app, &user, body.agent_name.as_deref()).await?;
+
+    let room = if let Some(to) = body.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let peer = store::agent_member(to);
+        if peer == author {
+            return Err(crate::error::AppError::bad_request(
+                "cannot DM yourself",
+            ));
+        }
+        store::find_or_create_dm(&app.db, &author, &peer).await?
+    } else {
+        resolve_chat_room(&app, body.room.as_deref()).await?
+    };
+
+    if kind == breadboard_core::ChatAuthorKind::Agent
+        && room.kind == breadboard_core::ChatRoomKind::Dm
+        && !store::chat_is_member(&app.db, room.id, &author).await?
+    {
+        return Err(crate::error::AppError::forbidden());
+    }
+
+    let message = store::post_chat_message(
+        &app.db,
+        room.id,
+        &author,
+        &display,
+        kind,
+        text,
+        &body.uploads,
+        user.0.id,
+    )
+    .await?;
+    app.bus.publish(BoardEvent::ChatMessage {
+        room_id: room.id,
+        id: message.id,
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::ChatMessage {
+            room_id: room.id,
+            id: message.id,
+        },
+    );
+    Ok((StatusCode::CREATED, Json(message)))
+}
 pub async fn set_agent_message(
     State(app): State<AppState>,
     user: AuthUser,

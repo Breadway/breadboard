@@ -8,6 +8,7 @@
   import Backlog from "./lib/Backlog.svelte";
   import Roadmap from "./lib/Roadmap.svelte";
   import Agents from "./lib/Agents.svelte";
+  import Chat from "./lib/Chat.svelte";
   import Inbox from "./lib/Inbox.svelte";
   import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
@@ -78,6 +79,7 @@
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
     { v: "agents", label: "Agents" },
+    { v: "chat", label: "Chat" },
     { v: "inbox", label: "Inbox" },
     { v: "settings", label: "Settings" },
   ];
@@ -133,6 +135,8 @@
           <Roadmap />
         {:else if store.view === "agents"}
           <Agents />
+        {:else if store.view === "chat"}
+          <Chat />
         {:else if store.view === "inbox"}
           <Inbox />
         {:else}

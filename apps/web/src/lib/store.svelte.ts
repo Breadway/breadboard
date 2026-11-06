@@ -26,7 +26,7 @@ import {
 export const api = new BreadboardClient();
 
 type AuthState = "loading" | "in" | "out" | "error";
-export type View = "board" | "backlog" | "roadmap" | "agents" | "inbox" | "settings";
+export type View = "board" | "backlog" | "roadmap" | "agents" | "chat" | "inbox" | "settings";
 
 /** Multi-select filter facets. Facets combine with AND; values inside one
  *  facet combine with OR. An empty facet means "no constraint". */
@@ -105,6 +105,8 @@ class Store {
   toast = $state<Toast | null>(null);
   /** Ticking clock so heartbeat ages and stale tints update without events. */
   clock = $state(Date.now());
+  /** Bumped when any chat message arrives over SSE. */
+  chatTick = $state(0);
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
@@ -518,6 +520,9 @@ class Store {
       case "agent.released":
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        break;
+      case "chat.message":
+        this.chatTick++;
         break;
       case "card.deleted":
         this.issues = this.issues.filter((i) => i.key !== ev.key);
