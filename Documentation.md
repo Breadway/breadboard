@@ -60,6 +60,13 @@ Ownership is per issue, not per agent: one agent may hold many exclusive
 claims, and the Agents tab groups them under that agent with each issue's
 state and an overall done/total ring.
 
+A claim with no heartbeat for 5+ minutes is shown with a clock and marked
+**stale**, never as `blocked`: stale means "may be abandoned", blocked is a
+lifecycle state. Re-claiming an issue you already own is idempotent: it
+heartbeats and resumes the existing claim instead of returning `409`. After a
+restart, an agent can call the MCP `resume_claims` tool to heartbeat everything
+it owns and re-arm keepalives.
+
 Agent names are free-form and meant to be fun and memorable (Toasty Pretzel,
 Crumb Baron). Reuse the same name across issues; identity is `(user, agent
 name)`, so a stable name is what makes the Agents tab group that agent's work.
@@ -359,8 +366,8 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `create_project` / `update_project` / `create_cycle` / `start_cycle` /
 `end_cycle`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
-`claim_issue` / `update_claim` (heartbeat) / `release_claim` / `list_agents` /
-`agent_status`,
+`claim_issue` / `update_claim` (heartbeat) / `release_claim` / `resume_claims` /
+`list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
 

@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Issue } from "@breadboard/api-client";
-  import { claimStale, store } from "./store.svelte";
+  import { ago, claimStale, store } from "./store.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
@@ -12,6 +12,7 @@
     store.claimsForIssue(issue.id).filter((c) => c.mode === "intent"),
   );
   const stale = $derived(claim ? claimStale(claim.last_heartbeat, store.clock) : false);
+  const claimAge = $derived(claim ? ago(claim.last_heartbeat, store.clock) : "");
 
   const MAX_LABELS = 3;
 
@@ -59,10 +60,14 @@
         class="agent"
         class:stale={stale}
         title={stale
-          ? `Claimed by ${claim.agent_name} · stale (no heartbeat for 5+ min) · ${claim.state}`
-          : `Claimed by ${claim.agent_name} · ${claim.state} · heartbeat ${claim.last_heartbeat}`}
+          ? `Claimed by ${claim.agent_name} · last heartbeat ${claimAge} · claim may be abandoned`
+          : `Claimed by ${claim.agent_name} · ${claim.state} · heartbeat ${claimAge} ago`}
       >
-        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {#if stale}
+          <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {:else}
+          <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {/if}
         {claim.agent_name}
       </span>
     {:else if intents.length}

@@ -86,6 +86,15 @@ function suggestNames(count: number): string[] {
   return [...out];
 }
 
+/** Claims owned by the signed-in user under this agent name. */
+async function ownClaims(agent: string) {
+  const [me, claims] = await Promise.all([client.me(), client.listAgents()]);
+  const name = agent.trim().toLowerCase();
+  return claims.filter(
+    (c) => c.claimed_by === me.id && c.agent_name.toLowerCase() === name,
+  );
+}
+
 const KEEPALIVE_MS = 60_000;
 const keepalives = new Map<string, ReturnType<typeof setInterval>>();
 
@@ -632,12 +641,29 @@ server.tool(
   },
   ({ key, agent_name, ...claim }) =>
     run(async () => {
-      const created = await client.claimIssue(key, {
-        ...claim,
-        agent_name: agent_name?.trim() || defaultAgentName(),
-      } as never);
-      startKeepalive(key, created.agent_name);
-      return created;
+      const name = agent_name?.trim() || defaultAgentName();
+      const mode = (claim.mode ?? "exclusive") as "exclusive" | "intent";
+      try {
+        const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
+        startKeepalive(key, created.agent_name);
+        return created;
+      } catch (e) {
+        // Re-claiming your own claim after a restart is not a conflict: find
+        // it, heartbeat it, and re-arm the keepalive. Only resume a claim of
+        // the same mode; an intent blocked by someone else's exclusive claim
+        // must still report the conflict.
+        if (e instanceof ApiError && e.status === 409) {
+          const mine = (await ownClaims(name)).find(
+            (c) => c.key.toLowerCase() === key.toLowerCase() && c.mode === mode,
+          );
+          if (mine) {
+            const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
+            startKeepalive(key, resumed.agent_name);
+            return { ...resumed, resumed: true };
+          }
+        }
+        throw e;
+      }
     }),
 );
 
@@ -674,6 +700,46 @@ server.tool(
       await client.releaseClaim(key, who);
       stopKeepalive(key, who);
       return `released ${key}`;
+    }),
+);
+
+server.tool(
+  "resume_claims",
+  "Re-attach to work you already own after a restart. Heartbeats every claim owned by you under " +
+    "this agent name and re-arms the keepalive for each, so they stop looking abandoned/stale. " +
+    "Call this when an MCP session starts and you intend to continue previous work.",
+  {
+    agent_name: z
+      .string()
+      .optional()
+      .describe("agent name whose claims to resume; defaults to this process's generated name"),
+  },
+  ({ agent_name }) =>
+    run(async () => {
+      const name = agent_name?.trim() || autoAgentName;
+      if (!name) {
+        throw new Error("no agent name yet: pass agent_name or call claim_issue first");
+      }
+      const mine = await ownClaims(name);
+      if (mine.length === 0) {
+        return `no claims found for ${name}`;
+      }
+      const resumed: string[] = [];
+      const failed: string[] = [];
+      for (const c of mine) {
+        try {
+          await client.heartbeatClaim(c.key, { agent_name: name }, name);
+          startKeepalive(c.key, name);
+          resumed.push(c.key);
+        } catch {
+          failed.push(c.key);
+        }
+      }
+      return {
+        agent_name: name,
+        resumed,
+        ...(failed.length ? { failed } : {}),
+      };
     }),
 );
 

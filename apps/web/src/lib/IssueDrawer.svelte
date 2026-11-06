@@ -11,7 +11,7 @@
     type IssuePatch,
     type LinkKind,
   } from "@breadboard/api-client";
-  import { api, claimStale, errMsg, store, statusName } from "./store.svelte";
+  import { ago, api, claimStale, errMsg, store, statusName } from "./store.svelte";
   import { renderMarkdown } from "./markdown";
   import Menu, { type MenuItem } from "./ui/Menu.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
@@ -162,7 +162,8 @@
   const intents = $derived(
     issue ? store.claimsForIssue(issue.id).filter((c) => c.mode === "intent") : [],
   );
-  const claimStaleFlag = $derived(claim ? claimStale(claim.last_heartbeat) : false);
+  const claimStaleFlag = $derived(claim ? claimStale(claim.last_heartbeat, store.clock) : false);
+  const claimAge = $derived(claim ? ago(claim.last_heartbeat, store.clock) : "");
 
   async function doClaim() {
     if (!issue) return;
@@ -454,8 +455,19 @@
           <h3>
             Agent
             {#if claim}
-              <span class="agent-pill" class:stale={claimStaleFlag} style="--agent:{agentColor(claim.agent_name)}" title="Last heartbeat: {claim.last_heartbeat}">
-                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+              <span
+                class="agent-pill"
+                class:stale={claimStaleFlag}
+                style="--agent:{agentColor(claim.agent_name)}"
+                title={claimStaleFlag
+                  ? `Last heartbeat ${claimAge}; claim may be abandoned`
+                  : `Last heartbeat ${claimAge} ago`}
+              >
+                {#if claimStaleFlag}
+                  <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                {:else}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                {/if}
                 {claim.agent_name} · {claim.state}{claimStaleFlag ? " · stale" : ""}
               </span>
             {/if}
@@ -898,6 +910,7 @@
   .agent-pill svg {
     width: 11px;
     height: 11px;
+    flex: none;
   }
   .agent-pill.stale {
     color: var(--danger);
