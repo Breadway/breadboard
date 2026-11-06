@@ -431,6 +431,8 @@ pub struct ChatRoom {
     pub description: Option<String>,
     /// Member keys, e.g. `agent:crumb baron`.
     pub members: Vec<String>,
+    /// Messages newer than the reader's cursor, excluding their own.
+    pub unread: i64,
     pub last_message: Option<ChatMessage>,
 }
 

@@ -111,6 +111,7 @@
         {@render icon(v)}{label}
         {#if v === "backlog"}<span class="n">{totalOpen}</span>{/if}
         {#if v === "agents" && store.activeAgents > 0}<span class="agent-count">{store.activeAgents}</span>{/if}
+        {#if v === "chat" && store.chatUnread > 0}<span class="badge">{store.chatUnread > 99 ? "99+" : store.chatUnread}</span>{/if}
         {#if v === "inbox" && store.unread > 0}<span class="badge">{store.unread > 99 ? "99+" : store.unread}</span>{/if}
       </button>
     {/each}

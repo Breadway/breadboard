@@ -303,3 +303,94 @@ async fn uploads_attach_to_messages() {
         .unwrap();
     assert_eq!(reuse.status(), 400);
 }
+
+/// Read cursors: unread counts drop when a room is read, and your own
+/// messages never count as unread.
+#[tokio::test]
+async fn unread_counts_and_cursors() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    setup(&c, &base, &auth).await;
+    for agent in ["Alpha", "Beta"] {
+        make_agent(&c, &base, &auth, agent).await;
+    }
+
+    // Beta says two things; Alpha has never read the lobby.
+    for text in ["first", "second"] {
+        c.post(format!("{base}/api/chat/messages"))
+            .header("authorization", &auth)
+            .json(&json!({ "agent_name": "Beta", "body": text }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let alpha_rooms = rooms(&c, &base, &auth, Some("Alpha")).await;
+    let lobby = alpha_rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap();
+    assert_eq!(lobby["unread"], 2, "Beta's two messages are unread");
+
+    // Alpha reads them.
+    c.get(format!(
+        "{base}/api/chat/rooms/{}/messages?agent=Alpha",
+        lobby["id"].as_i64().unwrap()
+    ))
+    .header("authorization", &auth)
+    .send()
+    .await
+    .unwrap();
+
+    let alpha_rooms = rooms(&c, &base, &auth, Some("Alpha")).await;
+    let lobby = alpha_rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap();
+    assert_eq!(lobby["unread"], 0);
+
+    // Alpha replies: Beta now has two unread (Beta never read), and Alpha's
+    // own message does not re-add unread for Alpha.
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "body": "third" }))
+        .send()
+        .await
+        .unwrap();
+    let alpha_rooms = rooms(&c, &base, &auth, Some("Alpha")).await;
+    let lobby = alpha_rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap();
+    assert_eq!(lobby["unread"], 0, "own messages are not unread");
+
+    let beta_rooms = rooms(&c, &base, &auth, Some("Beta")).await;
+    let lobby = beta_rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap();
+    assert_eq!(
+        lobby["unread"], 1,
+        "Beta's own messages are excluded; only Alpha's reply is unread"
+    );
+
+    // Humans get unread too.
+    let human_rooms = rooms(&c, &base, &auth, None).await;
+    let lobby = human_rooms
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap();
+    assert_eq!(lobby["unread"], 3);
+}

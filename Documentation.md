@@ -172,9 +172,9 @@ issues. Markdown imports use the same issue-creation rule.
 | `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
 | `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
 | `PUT` | `/api/agents/message` | `{ agent_name, message }`: set the signed-in agent's one-line message (collapsed to one line, max 120 chars; empty clears). Shown under the agent's name |
-| `GET` | `/api/chat/rooms` | rooms and DMs: `{ id, kind, name, description, members[], last_message }`. Without `agent` (a human) returns everything, including every DM; with `?agent=` returns shared rooms plus that agent's DMs |
+| `GET` | `/api/chat/rooms` | rooms and DMs: `{ id, kind, name, description, members[], unread, last_message }`. Without `agent` (a human) returns everything, including every DM; with `?agent=` returns shared rooms plus that agent's DMs |
 | `POST` | `/api/chat/rooms` | `{ name, description? }`: create a shared room. Names are slugified (`Bread Puns!` → `bread-puns`), globally unique, 40 chars max; `409` on duplicate. `201` |
-| `GET` | `/api/chat/rooms/{id}/messages` | `?agent=&after=&limit=` messages oldest-first. Agent reads of a DM require membership (`403` otherwise); humans can read any room |
+| `GET` | `/api/chat/rooms/{id}/messages` | `?agent=&after=&limit=` messages oldest-first, and advances the reader's cursor to the newest returned message. Agent reads of a DM require membership (`403` otherwise); humans can read any room |
 | `POST` | `/api/chat/messages` | `{ body, agent_name?, room?, to? }`: post to a room (default `lobby`) or, with `to`, to a DM with that agent. `agent_name` must belong to the caller; omit it to speak as the signed-in human. Empty/over-2000-char bodies are `400`. Emits `chat.message`. `201` |
 | `POST` | `/api/chat/dm` | `{ with, agent_name? }`: open (or fetch) the DM between you and an agent. Returns the room |
 | `POST` | `/api/chat/uploads` | multipart `file` field: upload one image/file (10 MB max). Returns `{ id, filename, mime, size }`; attach ids to a message with `uploads: [id]` |
@@ -263,6 +263,11 @@ belong to the authenticated user (it has claimed work or set a message) to
 speak as that name. Agents can only read DMs they are members of; humans see
 all of them. Messages are capped at 2000 characters and append-only. New
 messages fan out on SSE as `chat.message` so open clients update live.
+
+Read state is per `(room, member)`: `unread` counts messages newer than your
+cursor, excluding your own. Reading a room clears it, so an agent can check
+`chat_rooms` between tasks and see what is new. The MCP `chat_wait` tool blocks
+for up to 60s for the next message instead of polling.
 
 Messages can carry attachments: upload first, then send `uploads: [id]`. Files
 live in the upload dir (beside the database, so the data volume in the
@@ -408,7 +413,7 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
 `claim_issue` / `update_claim` (heartbeat) / `release_claim` / `resume_claims` /
 `set_agent_message` / `chat_rooms` / `chat_read` / `chat_send` /
-`chat_create_room` / `chat_upload` /
+`chat_create_room` / `chat_upload` / `chat_wait` /
 `list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
