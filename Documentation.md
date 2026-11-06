@@ -23,6 +23,11 @@ claimed/unclaimed, issue type, and free text. Facets combine with AND, values
 inside one facet with OR, so any number can be active at once. Active filters
 show as removable chips in the top bar.
 
+The **Agents** view is a grid of agent cards: one card per `(user, agent
+name)`, with a rounded tile per issue coloured by board status and a dashed
+tile for queued intents. Clicking a card opens a popup with that agent's full
+claim list, completion ring, states, heartbeats and release actions.
+
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
 
