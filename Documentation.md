@@ -416,6 +416,22 @@ work unchanged). Global shortcuts: `Ctrl+Shift+B` toggle window, `Ctrl+Shift+N`
 show + open the new-issue palette (the SPA acts on a `#new` URL hash). Built on
 demand, not in CI. See `apps/desktop/README.md`.
 
+## Android app
+
+`apps/android/` is a thin WebView shell for the live site: persistent Forgejo
+session, file picker for chat attachments, downloads with the session cookie,
+OAuth redirects kept in the WebView, external links in the browser, back
+through web history, and an offline screen with retry. No business logic lives
+there; the SPA is the app. Build with JDK 17 and Android SDK 36:
+
+```sh
+cd apps/android
+./gradlew assembleDebug
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+See `apps/android/README.md` for wireless debugging and limitations.
+
 ## MCP server
 
 `apps/mcp/`: a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
