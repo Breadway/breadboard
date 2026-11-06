@@ -446,6 +446,8 @@ pub struct AgentClaim {
     pub claimed_by: i64,
     pub claimed_by_login: String,
     pub agent_name: String,
+    /// Optional one-line message shown under the agent's name.
+    pub message: Option<String>,
     pub mode: ClaimMode,
     pub session_id: Option<String>,
     pub state: AgentState,

@@ -24,7 +24,8 @@ inside one facet with OR, so any number can be active at once. Active filters
 show as removable chips in the top bar.
 
 The **Agents** view is a grid of agent cards: one card per `(user, agent
-name)`, with a rounded tile per issue coloured by board status and a dashed
+name)`, with the agent's optional one-line message under its name, and a
+rounded tile per issue coloured by board status and a dashed
 tile for queued intents. Clicking a card opens a popup with that agent's full
 claim list, completion ring, states, heartbeats and release actions.
 
@@ -166,10 +167,11 @@ issues. Markdown imports use the same issue-creation rule.
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
-| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, message?, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
 | `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. `?agent=` / `?mode=exclusive|intent` pick one when you hold several; with neither, the exclusive claim wins over an intent and the freshest wins otherwise. Only the claiming user may update, and a mismatched `session_id` is `409`. `pr_url` must be an absolute http(s) URL. A newly set `pr_url` also comments the link on the issue once (synced to Forgejo). Emits `agent.updated` |
 | `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
 | `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
+| `PUT` | `/api/agents/message` | `{ agent_name, message }`: set the signed-in agent's one-line message (collapsed to one line, max 120 chars; empty clears). Shown under the agent's name |
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
@@ -336,6 +338,7 @@ repo with no mapped project are skipped with a warning.
 | `release <key> [--agent NAME]` | release your claim (status stays, tint goes away) |
 | `agents list [--stale]` | live agent claims with mode, state and heartbeat |
 | `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
+| `agents message <agent> "<text>"` | set (or clear, with `""`) the one-line message under an agent's name |
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
@@ -372,6 +375,7 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `end_cycle`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
 `claim_issue` / `update_claim` (heartbeat) / `release_claim` / `resume_claims` /
+`set_agent_message` /
 `list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.

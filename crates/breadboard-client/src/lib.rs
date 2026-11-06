@@ -82,6 +82,12 @@ pub struct PendingWriteback {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct AgentMessageView {
+    pub agent_name: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RepoView {
     pub repo: String,
     pub project_key: Option<String>,
@@ -411,6 +417,24 @@ impl Client {
             rb = rb.query(&[("agent", agent)]);
         }
         self.send_empty(rb).await
+    }
+
+    /// Set or clear an agent's one-line message.
+    pub async fn set_agent_message(
+        &self,
+        agent: &str,
+        message: &str,
+    ) -> Result<AgentMessageView> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            agent_name: &'a str,
+            message: &'a str,
+        }
+        self.send(
+            self.build(reqwest::Method::PUT, "/api/agents/message")
+                .json(&Body { agent_name: agent, message }),
+        )
+        .await
     }
 
     /// Release one claim by its id (multi-claim issues, Agents page).

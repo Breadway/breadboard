@@ -47,6 +47,7 @@ or in `.mcp.json`:
 | `create_project` `update_project` `create_cycle` `update_cycle_projects` `start_cycle` `end_cycle` `add_repo` `remove_repo` `reconcile` | admin (cycle creation accepts project ids for new-issue defaults; `update_cycle_projects` replaces them without moving existing issues) |
 | `suggest_agent_names` | fun, memorable names to pick from (names are characters, not hosts) |
 | `resume_claims` | after a restart, heartbeat every claim you own under this agent name and re-arm keepalives |
+| `set_agent_message` | set or clear the one-line message shown under your name in the Agents view |
 | `claim_issue` `update_claim` `release_claim` | claim before starting work; `agent_name` is free-form and should be fun, reusable across issues, or omitted for an auto-generated one. Re-claiming a claim you already own is idempotent (heartbeats and returns it). `mode=exclusive` (default) is first-wins (`409` means someone else has it); `mode=intent` queues interest later without moving or blocking. The MCP server auto-heartbeats every claim it creates every 60s, so claims stay live; report progress with `update_claim` and release when done |
 | `list_agents` `agent_status` | live claims + the `bb-status`-style server roll-up (`BB x/y done, …`) |
 | `import_markdown` | outline → epics + issues; set `repair: true` to retry existing unlinked cards and `dry_run: true` to list the local keys that would be created remotely. Normal import mirrors only newly created local cards. |

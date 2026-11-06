@@ -56,6 +56,7 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::remove_repo),
         )
         .route("/agents", get(api::list_agents))
+        .route("/agents/message", put(api::set_agent_message))
         .route("/agents/status", get(api::agent_status))
         .route(
             "/issues/{key}/claim",

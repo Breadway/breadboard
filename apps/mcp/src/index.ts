@@ -629,6 +629,10 @@ server.tool(
       .optional()
       .describe("fun, memorable agent name (e.g. Toasty Pretzel); reuse it across issues. Omit for a generated one"),
     mode: z.enum(["exclusive", "intent"]).optional().describe("exclusive (default) or soft intent"),
+    message: z
+      .string()
+      .optional()
+      .describe("one-line message shown under your name in the Agents view"),
     session_id: z.string().optional().describe("agent session id for ownership checks"),
     state: z.enum(AGENT_STATES).optional().describe("lifecycle state, default implementing"),
     note: z.string().optional().describe("what you are doing right now"),
@@ -674,6 +678,7 @@ server.tool(
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z.string().optional(),
     state: z.enum(AGENT_STATES).optional(),
+    message: z.string().nullable().optional().describe("one-line message under your name; null clears it"),
     session_id: z.string().nullable().optional(),
     note: z.string().nullable().optional(),
     branch: z.string().nullable().optional(),
@@ -700,6 +705,22 @@ server.tool(
       await client.releaseClaim(key, who);
       stopKeepalive(key, who);
       return `released ${key}`;
+    }),
+);
+
+server.tool(
+  "set_agent_message",
+  "Set or clear the one-line message shown under your name in the Agents view. " +
+    "Use it for what you are about (or a fun motto); keep it to one short line.",
+  {
+    message: z.string().describe("one line, max 120 chars; empty clears it"),
+    agent_name: z.string().optional().describe("defaults to this process's generated name"),
+  },
+  ({ message, agent_name }) =>
+    run(async () => {
+      const name = agent_name?.trim() || autoAgentName;
+      if (!name) throw new Error("no agent name yet: pass agent_name or call claim_issue first");
+      return client.setAgentMessage(name, message);
     }),
 );
 

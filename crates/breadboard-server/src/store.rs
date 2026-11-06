@@ -1821,6 +1821,7 @@ struct AgentClaimRow {
     claimed_by: i64,
     claimed_by_login: String,
     agent_name: String,
+    agent_message: Option<String>,
     mode: String,
     session_id: Option<String>,
     state: String,
@@ -1848,6 +1849,7 @@ impl From<AgentClaimRow> for AgentClaim {
             claimed_by: r.claimed_by,
             claimed_by_login: r.claimed_by_login,
             agent_name: r.agent_name,
+            message: r.agent_message,
             mode: ClaimMode::parse(&r.mode).unwrap_or(ClaimMode::Exclusive),
             session_id: r.session_id,
             state: AgentState::parse(&r.state).unwrap_or(AgentState::Implementing),
@@ -1868,7 +1870,7 @@ impl From<AgentClaimRow> for AgentClaim {
 
 const AGENT_CLAIM_COLS: &str = "c.id, c.issue_id, i.key AS key, i.title AS issue_title, \
     i.status AS issue_status, c.claimed_by, u.login AS claimed_by_login, \
-    c.agent_name, c.mode, c.session_id, c.state, c.note, c.branch, c.worktree, c.repo, \
+    c.agent_name, p.message AS agent_message, c.mode, c.session_id, c.state, c.note, c.branch, c.worktree, c.repo, \
     c.pr_url, c.pr_number, c.head_sha, c.board_status, c.claimed_at, c.updated_at, \
     c.last_heartbeat";
 
@@ -1876,7 +1878,8 @@ fn agent_claim_join() -> String {
     format!(
         "SELECT {AGENT_CLAIM_COLS} FROM agent_claims c \
          JOIN issues i ON i.id = c.issue_id \
-         JOIN users u ON u.id = c.claimed_by"
+         JOIN users u ON u.id = c.claimed_by \
+         LEFT JOIN agent_profiles p ON p.user_id = c.claimed_by AND p.agent_name = c.agent_name"
     )
 }
 
@@ -1992,6 +1995,7 @@ pub async fn insert_claim(
                 pr_url: input.pr_url.clone().map(Some),
                 pr_number: input.pr_number.map(Some),
                 head_sha: input.head_sha.clone().map(Some),
+                message: input.message.clone().map(Some),
             };
             let claim = update_claim_row(db, id, &upd, &ts).await?;
             return Ok(claim);
@@ -2022,9 +2026,22 @@ pub async fn insert_claim(
     .execute(db)
     .await;
     match res {
-        Ok(done) => get_claim_by_id(db, done.last_insert_rowid())
-            .await?
-            .ok_or(AppError::NotFound),
+        Ok(done) => {
+            if let Some(message) = &input.message {
+                let normalized = breadboard_core::dto::normalize_agent_message(message)
+                    .map_err(AppError::BadRequest)?;
+                set_agent_message(
+                    db,
+                    claimed_by,
+                    &input.agent_name.trim().to_lowercase(),
+                    normalized.as_deref(),
+                )
+                .await?;
+            }
+            get_claim_by_id(db, done.last_insert_rowid())
+                .await?
+                .ok_or(AppError::NotFound)
+        }
         Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
             // Two concurrent intent claims: the loser updates the winner's
             // row instead of surfacing a conflict for a soft reservation.
@@ -2051,6 +2068,7 @@ pub async fn insert_claim(
                         pr_url: input.pr_url.clone().map(Some),
                         pr_number: input.pr_number.map(Some),
                         head_sha: input.head_sha.clone().map(Some),
+                        message: input.message.clone().map(Some),
                     };
                     return update_claim_row(db, id, &upd, &ts).await;
                 }
@@ -2122,10 +2140,12 @@ async fn update_claim_row(
     set_nullable!("head_sha", &input.head_sha);
 
     // Refresh board_status from the live issue + heartbeat in the same tx.
-    let issue_id: i64 = sqlx::query_scalar("SELECT issue_id FROM agent_claims WHERE id = ?1")
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let (issue_id, claimed_by, agent_name): (i64, i64, String) = sqlx::query_as(
+        "SELECT issue_id, claimed_by, agent_name FROM agent_claims WHERE id = ?1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
     let status: String = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
         .bind(issue_id)
         .fetch_one(&mut *tx)
@@ -2139,6 +2159,14 @@ async fn update_claim_row(
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
+
+    if let Some(message) = &input.message {
+        let normalized = breadboard_core::dto::normalize_agent_message(
+            message.as_deref().unwrap_or_default(),
+        )
+        .map_err(AppError::BadRequest)?;
+        set_agent_message(db, claimed_by, &agent_name, normalized.as_deref()).await?;
+    }
 
     get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)
 }
@@ -2177,6 +2205,54 @@ pub async fn refresh_claim_board_status(
     .execute(db)
     .await?;
     Ok(())
+}
+
+/// Upsert or clear an agent's one-liner. `agent_name` is normalised lowercase.
+pub async fn set_agent_message(
+    db: &SqlitePool,
+    user_id: i64,
+    agent_name: &str,
+    message: Option<&str>,
+) -> AppResult<()> {
+    let name = agent_name.trim().to_lowercase();
+    match message.filter(|m| !m.trim().is_empty()) {
+        Some(message) => {
+            sqlx::query(
+                "INSERT INTO agent_profiles (user_id, agent_name, message, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(user_id, agent_name) DO UPDATE SET
+                    message = excluded.message, updated_at = excluded.updated_at",
+            )
+            .bind(user_id)
+            .bind(&name)
+            .bind(message.trim())
+            .bind(now_rfc3339())
+            .execute(db)
+            .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM agent_profiles WHERE user_id = ?1 AND agent_name = ?2")
+                .bind(user_id)
+                .bind(&name)
+                .execute(db)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub async fn get_agent_message(
+    db: &SqlitePool,
+    user_id: i64,
+    agent_name: &str,
+) -> AppResult<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT message FROM agent_profiles WHERE user_id = ?1 AND agent_name = ?2",
+    )
+    .bind(user_id)
+    .bind(agent_name.trim().to_lowercase())
+    .fetch_optional(db)
+    .await?)
 }
 
 /// Append a claim lifecycle row to the issue's activity timeline. Heartbeats

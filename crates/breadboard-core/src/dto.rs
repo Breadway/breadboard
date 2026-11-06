@@ -16,6 +16,18 @@ fn non_empty(s: &str) -> Result<(), String> {
 /// Only absolute http(s) URLs may be rendered as links. Anything else (a
 /// `javascript:` URL stored by a malicious agent) is rejected at the edge so
 /// the web client never has to trust it.
+/// Collapse an agent one-liner to a single trimmed line. Empty clears it.
+pub fn normalize_agent_message(s: &str) -> Result<Option<String>, String> {
+    let line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.is_empty() {
+        return Ok(None);
+    }
+    if line.chars().count() > 120 {
+        return Err("message must be 120 characters or fewer".into());
+    }
+    Ok(Some(line))
+}
+
 pub fn is_safe_http_url(s: &str) -> bool {
     let s = s.trim();
     (s.starts_with("http://") || s.starts_with("https://"))
@@ -235,6 +247,9 @@ pub struct ClaimUpsert {
     /// does not move the card or block another agent's exclusive claim.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<crate::ClaimMode>,
+    /// Optional one-line message for this agent (shown under its name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -265,6 +280,9 @@ impl ClaimUpsert {
             if !is_safe_http_url(url) {
                 return Err("pr_url must be an absolute http(s) URL".into());
             }
+        }
+        if let Some(message) = &self.message {
+            normalize_agent_message(message)?;
         }
         Ok(())
     }
@@ -327,6 +345,21 @@ pub struct ClaimUpdate {
         skip_serializing_if = "Option::is_none"
     )]
     pub head_sha: Option<Option<String>>,
+    /// `null` clears the agent's one-liner; absent leaves it unchanged.
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub message: Option<Option<String>>,
+}
+
+/// `PUT /api/agents/message` body.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentMessage {
+    pub agent_name: String,
+    #[serde(default)]
+    pub message: String,
 }
 
 /// Server-side roll-up for `GET /api/agents/status`. Counts mirror the

@@ -42,6 +42,12 @@ enum AgentsAction {
     },
     /// Server-side roll-up mirroring the opencode bb-status widget line.
     Status,
+    /// Set or clear the one-line message shown under an agent's name.
+    Message {
+        agent: String,
+        /// One line; pass an empty string to clear it.
+        text: String,
+    },
 }
 
 #[derive(Parser)]
@@ -163,6 +169,9 @@ enum Command {
         /// issues so the Agents tab groups your work.
         #[arg(long)]
         agent: String,
+        /// One-line message shown under the agent name in the Agents view.
+        #[arg(long)]
+        message: Option<String>,
         /// `exclusive` (default) claims the issue for real; `intent` is a soft
         /// reservation that does not move the card or block another agent.
         #[arg(long, value_parser = parse_claim_mode, default_value = "exclusive")]
@@ -445,6 +454,7 @@ async fn main() -> Result<()> {
         Command::Claim {
             key,
             agent,
+            message,
             mode,
             session,
             state,
@@ -461,6 +471,7 @@ async fn main() -> Result<()> {
                     &key,
                     &breadboard_core::dto::ClaimUpsert {
                         agent_name: agent,
+                        message,
                         mode: Some(mode),
                         session_id: session,
                         state,
@@ -507,6 +518,7 @@ async fn main() -> Result<()> {
                 pr_url: pr_url.clone().map(Some),
                 pr_number: pr_number.map(Some),
                 head_sha: head_sha.clone().map(Some),
+                message: None,
             };
             let claim = client.heartbeat_claim(&key, agent.as_deref(), &update).await?;
             println!(
@@ -886,6 +898,13 @@ async fn agents(client: &Client, action: AgentsAction) -> Result<()> {
                 );
             }
             println!("\n{} active claim(s)", claims.len());
+        }
+        AgentsAction::Message { agent, text } => {
+            let r = client.set_agent_message(&agent, &text).await?;
+            match r.message {
+                Some(m) => println!("{}: {}", r.agent_name, m),
+                None => println!("{}: message cleared", r.agent_name),
+            }
         }
         AgentsAction::Status => {
             let s = client.agent_status().await?;
