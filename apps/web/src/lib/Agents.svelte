@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { ago, claimStale, store } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
+  import Ring from "./ui/Ring.svelte";
   import { agentColor } from "./ui/colors";
 
   // Tick every 15s so relative heartbeats and stale badges age live; SSE
@@ -18,32 +19,84 @@
     return () => clearInterval(t);
   });
 
-  // Exclusive claims are work; intents are queued reservations.
-  const claims = $derived(
-    [...store.agents].sort((a, b) =>
-      a.mode === b.mode
-        ? b.last_heartbeat.localeCompare(a.last_heartbeat)
-        : a.mode === "exclusive"
-          ? -1
-          : 1,
-    ),
-  );
+  const claims = $derived(store.agents);
   const work = $derived(claims.filter((c) => c.mode === "exclusive"));
   const queued = $derived(claims.filter((c) => c.mode === "intent"));
-  const shown = $derived(staleOnly ? work.filter((c) => claimStale(c.last_heartbeat, now)) : claims);
   const staleCount = $derived(work.filter((c) => claimStale(c.last_heartbeat, now)).length);
   const liveCount = $derived(work.length - staleCount);
 
   const tallies = $derived.by(() => {
     const t = { active: 0, review: 0, verifying: 0, blocked: 0, done: 0 };
     for (const c of work) {
-      if (c.state === "done") t.done++;
+      if (c.state === "done" || c.board_status === "done") t.done++;
       else if (c.state === "implementing" || c.state === "reworking" || c.state === "planned") t.active++;
       else if (c.state === "awaiting-review" || c.state === "awaiting-ci" || c.state === "awaiting-merge") t.review++;
       else if (c.state === "verifying") t.verifying++;
       else t.blocked++;
     }
     return t;
+  });
+
+  interface Group {
+    id: string;
+    name: string;
+    login: string;
+    claims: typeof claims;
+    work: typeof claims;
+    intents: typeof claims;
+    done: number;
+    live: number;
+    stale: number;
+    lastHeartbeat: string;
+  }
+
+  // One agent = (owner, agent name). An agent can hold many issues; this
+  // groups them so each row of the tab is an agent, not a single claim.
+  const groups = $derived.by(() => {
+    const map = new Map<string, Group>();
+    const source = staleOnly
+      ? claims.filter((c) => c.mode === "exclusive" && claimStale(c.last_heartbeat, now))
+      : claims;
+    for (const c of source) {
+      const id = `${c.claimed_by_login}:${c.agent_name}`;
+      let g = map.get(id);
+      if (!g) {
+        g = {
+          id,
+          name: c.agent_name,
+          login: c.claimed_by_login,
+          claims: [],
+          work: [],
+          intents: [],
+          done: 0,
+          live: 0,
+          stale: 0,
+          lastHeartbeat: c.last_heartbeat,
+        };
+        map.set(id, g);
+      }
+      g.claims.push(c);
+      if (c.mode === "intent") g.intents.push(c);
+      else {
+        g.work.push(c);
+        if (c.state === "done" || c.board_status === "done") g.done++;
+        if (claimStale(c.last_heartbeat, now)) g.stale++;
+        else g.live++;
+      }
+      if (c.last_heartbeat > g.lastHeartbeat) g.lastHeartbeat = c.last_heartbeat;
+    }
+    for (const g of map.values()) {
+      g.claims.sort((a, b) =>
+        a.mode === b.mode ? a.key.localeCompare(b.key) : a.mode === "exclusive" ? -1 : 1,
+      );
+    }
+    return [...map.values()].sort(
+      (a, b) =>
+        b.live - a.live ||
+        b.work.length - a.work.length ||
+        b.intents.length - a.intents.length ||
+        a.name.localeCompare(b.name),
+    );
   });
 
   function tone(s: string): "idle" | "warn" | "ok" | "bad" {
@@ -88,25 +141,25 @@
   <div class="bar">
     <div class="seg">
       <button class:on={!staleOnly} onclick={() => (staleOnly = false)}>
-        All <span>{claims.length}</span>
+        All <span>{groups.length} agents</span>
       </button>
       <button class:on={staleOnly} onclick={() => (staleOnly = true)}>
         Stale <span class:bad={staleCount > 0}>{staleCount}</span>
       </button>
     </div>
-    <span class="live-note">{liveCount} heartbeating now</span>
+    <span class="live-note">{liveCount} issues heartbeating · {groups.length} agents</span>
     <span class="grow"></span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
 
-  {#if !shown.length}
+  {#if !groups.length}
     <div class="empty">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <rect x="4" y="7" width="16" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.4" />
         <path d="M12 3v4M8.5 12.5h.01M15.5 12.5h.01M9.5 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
       <p>
-        {staleOnly ? "Nothing is stale. Every claim heartbeated in the last 5 minutes." : "No agent is working an issue right now."}
+        {staleOnly ? "No stale claims. Every agent heartbeated in the last 5 minutes." : "No agent is working an issue right now."}
       </p>
       <p class="hint">
         Agents claim with <code>breadboard claim KEY --agent NAME</code> or the <code>claim_issue</code> MCP tool.
@@ -114,73 +167,71 @@
       </p>
     </div>
   {:else}
-    <div class="list">
-      {#each shown as c (c.issue_id)}
-        {@const stale = claimStale(c.last_heartbeat, now)}
-        {@const ownerDiffers = c.claimed_by_login !== store.me?.login}
-        {@const session = c.session_id ? c.session_id.slice(0, 7) : ""}
-        <article class="claim" class:stale class:intent={c.mode === "intent"} style="--agent:{agentColor(c.agent_name)}">
-          <span class="stripe" aria-hidden="true"></span>
-
-          <div class="who">
+    <div class="groups">
+      {#each groups as g (g.id)}
+        {@const ownerDiffers = g.login !== store.me?.login}
+        <section class="group" class:stale={g.stale > 0} style="--agent:{agentColor(g.name)}">
+          <header class="ghead">
             <span class="avatar" aria-hidden="true">
               <svg viewBox="0 0 16 16"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
             </span>
-            <div class="who-text">
-              <span class="aname" title="Agent name">{c.agent_name}</span>
-              {#if ownerDiffers || session}
-                <span class="alogin" title={ownerDiffers ? `Claimed with ${c.claimed_by_login}'s token` : "Your claim"}>
-                  {ownerDiffers ? c.claimed_by_login : ""}{ownerDiffers && session ? " · " : ""}{session}
-                </span>
-              {/if}
+            <div class="gid">
+              <span class="aname">{g.name}</span>
+              {#if ownerDiffers}<span class="alogin" title="Claims use this user's token">{g.login}</span>{/if}
             </div>
-          </div>
+            <span class="gbadge live" class:off={g.live === 0}>{g.live} live</span>
+            {#if g.stale > 0}<span class="gbadge stale">{g.stale} stale</span>{/if}
+            {#if g.intents.length > 0}<span class="gbadge queued">{g.intents.length} queued</span>{/if}
+            <span class="grow"></span>
+            {#if g.work.length}
+              <span class="completion" title="{g.done} of {g.work.length} exclusive issues done">
+                <Ring done={g.done} total={g.work.length} color={agentColor(g.name)} size={16} />
+                <b>{g.done}</b><span class="cslash">/</span>{g.work.length} done
+              </span>
+            {:else}
+              <span class="completion muted">queued only</span>
+            {/if}
+            <span class="gtick" title="Last heartbeat {g.lastHeartbeat}">pulse {ago(g.lastHeartbeat, now)}</span>
+          </header>
 
-          <div class="what">
-            <div class="head">
-              <button class="key" onclick={() => (store.selectedKey = c.key)} title="Open {c.key}">
-                <StatusGlyph status={c.board_status} size={12} />{c.key}
-              </button>
-              <span class="state {tone(c.state)}">{stateLabel(c.state)}</span>
-              {#if c.mode === "intent"}<span class="queued-pill">queued</span>{/if}
-              {#if stale && c.mode === "exclusive"}<span class="stale-pill">stale</span>{/if}
-            </div>
-            <span class="title">{c.issue_title}</span>
-            {#if c.note}<p class="note">{c.note}</p>{/if}
-            {#if c.branch || c.pr_url || c.pr_number || c.head_sha}
-              <div class="meta">
-                {#if c.branch}
-                  <span class="mchip" title="Branch">
+          <div class="gbody">
+            {#each g.claims as c (c.id)}
+              {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
+              <div class="row" class:stale class:intent={c.mode === "intent"}>
+                <StatusGlyph status={c.board_status} size={12} />
+                <button class="key" onclick={() => (store.selectedKey = c.key)} title="Open {c.key}">{c.key}</button>
+                {#if c.mode === "intent"}<span class="queued-pill">queued</span>{/if}
+                <span class="title">{c.issue_title}</span>
+                <span class="state {tone(c.state)}">{stateLabel(c.state)}</span>
+                {#if stale}<span class="stale-pill">stale</span>{/if}
+                {#if c.pr_url}
+                  <a class="chip-pr" href={c.pr_url} target="_blank" rel="noreferrer" title="Pull request">
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                    PR{c.pr_number ? ` #${c.pr_number}` : ""}
+                  </a>
+                {:else if c.branch}
+                  <span class="chip-branch" title="Branch">
                     <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="11.5" cy="6" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4.5 5.1v5.8M11.5 7.6c0 2.2-2 2.6-4.6 3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
                     {c.branch}
                   </span>
                 {/if}
-                {#if c.pr_url}
-                  <a class="mchip link" href={c.pr_url} target="_blank" rel="noreferrer" title="Pull request">
-                    <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                    PR{c.pr_number ? ` #${c.pr_number}` : ""}
-                  </a>
-                {:else if c.pr_number}
-                  <span class="mchip">PR #{c.pr_number}</span>
-                {/if}
-                {#if c.head_sha}<span class="mchip sha" title="Head commit">{c.head_sha.slice(0, 7)}</span>{/if}
+                <span class="hb" class:stale title="Last heartbeat: {c.last_heartbeat}">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l1.7-4 2.6 8 1.7-4h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  {ago(c.last_heartbeat, now)}
+                </span>
+                <span class="acts">
+                  <button class="btn sm" onclick={() => (store.selectedKey = c.key)}>Open</button>
+                  {#if c.claimed_by === store.me?.id}
+                    <button class="btn sm danger" onclick={() => void store.releaseById(c.id)}>Release</button>
+                  {/if}
+                </span>
               </div>
+            {/each}
+            {#if g.work.length === 0 && g.intents.length === 0}
+              <div class="row muted-row">No claims.</div>
             {/if}
           </div>
-
-          <div class="side">
-            <span class="hb" class:stale={stale && c.mode === "exclusive"} title="Last heartbeat: {c.last_heartbeat}">
-              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l1.7-4 2.6 8 1.7-4h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
-              {ago(c.last_heartbeat, now)}
-            </span>
-            <div class="actions">
-              <button class="btn sm" onclick={() => (store.selectedKey = c.key)}>Open</button>
-              {#if c.claimed_by === store.me?.id}
-                <button class="btn sm danger" onclick={() => void store.releaseById(c.id)}>Release</button>
-              {/if}
-            </div>
-          </div>
-        </article>
+        </section>
       {/each}
     </div>
   {/if}
@@ -363,60 +414,36 @@
     font-size: 11.5px;
   }
 
-  /* --- rows ---------------------------------------------------------- */
-  .list {
+  /* --- agent panels --------------------------------------------------- */
+  .groups {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 10px;
   }
-  .claim {
-    position: relative;
-    display: grid;
-    grid-template-columns: 172px minmax(0, 1fr) auto;
-    gap: 16px;
-    align-items: start;
-    padding: 12px 14px 12px 16px;
+  .group {
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 12px;
     background: var(--surface);
-    transition: border-color 0.15s, background-color 0.15s;
+    overflow: hidden;
+    transition: border-color 0.15s;
   }
-  .claim:hover {
-    background: var(--raise);
-    border-color: color-mix(in srgb, var(--agent) 40%, var(--line));
+  .group:hover {
+    border-color: color-mix(in srgb, var(--agent) 38%, var(--line));
   }
-  .claim.stale {
-    border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+  .group.stale {
+    border-color: color-mix(in srgb, var(--danger) 28%, var(--line));
   }
-  .claim.intent {
-    border-style: dashed;
-    background: color-mix(in srgb, var(--surface) 92%, var(--bg));
-  }
-  .claim.intent .stripe {
-    background: color-mix(in srgb, var(--agent) 40%, transparent);
-  }
-  .claim.intent .avatar {
-    opacity: 0.6;
-  }
-  .stripe {
-    position: absolute;
-    left: 0;
-    top: 10px;
-    bottom: 10px;
-    width: 3px;
-    border-radius: 99px;
-    background: var(--agent);
-  }
-  .claim.stale .stripe {
-    background: var(--danger);
-  }
-
-  .who {
+  .ghead {
     display: flex;
     align-items: center;
     gap: 9px;
-    min-width: 0;
-    padding-top: 1px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    background: linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--agent) 7%, transparent),
+      transparent 45%
+    );
   }
   .avatar {
     display: grid;
@@ -433,56 +460,119 @@
     width: 15px;
     height: 15px;
   }
-  .who-text {
+  .gid {
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    align-items: baseline;
+    gap: 7px;
     min-width: 0;
   }
   .aname {
-    font-size: 12.5px;
-    font-weight: 600;
+    font-size: 13px;
+    font-weight: 650;
     color: var(--ink);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
   }
   .alogin {
-    font: 400 10px/1.3 var(--font-mono);
+    font: 400 10px/1 var(--font-mono);
     color: var(--ink-3);
+  }
+  .gbadge {
+    font: 600 9px/1 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 3px 6px;
+    border-radius: 4px;
     white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
-
-  .what {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
+  .gbadge.live {
+    color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 12%, transparent);
   }
-  .head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+  .gbadge.live.off {
+    color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 5%, transparent);
   }
-  .key {
+  .gbadge.stale {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 11%, transparent);
+  }
+  .gbadge.queued {
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 12%, transparent);
+  }
+  .completion {
     display: inline-flex;
     align-items: center;
-    gap: 6px;
+    gap: 4px;
+    font: 500 11px/1 var(--font-mono);
+    color: var(--ink-dim);
+    font-variant-numeric: tabular-nums;
+  }
+  .completion b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .completion .cslash {
+    color: var(--ink-3);
+  }
+  .completion.muted {
+    color: var(--ink-3);
+    font-style: italic;
+  }
+  .gtick {
+    font: 400 10px/1 var(--font-mono);
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  .gbody {
+    display: flex;
+    flex-direction: column;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 8px 12px;
+    min-width: 0;
+    border-top: 1px solid color-mix(in srgb, var(--ink) 5%, transparent);
+  }
+  .row:first-child {
+    border-top: 0;
+  }
+  .row:hover {
+    background: color-mix(in srgb, var(--ink) 3%, transparent);
+  }
+  .row.intent {
+    background: color-mix(in srgb, var(--surface) 92%, var(--bg));
+  }
+  .key {
     border: 0;
     background: none;
     padding: 0;
-    font: 600 11px/1 var(--font-mono);
+    flex: none;
+    font: 600 10.5px/1 var(--font-mono);
     color: var(--accent);
+    cursor: pointer;
   }
   .key:hover {
     text-decoration: underline;
   }
+  .title {
+    flex: 1;
+    min-width: 0;
+    font-size: 12.5px;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .state {
+    flex: none;
     font: 600 9px/1 var(--font-mono);
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     text-transform: uppercase;
     padding: 3px 6px;
     border-radius: 4px;
@@ -504,6 +594,7 @@
     background: color-mix(in srgb, var(--danger) 11%, transparent);
   }
   .queued-pill {
+    flex: none;
     font: 600 9px/1 var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -513,6 +604,7 @@
     border-radius: 4px;
   }
   .stale-pill {
+    flex: none;
     font: 600 9px/1 var(--font-mono);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -521,37 +613,16 @@
     padding: 3px 6px;
     border-radius: 4px;
   }
-  .title {
-    font-size: 13.5px;
-    font-weight: 500;
-    line-height: 1.35;
-    color: var(--ink);
-    overflow-wrap: anywhere;
-  }
-  .note {
-    margin: 1px 0 0;
-    font-size: 12px;
-    line-height: 1.45;
-    color: var(--ink-dim);
-    padding-left: 8px;
-    border-left: 2px solid color-mix(in srgb, var(--agent) 45%, transparent);
-    overflow-wrap: anywhere;
-  }
-  .meta {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-    margin-top: 2px;
-  }
-  .mchip {
+  .chip-pr,
+  .chip-branch {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    max-width: 260px;
+    flex: none;
+    max-width: 220px;
     padding: 2px 7px;
     border-radius: 5px;
-    font: 400 10.5px/1.5 var(--font-mono);
+    font: 400 10px/1.5 var(--font-mono);
     color: var(--ink-3);
     background: color-mix(in srgb, var(--ink) 4%, transparent);
     border: 1px solid var(--line);
@@ -559,47 +630,42 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .mchip svg {
-    width: 11px;
-    height: 11px;
-    flex: none;
-  }
-  .mchip.link {
+  .chip-pr {
     color: var(--status-review);
     text-decoration: none;
   }
-  .mchip.link:hover {
+  .chip-pr:hover {
     border-color: color-mix(in srgb, var(--status-review) 45%, transparent);
   }
-  .mchip.sha {
-    color: var(--ink-dim);
-    letter-spacing: 0.02em;
-  }
-
-  .side {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 9px;
+  .chip-pr svg,
+  .chip-branch svg {
+    width: 10px;
+    height: 10px;
     flex: none;
   }
   .hb {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    font: 400 10.5px/1 var(--font-mono);
+    gap: 4px;
+    flex: none;
+    font: 400 10px/1 var(--font-mono);
     color: var(--ink-3);
   }
   .hb svg {
-    width: 11px;
-    height: 11px;
+    width: 10px;
+    height: 10px;
   }
   .hb.stale {
     color: var(--danger);
   }
-  .actions {
+  .acts {
     display: flex;
     gap: 5px;
+    flex: none;
+  }
+  .muted-row {
+    color: var(--ink-3);
+    font-size: 12px;
   }
 
   /* --- empty --------------------------------------------------------- */
@@ -646,17 +712,12 @@
     .stats {
       flex-wrap: wrap;
     }
-    .claim {
-      grid-template-columns: 1fr;
-      gap: 10px;
+    .row {
+      flex-wrap: wrap;
     }
-    .who {
-      padding-top: 0;
-    }
-    .side {
-      flex-direction: row;
-      align-items: center;
-      justify-content: space-between;
+    .title {
+      flex-basis: 100%;
+      order: 2;
     }
   }
 </style>

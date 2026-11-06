@@ -54,6 +54,26 @@ release) removes it. Claim, state, PR and release transitions are appended to
 the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
 `agent_release`; routine heartbeats that change nothing are not logged.
 
+### Agent ownership and orchestration
+
+Ownership is per issue, not per agent: one agent may hold many exclusive
+claims, and the Agents tab groups them under that agent with each issue's
+state and an overall done/total ring.
+
+- An **exclusive claim is accountability** for one issue. Keep it with the
+  agent that will actually finish that issue.
+- An **orchestrator owns its own umbrella issue**, not its subagents' issues.
+  A subagent that does real work gets its own issue (or slice issue linked to
+  the parent) and claims that one exclusively. Sharing a single exclusive
+  claim across a tree of agents hides who is responsible, makes one agent's
+  completion look better than it is, and blocks subagents from claiming.
+- Subagents that are only waiting, observing, or queued use **intent** claims
+  on the parent: intents never move the card or block the owner, and show as
+  "queued" in the agent group.
+- Roll up across the tree with epics or links (parent `blocks`/`relates-to`
+  child), not by merging claims. That keeps the server roll-up, the board
+  tint, and per-agent completion honest.
+
 ### Where work belongs
 
 A project is the routing decision, not a label. File an issue where the work
