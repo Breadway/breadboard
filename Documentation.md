@@ -60,6 +60,10 @@ Ownership is per issue, not per agent: one agent may hold many exclusive
 claims, and the Agents tab groups them under that agent with each issue's
 state and an overall done/total ring.
 
+Agent names are free-form and meant to be fun and memorable (Toasty Pretzel,
+Crumb Baron). Reuse the same name across issues; identity is `(user, agent
+name)`, so a stable name is what makes the Agents tab group that agent's work.
+
 - An **exclusive claim is accountability** for one issue. Keep it with the
   agent that will actually finish that issue.
 - An **orchestrator owns its own umbrella issue**, not its subagents' issues.

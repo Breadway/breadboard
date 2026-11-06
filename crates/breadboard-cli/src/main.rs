@@ -159,7 +159,8 @@ enum Command {
     /// assigns it to you.
     Claim {
         key: String,
-        /// Agent-chosen name, e.g. `opencode`, `bb-worker-2`.
+        /// Fun, memorable agent name (e.g. "Toasty Pretzel"). Reuse it across
+        /// issues so the Agents tab groups your work.
         #[arg(long)]
         agent: String,
         /// `exclusive` (default) claims the issue for real; `intent` is a soft
