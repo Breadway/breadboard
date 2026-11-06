@@ -11,7 +11,7 @@
   const intents = $derived(
     store.claimsForIssue(issue.id).filter((c) => c.mode === "intent"),
   );
-  const stale = $derived(claim ? claimStale(claim.last_heartbeat) : false);
+  const stale = $derived(claim ? claimStale(claim.last_heartbeat, store.clock) : false);
 
   const MAX_LABELS = 3;
 

@@ -13,6 +13,16 @@ fn non_empty(s: &str) -> Result<(), String> {
     }
 }
 
+/// Only absolute http(s) URLs may be rendered as links. Anything else (a
+/// `javascript:` URL stored by a malicious agent) is rejected at the edge so
+/// the web client never has to trust it.
+pub fn is_safe_http_url(s: &str) -> bool {
+    let s = s.trim();
+    (s.starts_with("http://") || s.starts_with("https://"))
+        && s.len() > 8
+        && !s.chars().any(|c| c.is_whitespace())
+}
+
 /// Move an issue to a different project: `project` is a key or numeric id,
 /// same resolution as `NewIssue::project`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -240,8 +250,13 @@ pub struct ClaimUpsert {
 impl ClaimUpsert {
     pub fn validate(&self) -> Result<(), String> {
         non_empty(&self.agent_name)?;
-        if self.agent_name.len() > 64 {
+        if self.agent_name.trim().len() > 64 {
             return Err("agent_name must be 64 chars or fewer".into());
+        }
+        if let Some(url) = &self.pr_url {
+            if !is_safe_http_url(url) {
+                return Err("pr_url must be an absolute http(s) URL".into());
+            }
         }
         Ok(())
     }

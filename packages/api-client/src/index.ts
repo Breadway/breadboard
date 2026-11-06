@@ -210,6 +210,26 @@ export type AgentState =
 
 export type ClaimMode = "exclusive" | "intent";
 
+export const AGENT_STATES: AgentState[] = [
+  "planned",
+  "implementing",
+  "awaiting-review",
+  "reworking",
+  "awaiting-ci",
+  "awaiting-merge",
+  "verifying",
+  "blocked",
+  "needs-user",
+  "done",
+];
+
+/** Only absolute http(s) URLs may become links (blocks javascript: etc). */
+export function safeHttpUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const u = url.trim();
+  return /^https?:\/\/[^\s]+$/i.test(u) ? u : null;
+}
+
 export interface AgentClaim {
   id: number;
   issue_id: number;

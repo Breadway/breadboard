@@ -506,7 +506,8 @@ async fn main() -> Result<()> {
                         agent_name: agent.clone(),
                         ..Default::default()
                     };
-                    if let Err(e) = client.heartbeat_claim(&key, None, &keepalive).await {
+                    // Keep the agent selector so multi-claim users do not 409.
+                    if let Err(e) = client.heartbeat_claim(&key, agent.as_deref(), &keepalive).await {
                         eprintln!("heartbeat {tick} failed for {key}: {e}");
                         break;
                     }

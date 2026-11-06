@@ -66,7 +66,8 @@ export function emptyFilters(): Filters {
   };
 }
 
-/** A claim with no heartbeat for this long reads as stale (never auto-released). */
+/** A claim with no heartbeat for this long reads as stale (never auto-released).
+ *  Must match CLAIM_STALE_SECS in crates/breadboard-server/src/api.rs. */
 export const CLAIM_STALE_SECS = 300;
 
 export function claimStale(lastHeartbeat: string, now = Date.now()): boolean {
@@ -102,6 +103,8 @@ class Store {
   epics = $state<EpicView[]>([]);
   connected = $state(false);
   toast = $state<Toast | null>(null);
+  /** Ticking clock so heartbeat ages and stale tints update without events. */
+  clock = $state(Date.now());
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
@@ -124,6 +127,7 @@ class Store {
   filters = $state<Filters>(emptyFilters());
 
   #unsub: (() => void) | null = null;
+  #clockTimer: ReturnType<typeof setInterval> | undefined;
   #everLive = false;
   #retry: ReturnType<typeof setTimeout> | undefined;
   #retryDelay = 1000;
@@ -187,7 +191,9 @@ class Store {
     // A PR that closes a real issue collapses into that issue's card
     // instead of showing as a second, seemingly-unrelated card; its
     // status surfaces there as a small badge instead (see Card.svelte).
-    if (i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
+    // Asking for PRs explicitly overrides the collapse so the filter is
+    // not silently empty.
+    if (!types.has("pr") && i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
     // Once a cycle (release) ships and is closed, its done work archives
     // off the default board/backlog view instead of piling up forever;
     // still there if you explicitly pick that cycle from the filter.
@@ -312,6 +318,9 @@ class Store {
     this.auth = "in";
     await this.loadInbox();
     void this.loadAgents();
+    if (!this.#clockTimer) {
+      this.#clockTimer = setInterval(() => (this.clock = Date.now()), 30_000);
+    }
     this.#connect();
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});

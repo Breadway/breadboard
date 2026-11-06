@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fly } from "svelte/transition";
-  import { PRIORITIES, STATUSES, type AgentState } from "@breadboard/api-client";
+  import { AGENT_STATES, PRIORITIES, STATUSES, type AgentState } from "@breadboard/api-client";
   import { store, statusName } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
@@ -12,19 +12,6 @@
   // inside one facet with OR. Nothing closes on pick, so any combination can
   // be built in one visit.
 
-  const AGENT_STATES: AgentState[] = [
-    "planned",
-    "implementing",
-    "reworking",
-    "awaiting-review",
-    "awaiting-ci",
-    "awaiting-merge",
-    "verifying",
-    "blocked",
-    "needs-user",
-    "done",
-  ];
-
   let open = $state(false);
   let root: HTMLElement | undefined = $state();
   let firstEl: HTMLElement | undefined = $state();
@@ -32,11 +19,12 @@
   const labels = $derived(
     [...new Set(store.issues.flatMap((i) => i.labels))].sort((a, b) => a.localeCompare(b)),
   );
+  const exclusiveClaims = $derived(store.agents.filter((a) => a.mode === "exclusive"));
   const agentNames = $derived(
-    [...new Set(store.agents.map((a) => a.agent_name))].sort((a, b) => a.localeCompare(b)),
+    [...new Set(exclusiveClaims.map((a) => a.agent_name))].sort((a, b) => a.localeCompare(b)),
   );
   const agentStates = $derived(
-    AGENT_STATES.filter((s) => store.agents.some((a) => a.state === s)),
+    AGENT_STATES.filter((s) => exclusiveClaims.some((a) => a.state === s)),
   );
   const assigneeIds = $derived(
     [...new Set(store.issues.map((i) => i.assignee_id).filter((v): v is number => v != null))].sort(

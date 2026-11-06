@@ -729,21 +729,29 @@ async fn resolve_own_claim(
     issue_id: i64,
     user_id: i64,
     agent: Option<&str>,
+    mode: Option<ClaimMode>,
     session_id: Option<&str>,
 ) -> AppResult<breadboard_core::AgentClaim> {
     let mut claims = store::find_user_claims(&app.db, issue_id, user_id, agent).await?;
-    if claims.len() > 1 {
-        if let Some(session) = session_id {
-            claims.retain(|c| c.session_id.as_deref() == Some(session));
+    if let Some(mode) = mode {
+        claims.retain(|c| c.mode == mode);
+    }
+    // Prefer the exclusive claim, then the freshest one. Never fail just
+    // because one agent also has an intent on the issue it is working.
+    claims.sort_by(|a, b| {
+        (a.mode == ClaimMode::Intent)
+            .cmp(&(b.mode == ClaimMode::Intent))
+            .then_with(|| b.last_heartbeat.cmp(&a.last_heartbeat))
+    });
+    if let Some(session) = session_id {
+        if let Some(matched) = claims.iter().find(|c| c.session_id.as_deref() == Some(session)) {
+            return Ok(matched.clone());
         }
     }
-    match claims.len() {
-        0 => Err(crate::error::AppError::NotFound),
-        1 => Ok(claims.remove(0)),
-        _ => Err(crate::error::AppError::Conflict(
-            "this user has several claims on the issue: pass agent_name or session_id".into(),
-        )),
-    }
+    claims
+        .into_iter()
+        .next()
+        .ok_or(crate::error::AppError::NotFound)
 }
 
 #[derive(Deserialize)]
@@ -751,6 +759,9 @@ pub struct ClaimQuery {
     /// Agent name, when the caller owns more than one claim on the issue.
     #[serde(default)]
     pub agent: Option<String>,
+    /// `exclusive` or `intent`, when the same agent holds both.
+    #[serde(default)]
+    pub mode: Option<ClaimMode>,
 }
 
 /// Heartbeat / field update. Only the claiming user may update; when both
@@ -765,11 +776,26 @@ pub async fn heartbeat_claim(
     Json(body): Json<breadboard_core::dto::ClaimUpdate>,
 ) -> AppResult<Json<breadboard_core::AgentClaim>> {
     let issue = store::get_issue_by_key(&app.db, &key).await?;
+    if let Some(Some(url)) = &body.pr_url {
+        if !breadboard_core::dto::is_safe_http_url(url) {
+            return Err(crate::error::AppError::bad_request(
+                "pr_url must be an absolute http(s) URL",
+            ));
+        }
+    }
     let session = body
         .session_id
         .as_ref()
         .and_then(|v| v.as_deref());
-    let existing = resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), session).await?;
+    let existing = resolve_own_claim(
+        &app,
+        issue.id,
+        user.0.id,
+        q.agent.as_deref(),
+        q.mode,
+        session,
+    )
+    .await?;
     if let (Some(Some(want_inner)), Some(have)) = (&body.session_id, &existing.session_id) {
         // Outer Some = field present, inner Some = set (not clear). A present
         // session that disagrees with the active claim is a 409, not a hijack.
@@ -846,7 +872,8 @@ pub async fn release_claim(
     Query(q): Query<ClaimQuery>,
 ) -> AppResult<StatusCode> {
     let issue = store::get_issue_by_key(&app.db, &key).await?;
-    let claim = resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), None).await?;
+    let claim =
+        resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), q.mode, None).await?;
     store::delete_claim_by_id(&app.db, claim.id).await?;
     let _ = store::log_claim_event(
         &app.db,

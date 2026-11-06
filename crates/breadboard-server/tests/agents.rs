@@ -388,4 +388,161 @@ async fn heartbeat_pr_url_comments_once() {
         .filter(|c| c["body"].as_str().unwrap_or("").contains("https://git.example/pulls/7"))
         .collect();
     assert_eq!(pr_comments.len(), 1, "commented exactly once");
+
+    let activity: Value = c
+        .get(format!("{base}/api/issues/{key}/activity"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        activity
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["field"] == "agent_pr"),
+        "PR link is audited"
+    );
+}
+
+/// The reviewer-found gaps: unsafe URLs, cross-user access, session mismatch,
+/// and an agent that queued an intent then took the work.
+#[tokio::test]
+async fn claim_security_and_resolution() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    // Second user + token, straight into the tables like the harness does.
+    let other_id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (2, 'other', 'Other') RETURNING id",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let other_token = "other-token-abcdef";
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, '2026-01-01T00:00:00Z')",
+    )
+    .bind(other_id)
+    .bind(breadboard_server::auth::sha256_hex(other_token))
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let other_auth = format!("Bearer {other_token}");
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "guarded work").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    // javascript: URLs are rejected on claim and on heartbeat.
+    let bad_post = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "x", "pr_url": "javascript:alert(1)" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_post.status(), 400);
+
+    let claim: Value = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "owner", "session_id": "ses_owner" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claim_id = claim["id"].as_i64().unwrap();
+
+    let bad_put = c
+        .put(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "pr_url": "javascript:alert(1)" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_put.status(), 400);
+
+    // Session mismatch is a conflict, not a silent takeover.
+    let mismatch = c
+        .put(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "session_id": "ses_imposter" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), 409);
+
+    // Another user cannot heartbeat, release by id, or steal the claim.
+    let other_put = c
+        .put(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &other_auth)
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_put.status(), 404);
+    let other_release = c
+        .delete(format!("{base}/api/claims/{claim_id}"))
+        .header("authorization", &other_auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_release.status(), 403);
+    let other_claim = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &other_auth)
+        .json(&json!({ "agent_name": "thief" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(other_claim.status(), 409);
+
+    // An agent that queued an intent and then took the work ends up with one
+    // claim, and heartbeat/release by key keep working without ?agent=.
+    let second = create_issue(&c, &base, &auth, "queued then taken").await;
+    let second_key = second["key"].as_str().unwrap().to_string();
+    c.post(format!("{base}/api/issues/{second_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "solo", "mode": "intent" }))
+        .send()
+        .await
+        .unwrap();
+    c.post(format!("{base}/api/issues/{second_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "solo" }))
+        .send()
+        .await
+        .unwrap();
+    let heartbeat = c
+        .put(format!("{base}/api/issues/{second_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "state": "implementing" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(heartbeat.status(), 200, "one claim => no disambiguation needed");
+    let agents: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let solo: Vec<&Value> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["key"] == second_key.as_str() && a["agent_name"] == "solo")
+        .collect();
+    assert_eq!(solo.len(), 1, "exclusive replaced the redundant intent");
 }

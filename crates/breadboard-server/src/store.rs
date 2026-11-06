@@ -1724,20 +1724,6 @@ pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bo
     Ok(n > 0)
 }
 
-pub async fn get_exclusive_claim(
-    db: &SqlitePool,
-    issue_id: i64,
-) -> AppResult<Option<AgentClaim>> {
-    let row: Option<AgentClaimRow> = sqlx::query_as(&format!(
-        "{} WHERE c.issue_id = ?1 AND c.mode = 'exclusive'",
-        agent_claim_join()
-    ))
-    .bind(issue_id)
-    .fetch_optional(db)
-    .await?;
-    Ok(row.map(Into::into))
-}
-
 pub async fn get_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
     let row: Option<AgentClaimRow> =
         sqlx::query_as(&format!("{} WHERE c.id = ?1", agent_claim_join()))
@@ -1800,6 +1786,21 @@ pub async fn insert_claim(
         return Err(AppError::Conflict("issue is already claimed".into()));
     }
 
+    // Taking the work makes the same agent's queued intent redundant, and
+    // leaving both would make "resolve my claim by key" ambiguous.
+    if mode == ClaimMode::Exclusive {
+        sqlx::query(
+            "DELETE FROM agent_claims
+              WHERE issue_id = ?1 AND claimed_by = ?2 AND mode = 'intent'
+                AND lower(agent_name) = lower(?3)",
+        )
+        .bind(issue.id)
+        .bind(claimed_by)
+        .bind(input.agent_name.trim())
+        .execute(db)
+        .await?;
+    }
+
     // An intent re-claimed by the same agent is an update, not a duplicate.
     if mode == ClaimMode::Intent {
         let existing: Option<i64> = sqlx::query_scalar(
@@ -1838,7 +1839,7 @@ pub async fn insert_claim(
     )
     .bind(issue.id)
     .bind(claimed_by)
-    .bind(input.agent_name.trim())
+    .bind(input.agent_name.trim().to_lowercase())
     .bind(mode.as_str())
     .bind(input.session_id.clone())
     .bind(state.as_str())
@@ -1858,6 +1859,35 @@ pub async fn insert_claim(
             .await?
             .ok_or(AppError::NotFound),
         Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            // Two concurrent intent claims: the loser updates the winner's
+            // row instead of surfacing a conflict for a soft reservation.
+            if mode == ClaimMode::Intent {
+                let existing: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM agent_claims
+                      WHERE issue_id = ?1 AND claimed_by = ?2
+                        AND lower(agent_name) = lower(?3) AND mode = 'intent'",
+                )
+                .bind(issue.id)
+                .bind(claimed_by)
+                .bind(input.agent_name.trim())
+                .fetch_optional(db)
+                .await?;
+                if let Some(id) = existing {
+                    let upd = crate::dto::ClaimUpdate {
+                        agent_name: Some(input.agent_name.trim().to_string()),
+                        state: input.state,
+                        session_id: input.session_id.clone().map(Some),
+                        note: input.note.clone().map(Some),
+                        branch: input.branch.clone().map(Some),
+                        worktree: input.worktree.clone().map(Some),
+                        repo: input.repo.clone().map(Some),
+                        pr_url: input.pr_url.clone().map(Some),
+                        pr_number: input.pr_number.map(Some),
+                        head_sha: input.head_sha.clone().map(Some),
+                    };
+                    return update_claim_row(db, id, &upd, &ts).await;
+                }
+            }
             Err(AppError::Conflict("issue is already claimed".into()))
         }
         Err(other) => Err(AppError::Db(other)),
@@ -1871,21 +1901,36 @@ async fn update_claim_row(
     input: &crate::dto::ClaimUpdate,
     ts: &str,
 ) -> AppResult<AgentClaim> {
+    // One transaction so a partial multi-column update can never leave a
+    // half-applied claim behind, and the heartbeat is always refreshed with
+    // the changes it accompanies.
+    let mut tx = db.begin().await?;
+
     if let Some(agent_name) = &input.agent_name {
-        if agent_name.trim().is_empty() {
+        let name = agent_name.trim();
+        if name.is_empty() {
             return Err(AppError::bad_request("agent_name must not be empty"));
+        }
+        if name.len() > 64 {
+            return Err(AppError::bad_request("agent_name must be 64 chars or fewer"));
         }
         sqlx::query("UPDATE agent_claims SET agent_name = ?2 WHERE id = ?1")
             .bind(id)
-            .bind(agent_name.trim())
-            .execute(db)
-            .await?;
+            .bind(name.to_lowercase())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                    AppError::Conflict("another claim already uses that agent name".into())
+                }
+                other => AppError::Db(other),
+            })?;
     }
     if let Some(state) = input.state {
         sqlx::query("UPDATE agent_claims SET state = ?2 WHERE id = ?1")
             .bind(id)
             .bind(state.as_str())
-            .execute(db)
+            .execute(&mut *tx)
             .await?;
     }
     // Nullable fields: Some(None) clears, Some(Some(v)) sets, None leaves alone.
@@ -1895,7 +1940,7 @@ async fn update_claim_row(
                 sqlx::query(concat!("UPDATE agent_claims SET ", $col, " = ?2 WHERE id = ?1"))
                     .bind(id)
                     .bind(v.clone())
-                    .execute(db)
+                    .execute(&mut *tx)
                     .await?;
             }
         };
@@ -1909,20 +1954,25 @@ async fn update_claim_row(
     set_nullable!("pr_number", &input.pr_number);
     set_nullable!("head_sha", &input.head_sha);
 
-    // Refresh board_status from the live issue + heartbeat.
+    // Refresh board_status from the live issue + heartbeat in the same tx.
     let issue_id: i64 = sqlx::query_scalar("SELECT issue_id FROM agent_claims WHERE id = ?1")
         .bind(id)
-        .fetch_one(db)
+        .fetch_one(&mut *tx)
         .await?;
-    let issue = get_issue(db, issue_id).await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
+        .bind(issue_id)
+        .fetch_one(&mut *tx)
+        .await?;
     sqlx::query(
         "UPDATE agent_claims SET board_status = ?2, updated_at = ?3, last_heartbeat = ?3 WHERE id = ?1",
     )
     .bind(id)
-    .bind(issue.status.as_str())
+    .bind(&status)
     .bind(ts)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
+
     get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)
 }
 

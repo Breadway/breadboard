@@ -2,6 +2,7 @@
   import { fly } from "svelte/transition";
   import {
     PRIORITIES,
+    safeHttpUrl,
     STATUSES,
     type ActivityEntry,
     type Comment,
@@ -157,6 +158,7 @@
   }
 
   const claim = $derived(issue ? store.claimForIssue(issue.id) : undefined);
+  const safePrUrl = $derived(claim ? safeHttpUrl(claim.pr_url) : null);
   const intents = $derived(
     issue ? store.claimsForIssue(issue.id).filter((c) => c.mode === "intent") : [],
   );
@@ -459,7 +461,9 @@
             {/if}
             <span class="grow"></span>
             {#if claim}
-              <button onclick={() => claim && void store.releaseById(claim.id)}>Release</button>
+              {#if claim.claimed_by === store.me?.id}
+                <button onclick={() => claim && void store.releaseById(claim.id)}>Release</button>
+              {/if}
             {:else}
               <button onclick={() => (claiming = !claiming)}>{claiming ? "Cancel" : "+ Claim"}</button>
             {/if}
@@ -479,9 +483,10 @@
                 </span>
               {/if}
               {#if claim.pr_url}
-                <a class="achip mono link" href={claim.pr_url} target="_blank" rel="noreferrer" title="Pull request">
+                <a class="achip mono link" href={safePrUrl} target="_blank" rel="noreferrer" title="Pull request">
+                  {#if !safePrUrl}<span>{claim.pr_url}</span>{:else}
                   <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                  PR{claim.pr_number ? ` #${claim.pr_number}` : ""}
+                  PR{claim.pr_number ? ` #${claim.pr_number}` : ""}{/if}
                 </a>
               {:else if claim.pr_number}
                 <span class="achip mono">PR #{claim.pr_number}</span>

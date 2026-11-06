@@ -78,11 +78,17 @@ function startKeepalive(key: string, agent: string) {
   const id = keepaliveId(key, agent);
   if (keepalives.has(id)) return;
   const timer = setInterval(() => {
-    void client.heartbeatClaim(key, { agent_name: agent }, agent).catch(() => {
-      // A 404 means the claim is gone (released elsewhere): stop poking.
-      const t = keepalives.get(id);
-      if (t) clearInterval(t);
-      keepalives.delete(id);
+    void client.heartbeatClaim(key, { agent_name: agent }, agent).catch((e) => {
+      // Only a missing claim stops the timer. A network blip or a transient
+      // 5xx must not silently let the claim go stale.
+      const gone = e instanceof ApiError && (e.status === 404 || e.status === 410);
+      if (gone) {
+        const t = keepalives.get(id);
+        if (t) clearInterval(t);
+        keepalives.delete(id);
+      } else {
+        console.error(`breadboard keepalive failed for ${key}/${agent}: ${e instanceof Error ? e.message : String(e)}`);
+      }
     });
   }, KEEPALIVE_MS);
   timer.unref?.();

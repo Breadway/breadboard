@@ -90,6 +90,7 @@
       v("Board", "board"),
       v("Backlog", "backlog"),
       v("Roadmap", "roadmap"),
+      v("Agents", "agents"),
       v("Inbox", "inbox"),
       v("Settings", "settings"),
       { kind: "view", label: store.me && store.isFiltered("assignees", store.me.id) ? "Show everyone's issues" : "Show only issues assigned to me", go: () => store.toggleMine() },

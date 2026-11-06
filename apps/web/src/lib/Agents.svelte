@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { ago, claimStale, store } from "./store.svelte";
+  import { safeHttpUrl } from "@breadboard/api-client";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import Ring from "./ui/Ring.svelte";
   import { agentColor } from "./ui/colors";
@@ -28,7 +29,7 @@
   const tallies = $derived.by(() => {
     const t = { active: 0, review: 0, verifying: 0, blocked: 0, done: 0 };
     for (const c of work) {
-      if (c.state === "done" || c.board_status === "done") t.done++;
+      if (c.state === "done") t.done++;
       else if (c.state === "implementing" || c.state === "reworking" || c.state === "planned") t.active++;
       else if (c.state === "awaiting-review" || c.state === "awaiting-ci" || c.state === "awaiting-merge") t.review++;
       else if (c.state === "verifying") t.verifying++;
@@ -52,12 +53,11 @@
 
   // One agent = (owner, agent name). An agent can hold many issues; this
   // groups them so each row of the tab is an agent, not a single claim.
-  const groups = $derived.by(() => {
+  // Stats are always computed from every claim the agent holds; the stale
+  // view only narrows which rows are rendered, so completion does not jump.
+  const allGroups = $derived.by(() => {
     const map = new Map<string, Group>();
-    const source = staleOnly
-      ? claims.filter((c) => c.mode === "exclusive" && claimStale(c.last_heartbeat, now))
-      : claims;
-    for (const c of source) {
+    for (const c of claims) {
       const id = `${c.claimed_by_login}:${c.agent_name}`;
       let g = map.get(id);
       if (!g) {
@@ -79,7 +79,7 @@
       if (c.mode === "intent") g.intents.push(c);
       else {
         g.work.push(c);
-        if (c.state === "done" || c.board_status === "done") g.done++;
+        if (c.state === "done") g.done++;
         if (claimStale(c.last_heartbeat, now)) g.stale++;
         else g.live++;
       }
@@ -98,6 +98,19 @@
         a.name.localeCompare(b.name),
     );
   });
+
+  const groups = $derived(
+    staleOnly
+      ? allGroups
+          .filter((g) => g.stale > 0)
+          .map((g) => ({
+            ...g,
+            claims: g.claims.filter(
+              (c) => c.mode === "exclusive" && claimStale(c.last_heartbeat, now),
+            ),
+          }))
+      : allGroups,
+  );
 
   function tone(s: string): "idle" | "warn" | "ok" | "bad" {
     if (s === "blocked" || s === "needs-user") return "bad";
@@ -141,7 +154,7 @@
   <div class="bar">
     <div class="seg">
       <button class:on={!staleOnly} onclick={() => (staleOnly = false)}>
-        All <span>{groups.length} agents</span>
+        All <span>{allGroups.length} agents</span>
       </button>
       <button class:on={staleOnly} onclick={() => (staleOnly = true)}>
         Stale <span class:bad={staleCount > 0}>{staleCount}</span>
@@ -197,6 +210,7 @@
           <div class="gbody">
             {#each g.claims as c (c.id)}
               {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
+              {@const pr = safeHttpUrl(c.pr_url)}
               <div class="row" class:stale class:intent={c.mode === "intent"}>
                 <StatusGlyph status={c.board_status} size={12} />
                 <button class="key" onclick={() => (store.selectedKey = c.key)} title="Open {c.key}">{c.key}</button>
@@ -204,8 +218,8 @@
                 <span class="title">{c.issue_title}</span>
                 <span class="state {tone(c.state)}">{stateLabel(c.state)}</span>
                 {#if stale}<span class="stale-pill">stale</span>{/if}
-                {#if c.pr_url}
-                  <a class="chip-pr" href={c.pr_url} target="_blank" rel="noreferrer" title="Pull request">
+                {#if pr}
+                  <a class="chip-pr" href={pr} target="_blank" rel="noreferrer" title="Pull request">
                     <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
                     PR{c.pr_number ? ` #${c.pr_number}` : ""}
                   </a>
