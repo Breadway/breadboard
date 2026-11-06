@@ -19,6 +19,8 @@
   let dmTarget = $state("");
   let scroller: HTMLDivElement | undefined = $state();
   let subs = $state<number[]>([]);
+  let narrow = $state(false);
+  let roomsOpen = $state(true);
 
   const selected = $derived(rooms.find((r) => r.id === selectedId));
   const shared = $derived(
@@ -95,6 +97,7 @@
 
   function pick(id: number) {
     selectedId = id;
+    if (narrow) roomsOpen = false;
     void loadMessages(id).then(() => loadRooms());
   }
 
@@ -188,13 +191,23 @@
   }
 
   onMount(() => {
+    const mq = window.matchMedia("(max-width: 860px)");
+    const apply = () => {
+      narrow = mq.matches;
+      if (!narrow) roomsOpen = true;
+    };
+    apply();
+    mq.addEventListener("change", apply);
     void loadSubs();
     void loadRooms(true).then(() => loadMessages(selectedId));
     const t = setInterval(() => {
       void loadRooms();
       void loadMessages(selectedId);
     }, 5_000);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      mq.removeEventListener("change", apply);
+    };
   });
 
   // SSE nudge: a message landed somewhere.
@@ -211,7 +224,7 @@
   });
 </script>
 
-<div class="chat">
+<div class="chat" class:narrow class:rooms-open={roomsOpen}>
   <aside class="rooms" aria-label="Chat rooms">
     <header>
       <span class="sh">Rooms</span>
@@ -264,6 +277,11 @@
   <section class="main">
     {#if selected}
       <header class="mhead">
+        {#if narrow}
+          <button class="back" aria-label="Back to rooms" onclick={() => (roomsOpen = true)}>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m10 3-5 5 5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" /></svg>
+          </button>
+        {/if}
         <div>
           <h2>{selected.kind === "room" ? `#${selected.name}` : roomLabel(selected)}</h2>
           {#if selected.description}<p class="desc">{selected.description}</p>{/if}
@@ -736,15 +754,74 @@
     font-size: 11.5px;
   }
 
+  .back {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    flex: none;
+    border: 0;
+    border-radius: 7px;
+    background: none;
+    color: var(--ink-dim);
+    padding: 0;
+  }
+  .back:hover {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .back svg {
+    width: 16px;
+    height: 16px;
+  }
+
   @media (max-width: 860px) {
-    .chat {
-      grid-template-columns: 150px minmax(0, 1fr);
+    .chat.narrow {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .chat.narrow .rooms,
+    .chat.narrow .main {
+      grid-column: 1;
+      grid-row: 1;
+    }
+    .chat.narrow:not(.rooms-open) .rooms {
+      display: none;
+    }
+    .chat.narrow.rooms-open .main {
+      display: none;
+    }
+    .rooms {
+      border-right: 0;
+      padding: 12px 14px calc(12px + env(safe-area-inset-bottom, 0px));
+    }
+    .room {
+      padding: 11px 10px;
+    }
+    .rname {
+      font-size: 14px;
+    }
+    .rprev {
+      font-size: 11.5px;
+    }
+    .mhead {
+      padding: 10px 12px;
+    }
+    .messages {
+      padding: 12px 12px;
     }
     .msg {
       grid-template-columns: minmax(0, 1fr) auto;
+      gap: 4px 8px;
+      padding: 7px 6px;
     }
     .who {
       grid-column: 1 / -1;
+    }
+    .composer {
+      padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px));
+    }
+    .img img {
+      max-width: min(260px, 70vw);
     }
   }
 </style>

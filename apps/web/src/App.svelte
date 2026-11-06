@@ -291,18 +291,26 @@
     }
     .tabbar {
       display: flex;
-      justify-content: space-around;
+      justify-content: flex-start;
+      gap: 2px;
+      overflow-x: auto;
+      scrollbar-width: none;
       border-top: 1px solid var(--line);
       background: var(--sunk);
-      padding: 4px 4px calc(6px + env(safe-area-inset-bottom, 0px));
+      padding: 4px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+    }
+    .tabbar::-webkit-scrollbar {
+      display: none;
     }
     .tabbar button {
       position: relative;
+      flex: 0 0 auto;
       border: 0;
       background: none;
-      padding: 10px 6px;
+      padding: 10px 9px;
       font-size: 12px;
       color: var(--ink-3);
+      white-space: nowrap;
     }
     .tabbar button.on {
       color: var(--accent);

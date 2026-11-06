@@ -65,7 +65,20 @@
 
   @media (max-width: 860px) {
     .bar {
-      padding: 10px 14px;
+      padding: 8px 12px;
+      gap: 6px;
+      min-height: 50px;
+    }
+    .crumb {
+      font-size: 17px;
+    }
+    .bar :global(.btn kbd) {
+      display: none;
+    }
+    .bar :global(.chip) {
+      height: 26px;
+      padding: 0 8px;
+      font-size: 11.5px;
     }
   }
 </style>

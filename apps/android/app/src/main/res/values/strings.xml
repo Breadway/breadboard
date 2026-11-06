@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">breadboard</string>
+    <string name="offline_title">Can\u2019t reach breadboard</string>
+    <string name="offline_body">Check your connection and try again.</string>
+    <string name="retry">Retry</string>
+</resources>
