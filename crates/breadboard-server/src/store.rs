@@ -2414,8 +2414,16 @@ async fn chat_members(db: &SqlitePool, room_id: i64) -> AppResult<Vec<String>> {
     .await?)
 }
 
-async fn hydrate_room(db: &SqlitePool, row: ChatRoomRow) -> AppResult<ChatRoom> {
+async fn hydrate_room(
+    db: &SqlitePool,
+    row: ChatRoomRow,
+    reader: Option<&str>,
+) -> AppResult<ChatRoom> {
     let members = chat_members(db, row.id).await?;
+    let unread = match reader {
+        Some(member) => chat_unread(db, row.id, member).await?,
+        None => 0,
+    };
     let last: Option<ChatMessageRow> = sqlx::query_as(
         "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
            FROM chat_messages WHERE room_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -2433,13 +2441,18 @@ async fn hydrate_room(db: &SqlitePool, row: ChatRoomRow) -> AppResult<ChatRoom> 
         name: row.name,
         description: row.description,
         members,
+        unread,
         last_message,
     })
 }
 
 /// All shared rooms, plus DMs the viewer belongs to. `viewer = None` (a
 /// human) sees everything, including every DM.
-pub async fn chat_rooms(db: &SqlitePool, viewer: Option<&str>) -> AppResult<Vec<ChatRoom>> {
+pub async fn chat_rooms(
+    db: &SqlitePool,
+    viewer: Option<&str>,
+    reader: Option<&str>,
+) -> AppResult<Vec<ChatRoom>> {
     let rows: Vec<ChatRoomRow> = sqlx::query_as(&format!(
         "SELECT {CHAT_ROOM_COLS} FROM chat_rooms ORDER BY kind, name, id"
     ))
@@ -2461,7 +2474,7 @@ pub async fn chat_rooms(db: &SqlitePool, viewer: Option<&str>) -> AppResult<Vec<
                 }
             }
         }
-        out.push(hydrate_room(db, row).await?);
+        out.push(hydrate_room(db, row, reader).await?);
     }
     Ok(out)
 }
@@ -2474,7 +2487,7 @@ pub async fn get_chat_room(db: &SqlitePool, id: i64) -> AppResult<ChatRoom> {
     .fetch_optional(db)
     .await?
     .ok_or(AppError::NotFound)?;
-    hydrate_room(db, row).await
+    hydrate_room(db, row, None).await
 }
 
 pub async fn chat_room_by_name(db: &SqlitePool, name: &str) -> AppResult<Option<ChatRoom>> {
@@ -2485,7 +2498,7 @@ pub async fn chat_room_by_name(db: &SqlitePool, name: &str) -> AppResult<Option<
     .fetch_optional(db)
     .await?;
     match row {
-        Some(row) => Ok(Some(hydrate_room(db, row).await?)),
+        Some(row) => Ok(Some(hydrate_room(db, row, None).await?)),
         None => Ok(None),
     }
 }
@@ -2511,6 +2524,45 @@ pub async fn create_chat_room(
         other => AppError::Db(other),
     })?;
     get_chat_room(db, id).await
+}
+
+pub async fn chat_unread(db: &SqlitePool, room_id: i64, member: &str) -> AppResult<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM chat_messages
+          WHERE room_id = ?1
+            AND id > COALESCE(
+                (SELECT last_read_message_id FROM chat_reads WHERE room_id = ?1 AND member = ?2), 0)
+            AND author_member != ?2",
+    )
+    .bind(room_id)
+    .bind(member)
+    .fetch_one(db)
+    .await?)
+}
+
+pub async fn chat_mark_read(
+    db: &SqlitePool,
+    room_id: i64,
+    member: &str,
+    message_id: i64,
+) -> AppResult<()> {
+    if message_id <= 0 {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO chat_reads (room_id, member, last_read_message_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(room_id, member) DO UPDATE SET
+            last_read_message_id = MAX(chat_reads.last_read_message_id, excluded.last_read_message_id),
+            updated_at = excluded.updated_at",
+    )
+    .bind(room_id)
+    .bind(member)
+    .bind(message_id)
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn chat_is_member(db: &SqlitePool, room_id: i64, member: &str) -> AppResult<bool> {

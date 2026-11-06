@@ -322,6 +322,8 @@ export interface ChatRoom {
   name: string | null;
   description: string | null;
   members: string[];
+  /** Messages newer than your read cursor, excluding your own. */
+  unread: number;
   last_message: ChatMessage | null;
 }
 

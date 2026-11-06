@@ -107,6 +107,8 @@ class Store {
   clock = $state(Date.now());
   /** Bumped when any chat message arrives over SSE. */
   chatTick = $state(0);
+  /** Total unread chat messages for the signed-in human. */
+  chatUnread = $state(0);
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);

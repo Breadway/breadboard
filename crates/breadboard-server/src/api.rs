@@ -697,16 +697,19 @@ pub async fn list_chat_rooms(
     user: AuthUser,
     Query(q): Query<ChatQuery>,
 ) -> AppResult<Json<Vec<breadboard_core::ChatRoom>>> {
-    let viewer = match q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let (viewer, reader) = match q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => {
             if !store::user_has_agent(&app.db, user.0.id, name).await? {
                 return Err(crate::error::AppError::forbidden());
             }
-            Some(store::agent_member(name))
+            let member = store::agent_member(name);
+            (Some(member.clone()), Some(member))
         }
-        None => None,
+        None => (None, Some(store::human_member(&user.0.login))),
     };
-    Ok(Json(store::chat_rooms(&app.db, viewer.as_deref()).await?))
+    Ok(Json(
+        store::chat_rooms(&app.db, viewer.as_deref(), reader.as_deref()).await?,
+    ))
 }
 
 pub async fn create_chat_room(
@@ -749,6 +752,10 @@ pub async fn chat_messages(
             return Err(crate::error::AppError::forbidden());
         }
     }
+    let reader = match q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => store::agent_member(name),
+        None => store::human_member(&user.0.login),
+    };
     let messages = store::chat_messages(
         &app.db,
         room.id,
@@ -756,6 +763,9 @@ pub async fn chat_messages(
         q.limit.unwrap_or(200).clamp(1, 500),
     )
     .await?;
+    if let Some(last) = messages.last() {
+        store::chat_mark_read(&app.db, room.id, &reader, last.id).await?;
+    }
     Ok(Json(messages))
 }
 

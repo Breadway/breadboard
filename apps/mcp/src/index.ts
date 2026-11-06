@@ -773,18 +773,31 @@ function chatAgent(explicit?: string): string {
   return name;
 }
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Resolve a room name/id, or the DM with another agent, to a room id. */
+async function resolveChatRoom(name: string, room?: string, peer?: string): Promise<number> {
+  if (peer) return (await client.openDm(peer, name)).id;
+  const rooms = await client.listChatRooms(name);
+  const want = room?.trim() || "lobby";
+  const found = rooms.find((r) => String(r.id) === want || r.name === want);
+  if (!found) throw new Error(`no room ${want}`);
+  return found.id;
+}
+
 server.tool(
   "chat_rooms",
-  "List chat rooms and DMs. Shared rooms (including the global lobby) are open to everyone; " +
-    "an agent only sees DMs it belongs to.",
+  "List chat rooms and DMs with an unread count per room. Shared rooms (including the global " +
+    "lobby) are open to everyone; an agent only sees DMs it belongs to. Check this between tasks " +
+    "to notice new chat.",
   { agent_name: z.string().optional().describe("defaults to this process's agent name") },
   ({ agent_name }) => run(() => client.listChatRooms(chatAgent(agent_name))),
 );
 
 server.tool(
   "chat_read",
-  "Read recent messages from a room or DM. Use `room` for a room name/id (default lobby) or " +
-    "`with` to read the DM with another agent.",
+  "Read recent messages from a room or DM and advance your read cursor. Use `room` for a room " +
+    "name/id (default lobby) or `with` to read the DM with another agent.",
   {
     room: z.string().optional().describe("room name or id; defaults to lobby"),
     with: z.string().optional().describe("agent name to read the DM with"),
@@ -795,19 +808,50 @@ server.tool(
   ({ room, with: peer, after, limit, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
-      let roomId: number | undefined;
-      if (peer) {
-        roomId = (await client.openDm(peer, name)).id;
-      } else {
+      const roomId = await resolveChatRoom(name, room, peer);
+      const messages = await client.listChatMessages(roomId, { agent: name, after, limit });
+      return { room_id: roomId, messages };
+    }),
+);
+
+server.tool(
+  "chat_wait",
+  "Wait for the next chat message instead of polling: blocks up to `timeout` seconds for a new " +
+    "message in a room or DM, then returns it (or times out). With `after`, resumes from that " +
+    "message id; without it, waits for anything newer than the room's current latest (call " +
+    "chat_read first if you want history).",
+  {
+    room: z.string().optional().describe("room name or id; defaults to lobby"),
+    with: z.string().optional().describe("agent name to wait on a DM with"),
+    after: z.number().optional().describe("last seen message id"),
+    timeout: z.number().min(1).max(60).optional().describe("seconds to wait, default 25"),
+    agent_name: z.string().optional(),
+  },
+  ({ room, with: peer, after, timeout, agent_name }) =>
+    run(async () => {
+      const name = chatAgent(agent_name);
+      const roomId = await resolveChatRoom(name, room, peer);
+      const waitMs = (timeout ?? 25) * 1000;
+      const deadline = Date.now() + waitMs;
+
+      let seen = after;
+      if (seen === undefined) {
         const rooms = await client.listChatRooms(name);
-        const want = room?.trim() || "lobby";
-        const found = rooms.find(
-          (r) => String(r.id) === want || r.name === want,
-        );
-        if (!found) throw new Error(`no room ${want}`);
-        roomId = found.id;
+        seen = rooms.find((r) => r.id === roomId)?.last_message?.id ?? 0;
       }
-      return client.listChatMessages(roomId, { agent: name, after, limit });
+
+      while (Date.now() < deadline) {
+        const messages = await client.listChatMessages(roomId, {
+          agent: name,
+          after: seen,
+          limit: 100,
+        });
+        if (messages.length) {
+          return { room_id: roomId, messages, timed_out: false };
+        }
+        await sleep(1_000);
+      }
+      return { room_id: roomId, messages: [], timed_out: true };
     }),
 );
 

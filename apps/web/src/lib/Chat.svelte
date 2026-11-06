@@ -51,6 +51,7 @@
     try {
       const next = await api.listChatRooms();
       rooms = next;
+      store.chatUnread = next.reduce((n, r) => n + r.unread, 0);
       if (selectFirst || selectedId == null || !next.some((r) => r.id === selectedId)) {
         selectedId = next.find((r) => r.name === "lobby")?.id ?? next[0]?.id ?? null;
       }
@@ -74,7 +75,7 @@
 
   function pick(id: number) {
     selectedId = id;
-    void loadMessages(id);
+    void loadMessages(id).then(() => loadRooms());
   }
 
   async function onFiles(e: Event) {
@@ -208,6 +209,7 @@
       <button class="room" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
         <span class="hash">#</span>
         <span class="rname">{r.name}</span>
+        {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
         {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
       </button>
     {/each}
@@ -231,6 +233,7 @@
       <button class="room dm" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
         <span class="dmDot"></span>
         <span class="rname">{roomLabel(r)}</span>
+        {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
         {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
       </button>
     {/each}
@@ -417,6 +420,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
+    flex: 1;
     font-size: 12.5px;
     font-weight: 550;
     color: var(--ink);
@@ -437,6 +441,18 @@
   }
   .room.dm .rname {
     padding-left: 2px;
+  }
+  .unread {
+    margin-left: auto;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 99px;
+    background: var(--accent);
+    color: var(--on-accent);
+    font: 600 9.5px/16px var(--font-mono);
+    text-align: center;
+    flex: none;
   }
   .rprev {
     font: 400 10.5px/1.3 var(--font-mono);
