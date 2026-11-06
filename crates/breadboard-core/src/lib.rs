@@ -348,3 +348,83 @@ pub struct Notification {
     pub read: bool,
     pub created_at: DateTime<Utc>,
 }
+
+/// Lifecycle state of an agent working an issue. Mirrors the durable
+/// `~/.config/breadboard` session states used by the opencode `bb-status`
+/// widget, so the server-side Agents page speaks the same language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentState {
+    Planned,
+    Implementing,
+    AwaitingReview,
+    Reworking,
+    AwaitingCi,
+    AwaitingMerge,
+    Verifying,
+    Blocked,
+    NeedsUser,
+    Done,
+}
+
+impl AgentState {
+    pub const ALL: [AgentState; 10] = [
+        AgentState::Planned,
+        AgentState::Implementing,
+        AgentState::AwaitingReview,
+        AgentState::Reworking,
+        AgentState::AwaitingCi,
+        AgentState::AwaitingMerge,
+        AgentState::Verifying,
+        AgentState::Blocked,
+        AgentState::NeedsUser,
+        AgentState::Done,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentState::Planned => "planned",
+            AgentState::Implementing => "implementing",
+            AgentState::AwaitingReview => "awaiting-review",
+            AgentState::Reworking => "reworking",
+            AgentState::AwaitingCi => "awaiting-ci",
+            AgentState::AwaitingMerge => "awaiting-merge",
+            AgentState::Verifying => "verifying",
+            AgentState::Blocked => "blocked",
+            AgentState::NeedsUser => "needs-user",
+            AgentState::Done => "done",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+/// One active agent claim on an issue. At most one claim per issue
+/// (exclusive): the first claim wins, a second agent gets 409 until the
+/// first releases or re-claims. `last_heartbeat` drives the live/stale
+/// signal on the Agents page; claims never auto-expire server-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentClaim {
+    pub issue_id: i64,
+    pub key: String,
+    pub issue_title: String,
+    pub issue_status: Status,
+    pub claimed_by: i64,
+    pub claimed_by_login: String,
+    pub agent_name: String,
+    pub session_id: Option<String>,
+    pub state: AgentState,
+    pub note: Option<String>,
+    pub branch: Option<String>,
+    pub worktree: Option<String>,
+    pub repo: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
+    pub head_sha: Option<String>,
+    pub board_status: Status,
+    pub claimed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_heartbeat: DateTime<Utc>,
+}

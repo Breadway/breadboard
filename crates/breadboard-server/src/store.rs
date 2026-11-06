@@ -889,7 +889,18 @@ pub async fn update_issue(
     }
 
     tx.commit().await?;
-    get_issue_by_key(db, key).await
+    let after = get_issue_by_key(db, key).await?;
+    if after.status != before.status {
+        let _ = sqlx::query(
+            "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
+        )
+        .bind(after.id)
+        .bind(after.status.as_str())
+        .bind(&ts)
+        .execute(db)
+        .await;
+    }
+    Ok(after)
 }
 
 /// Move an issue to a different project: allocate a fresh key from the
@@ -1602,6 +1613,217 @@ fn dedup(labels: &[String]) -> Vec<String> {
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty() && seen.insert(l.clone()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// agent claims (exclusive server-side presence)
+// ---------------------------------------------------------------------------
+
+use breadboard_core::{AgentClaim, AgentState};
+
+#[derive(FromRow)]
+struct AgentClaimRow {
+    issue_id: i64,
+    key: String,
+    issue_title: String,
+    issue_status: String,
+    claimed_by: i64,
+    claimed_by_login: String,
+    agent_name: String,
+    session_id: Option<String>,
+    state: String,
+    note: Option<String>,
+    branch: Option<String>,
+    worktree: Option<String>,
+    repo: Option<String>,
+    pr_url: Option<String>,
+    pr_number: Option<i64>,
+    head_sha: Option<String>,
+    board_status: String,
+    claimed_at: String,
+    updated_at: String,
+    last_heartbeat: String,
+}
+
+impl From<AgentClaimRow> for AgentClaim {
+    fn from(r: AgentClaimRow) -> Self {
+        AgentClaim {
+            issue_id: r.issue_id,
+            key: r.key,
+            issue_title: r.issue_title,
+            issue_status: Status::parse(&r.issue_status).unwrap_or(Status::Doing),
+            claimed_by: r.claimed_by,
+            claimed_by_login: r.claimed_by_login,
+            agent_name: r.agent_name,
+            session_id: r.session_id,
+            state: AgentState::parse(&r.state).unwrap_or(AgentState::Implementing),
+            note: r.note,
+            branch: r.branch,
+            worktree: r.worktree,
+            repo: r.repo,
+            pr_url: r.pr_url,
+            pr_number: r.pr_number,
+            head_sha: r.head_sha,
+            board_status: Status::parse(&r.board_status).unwrap_or(Status::Doing),
+            claimed_at: parse_ts(&r.claimed_at),
+            updated_at: parse_ts(&r.updated_at),
+            last_heartbeat: parse_ts(&r.last_heartbeat),
+        }
+    }
+}
+
+const AGENT_CLAIM_COLS: &str = "c.issue_id, i.key AS key, i.title AS issue_title, \
+    i.status AS issue_status, c.claimed_by, u.login AS claimed_by_login, \
+    c.agent_name, c.session_id, c.state, c.note, c.branch, c.worktree, c.repo, \
+    c.pr_url, c.pr_number, c.head_sha, c.board_status, c.claimed_at, c.updated_at, \
+    c.last_heartbeat";
+
+fn agent_claim_join() -> String {
+    format!(
+        "SELECT {AGENT_CLAIM_COLS} FROM agent_claims c \
+         JOIN issues i ON i.id = c.issue_id \
+         JOIN users u ON u.id = c.claimed_by"
+    )
+}
+
+pub async fn get_claim(db: &SqlitePool, issue_id: i64) -> AppResult<Option<AgentClaim>> {
+    let row: Option<AgentClaimRow> =
+        sqlx::query_as(&format!("{} WHERE c.issue_id = ?1", agent_claim_join()))
+            .bind(issue_id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(Into::into))
+}
+
+pub async fn list_claims(db: &SqlitePool) -> AppResult<Vec<AgentClaim>> {
+    let rows: Vec<AgentClaimRow> =
+        sqlx::query_as(&format!("{} ORDER BY c.last_heartbeat DESC", agent_claim_join()))
+            .fetch_all(db)
+            .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_claim(
+    db: &SqlitePool,
+    issue: &Issue,
+    claimed_by: i64,
+    input: &crate::dto::ClaimUpsert,
+) -> AppResult<AgentClaim> {
+    input.validate().map_err(AppError::BadRequest)?;
+    let ts = now_rfc3339();
+    let state = input.state.unwrap_or(AgentState::Implementing);
+    let res = sqlx::query(
+        "INSERT INTO agent_claims (issue_id, claimed_by, agent_name, session_id, state,
+             note, branch, worktree, repo, pr_url, pr_number, head_sha, board_status,
+             claimed_at, updated_at, last_heartbeat)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?14)",
+    )
+    .bind(issue.id)
+    .bind(claimed_by)
+    .bind(input.agent_name.trim())
+    .bind(input.session_id.clone())
+    .bind(state.as_str())
+    .bind(input.note.clone())
+    .bind(input.branch.clone())
+    .bind(input.worktree.clone())
+    .bind(input.repo.clone())
+    .bind(input.pr_url.clone())
+    .bind(input.pr_number)
+    .bind(input.head_sha.clone())
+    .bind(issue.status.as_str())
+    .bind(&ts)
+    .execute(db)
+    .await;
+    match res {
+        Ok(_) => get_claim(db, issue.id).await?.ok_or(AppError::NotFound),
+        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            Err(AppError::Conflict("issue is already claimed".into()))
+        }
+        Err(other) => Err(AppError::Db(other)),
+    }
+}
+
+pub async fn update_claim(
+    db: &SqlitePool,
+    issue_id: i64,
+    input: &crate::dto::ClaimUpdate,
+) -> AppResult<AgentClaim> {
+    let existing = get_claim(db, issue_id).await?.ok_or(AppError::NotFound)?;
+    if let Some(agent_name) = &input.agent_name {
+        if agent_name.trim().is_empty() {
+            return Err(AppError::bad_request("agent_name must not be empty"));
+        }
+        sqlx::query("UPDATE agent_claims SET agent_name = ?2 WHERE issue_id = ?1")
+            .bind(issue_id)
+            .bind(agent_name.trim())
+            .execute(db)
+            .await?;
+    }
+    if let Some(state) = input.state {
+        sqlx::query("UPDATE agent_claims SET state = ?2 WHERE issue_id = ?1")
+            .bind(issue_id)
+            .bind(state.as_str())
+            .execute(db)
+            .await?;
+    }
+    // Nullable fields: Some(None) clears, Some(Some(v)) sets, None leaves alone.
+    macro_rules! set_nullable {
+        ($col:literal, $val:expr) => {
+            if let Some(v) = $val {
+                sqlx::query(concat!("UPDATE agent_claims SET ", $col, " = ?2 WHERE issue_id = ?1"))
+                    .bind(issue_id)
+                    .bind(v.clone())
+                    .execute(db)
+                    .await?;
+            }
+        };
+    }
+    set_nullable!("session_id", &input.session_id);
+    set_nullable!("note", &input.note);
+    set_nullable!("branch", &input.branch);
+    set_nullable!("worktree", &input.worktree);
+    set_nullable!("repo", &input.repo);
+    set_nullable!("pr_url", &input.pr_url);
+    set_nullable!("pr_number", &input.pr_number);
+    set_nullable!("head_sha", &input.head_sha);
+    // Refresh board_status from the live issue + heartbeat.
+    let issue = get_issue(db, existing.issue_id).await?;
+    let ts = now_rfc3339();
+    sqlx::query(
+        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3, last_heartbeat = ?3 WHERE issue_id = ?1",
+    )
+    .bind(issue_id)
+    .bind(issue.status.as_str())
+    .bind(&ts)
+    .execute(db)
+    .await?;
+    get_claim(db, issue_id).await?.ok_or(AppError::NotFound)
+}
+
+pub async fn delete_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bool> {
+    let n = sqlx::query("DELETE FROM agent_claims WHERE issue_id = ?1")
+        .bind(issue_id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    Ok(n > 0)
+}
+
+pub async fn refresh_claim_board_status(
+    db: &SqlitePool,
+    issue_id: i64,
+    status: Status,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
+    )
+    .bind(issue_id)
+    .bind(status.as_str())
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Seed a default project on an empty database so the API is usable immediately.

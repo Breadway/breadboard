@@ -10,14 +10,14 @@
     type IssuePatch,
     type LinkKind,
   } from "@breadboard/api-client";
-  import { api, errMsg, store, statusName } from "./store.svelte";
+  import { api, claimStale, errMsg, store, statusName } from "./store.svelte";
   import { renderMarkdown } from "./markdown";
   import Menu, { type MenuItem } from "./ui/Menu.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
-  import { labelColor, projectColor } from "./ui/colors";
+  import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   // The issue's fields come straight from the store, so a drag on the board,
   // a live event from someone else, or a refused save (which leaves the store
@@ -41,6 +41,10 @@
   let posting = $state(false);
   let confirmingDelete = $state(false);
   let addingLink = $state(false);
+  let claiming = $state(false);
+  let claimAgent = $state("");
+  let claimNote = $state("");
+  let claimBusy = $state(false);
   let linkKind = $state<LinkKind>("blocks");
   let linkTarget = $state("");
   let linkBusy = $state(false);
@@ -149,6 +153,25 @@
   }
   function removeLabel(l: string) {
     if (issue) void save({ labels: issue.labels.filter((x) => x !== l) });
+  }
+
+  const claim = $derived(issue ? store.claimForIssue(issue.id) : undefined);
+  const claimStaleFlag = $derived(claim ? claimStale(claim.last_heartbeat) : false);
+
+  async function doClaim() {
+    if (!issue) return;
+    const agent_name = claimAgent.trim() || store.me?.login || "agent";
+    claimBusy = true;
+    const ok = await store.claim(issue.key, {
+      agent_name,
+      note: claimNote.trim() || undefined,
+    });
+    claimBusy = false;
+    if (ok) {
+      claiming = false;
+      claimAgent = "";
+      claimNote = "";
+    }
   }
 
   const statusItems = $derived<MenuItem[]>(
@@ -410,6 +433,63 @@
             />
           </div>
         </div>
+
+        <section class="sec agent-sec" class:claimed={!!claim} style={claim ? `--agent:${agentColor(claim.agent_name)}` : undefined}>
+          <h3>
+            Agent
+            {#if claim}
+              <span class="agent-pill" class:stale={claimStaleFlag} style="--agent:{agentColor(claim.agent_name)}" title="Last heartbeat: {claim.last_heartbeat}">
+                🤖 {claim.agent_name} · {claim.state}{claimStaleFlag ? " · stale" : ""}
+              </span>
+            {/if}
+            <span class="grow"></span>
+            {#if claim}
+              <button onclick={() => void store.release(issue.key)}>Release</button>
+            {:else}
+              <button onclick={() => (claiming = !claiming)}>{claiming ? "Cancel" : "+ Claim"}</button>
+            {/if}
+          </h3>
+          {#if claim}
+            <p class="agent-line">
+              {claim.claimed_by_login}{claim.session_id ? ` · ${claim.session_id}` : ""}{claim.branch ? ` · ⑂ ${claim.branch}` : ""}{claim.pr_url
+                ? ` · PR`
+                : claim.pr_number
+                  ? ` · PR #${claim.pr_number}`
+                  : ""}{claim.head_sha ? ` · ${claim.head_sha.slice(0, 7)}` : ""}
+            </p>
+            {#if claim.note}<p class="agent-note">{claim.note}</p>{/if}
+            {#if claim.claimed_by !== store.me?.id}
+              <p class="dim small">Claimed by someone else. Only {claim.claimed_by_login} can heartbeat or release it.</p>
+            {/if}
+          {:else if claiming}
+            <div class="claim-form">
+              <input
+                class="field"
+                placeholder="Agent name (default: your login)"
+                bind:value={claimAgent}
+                aria-label="Agent name"
+              />
+              <input
+                class="field"
+                placeholder="What are you starting? (optional note)"
+                bind:value={claimNote}
+                aria-label="Claim note"
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void doClaim();
+                  }
+                }}
+              />
+              <button class="btn primary" disabled={claimBusy} onclick={() => void doClaim()}>
+                {claimBusy ? "Claiming…" : `Claim ${issue.key}`}
+              </button>
+            </div>
+            <p class="dim small">Claiming moves backlog/todo → doing and assigns the card to you.</p>
+          {:else}
+            <p class="dim small">No agent is working this. Claim it before starting so the board shows it live.</p>
+          {/if}
+        </section>
 
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>
@@ -730,6 +810,54 @@
     flex-direction: column;
     gap: 8px;
   }
+  .agent-sec {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .agent-sec.claimed {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 45%, transparent);
+  }
+  .agent-sec .grow { flex: 1; }
+  .agent-pill {
+    font: 600 9.5px/1 var(--font-mono);
+    letter-spacing: 0.03em;
+    color: var(--agent, var(--ok));
+    background: color-mix(in srgb, var(--agent, var(--ok)) 14%, transparent);
+    padding: 3px 7px;
+    border-radius: 5px;
+    text-transform: none;
+  }
+  .agent-pill.stale {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+  .agent-line {
+    margin: 0;
+    font: 400 11px/1.5 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .agent-note {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    border-left: 2px solid color-mix(in srgb, var(--agent, var(--ok)) 50%, transparent);
+    padding-left: 8px;
+  }
+  .claim-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .claim-form .field {
+    background: var(--bg);
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 7px 9px;
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .small { font-size: 11.5px; }
   h3 {
     margin: 0;
     display: flex;

@@ -224,8 +224,11 @@ server.tool(
 
 server.tool(
   "update_issue",
-  "Patch an issue. Any omitted field is left unchanged. " +
-    "Workflow: move to doing when you actually start work (not just at the end); backlog/todo "
+  "Patch an issue. Any omitted field is left unchanged. CLAIM FIRST: agents must " +
+    "call claim_issue before starting work (first claim wins; 409 means someone else is on it: " +
+    "check list_agents / agent_status and work something else). Heartbeat with update_claim at " +
+    "least every 5 minutes while work is in progress or the Agents page marks the claim stale. " +
+    "Release with release_claim when done. Workflow: move to doing when you actually start work (not just at the end); backlog/todo "
     + "→ doing → review (implemented, not yet verified/deployed) → done (verified live). "
     + "Don't jump straight from backlog/todo to review or done.",
   {
@@ -271,7 +274,8 @@ server.tool(
 
 server.tool(
   "move_issue",
-  "Shorthand: set an issue's status. Workflow: doing when work actually starts, review once "
+  "Shorthand: set an issue's status. CLAIM FIRST with claim_issue (and heartbeat via " +
+    "update_claim); 409 means another agent holds it. Workflow: doing when work actually starts, review once "
     + "implemented (not yet verified/deployed), done only after you've verified it. Don't skip "
     + "doing on the way to review/done.",
   { key: z.string(), status: z.enum(STATUSES as [string, ...string[]]) },
@@ -471,6 +475,84 @@ server.tool("reconcile", "Run a Forgejo reconcile pass now.", {}, () =>
     await client.reconcile();
     return "reconcile queued";
   }),
+);
+
+const AGENT_STATES = [
+  "planned",
+  "implementing",
+  "awaiting-review",
+  "reworking",
+  "awaiting-ci",
+  "awaiting-merge",
+  "verifying",
+  "blocked",
+  "needs-user",
+  "done",
+] as const;
+
+server.tool(
+  "claim_issue",
+  "Claim an issue exclusively as an agent. REQUIRED FIRST STEP before any implementation work: " +
+    "no code changes without holding the claim. First claim wins (409 means another agent is on it: " +
+    "do not fight the lock, check agent_status and pick other work). " +
+    "Claiming from backlog/todo moves the card to doing and assigns it to you, tinting it on the board. " +
+    "Heartbeat with update_claim at least every 5 minutes while work is in progress (stale claims stay " +
+    "visible but flagged) and release_claim when done.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().describe("agent-chosen name, e.g. opencode, bb-worker-2"),
+    session_id: z.string().optional().describe("agent session id for ownership checks"),
+    state: z.enum(AGENT_STATES).optional().describe("lifecycle state, default implementing"),
+    note: z.string().optional().describe("what you are doing right now"),
+    branch: z.string().optional(),
+    worktree: z.string().optional(),
+    repo: z.string().optional(),
+    pr_url: z.string().optional(),
+    pr_number: z.number().optional(),
+    head_sha: z.string().optional(),
+  },
+  ({ key, ...claim }) => run(() => client.claimIssue(key, claim as never)),
+);
+
+server.tool(
+  "update_claim",
+  "Heartbeat / update your claim (refreshes the live signal on the Agents page). Only the claiming user may update.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().optional(),
+    state: z.enum(AGENT_STATES).optional(),
+    session_id: z.string().nullable().optional(),
+    note: z.string().nullable().optional(),
+    branch: z.string().nullable().optional(),
+    worktree: z.string().nullable().optional(),
+    repo: z.string().nullable().optional(),
+    pr_url: z.string().nullable().optional(),
+    pr_number: z.number().nullable().optional(),
+    head_sha: z.string().nullable().optional(),
+  },
+  ({ key, ...update }) => run(() => client.heartbeatClaim(key, update as never)),
+);
+
+server.tool(
+  "release_claim",
+  "Release your claim. The card keeps its status; only the agent tint goes away.",
+  { key: z.string().describe("issue key, e.g. BREAD-42") },
+  ({ key }) =>
+    run(async () => {
+      await client.releaseClaim(key);
+      return `released ${key}`;
+    }),
+);
+
+server.tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>
+  run(() => client.listAgents()),
+);
+
+server.tool(
+  "agent_status",
+  "Server-side roll-up mirroring the opencode bb-status widget line, computed from live claims.",
+  {},
+  () => run(() => client.agentStatus()),
 );
 
 server.tool(

@@ -4,7 +4,12 @@
 import {
   ApiError,
   BreadboardClient,
+  type AgentClaim,
+  type AgentStatusSummary,
+  type AgentState,
   type BoardEvent,
+  type ClaimUpdate,
+  type ClaimUpsert,
   type Cycle,
   type EpicView,
   type Notification,
@@ -20,7 +25,24 @@ import {
 export const api = new BreadboardClient();
 
 type AuthState = "loading" | "in" | "out" | "error";
-export type View = "board" | "backlog" | "roadmap" | "inbox" | "settings";
+export type View = "board" | "backlog" | "roadmap" | "agents" | "inbox" | "settings";
+
+/** A claim with no heartbeat for this long reads as stale (never auto-released). */
+export const CLAIM_STALE_SECS = 300;
+
+export function claimStale(lastHeartbeat: string, now = Date.now()): boolean {
+  const t = Date.parse(lastHeartbeat);
+  if (Number.isNaN(t)) return false;
+  return (now - t) / 1000 >= CLAIM_STALE_SECS;
+}
+
+export function ago(iso: string, now = Date.now()): string {
+  const s = Math.max(0, Math.floor((now - Date.parse(iso)) / 1000));
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
+}
 
 export interface Toast {
   id: number;
@@ -43,6 +65,9 @@ class Store {
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
   unread = $state(0);
+
+  agents = $state<AgentClaim[]>([]);
+  agentLine = $state<string>("");
 
   // Bumped whenever a live event touches an issue, so the open issue panel
   // knows to refetch its comments and activity.
@@ -155,6 +180,7 @@ class Store {
     }
     this.auth = "in";
     await this.loadInbox();
+    void this.loadAgents();
     this.#connect();
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission().catch(() => {});
@@ -191,6 +217,90 @@ class Store {
     await api.markAllRead().catch(() => this.loadInbox());
   }
 
+  get agentsByIssue(): Map<number, AgentClaim> {
+    return new Map(this.agents.map((a) => [a.issue_id, a]));
+  }
+
+  get activeAgents(): number {
+    return this.agents.length;
+  }
+
+  claimForIssue(issueId: number): AgentClaim | undefined {
+    return this.agents.find((a) => a.issue_id === issueId);
+  }
+
+  async loadAgents() {
+    try {
+      const [claims, status] = await Promise.all([api.listAgents(), api.agentStatus()]);
+      this.agents = claims;
+      this.agentLine = status.line;
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async claim(key: string, body: ClaimUpsert): Promise<boolean> {
+    try {
+      const c = await api.claimIssue(key, body);
+      this.agents = [...this.agents.filter((a) => a.issue_id !== c.issue_id), c];
+      this.info(`Claimed ${c.key} as ${c.agent_name}`);
+      return true;
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 409) {
+        this.flash(`Already claimed: ${errMsg(e)}`);
+      } else {
+        this.flash(`Couldn't claim ${key}: ${errMsg(e)}`);
+      }
+      return false;
+    }
+  }
+
+  async heartbeat(key: string, body: ClaimUpdate): Promise<boolean> {
+    try {
+      const c = await api.heartbeatClaim(key, body);
+      this.agents = [...this.agents.filter((a) => a.issue_id !== c.issue_id), c];
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't update claim on ${key}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  async release(key: string, undoable = true): Promise<boolean> {
+    const snapshot = this.agents;
+    const claim = snapshot.find((a) => a.key === key);
+    this.agents = this.agents.filter((a) => a.key !== key);
+    try {
+      await api.releaseClaim(key);
+      this.info(
+        `Released ${key}`,
+        undoable && claim
+          ? () => void this.reclaim(claim)
+          : undefined,
+      );
+      return true;
+    } catch (e) {
+      this.agents = snapshot;
+      this.flash(`Couldn't release ${key}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  private async reclaim(claim: AgentClaim): Promise<void> {
+    await this.claim(claim.key, {
+      agent_name: claim.agent_name,
+      session_id: claim.session_id ?? undefined,
+      state: claim.state as AgentState,
+      note: claim.note ?? undefined,
+      branch: claim.branch ?? undefined,
+      worktree: claim.worktree ?? undefined,
+      repo: claim.repo ?? undefined,
+      pr_url: claim.pr_url ?? undefined,
+      pr_number: claim.pr_number ?? undefined,
+      head_sha: claim.head_sha ?? undefined,
+    });
+  }
+
   async loadAll() {
     const [issues, projects, cycles, epics] = await Promise.all([
       api.listIssues(),
@@ -225,6 +335,7 @@ class Store {
         if (live && !this.connected && this.#everLive) {
           void this.loadAll().catch(() => {});
           void this.loadInbox();
+          void this.loadAgents();
         }
         if (live) this.#everLive = true;
         this.connected = live;
@@ -247,6 +358,12 @@ class Store {
         }
         break;
       }
+      case "agent.claimed":
+      case "agent.updated":
+      case "agent.released":
+        void this.loadAgents();
+        this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        break;
       case "card.deleted":
         this.issues = this.issues.filter((i) => i.key !== ev.key);
         if (this.selectedKey === ev.key) this.selectedKey = null;

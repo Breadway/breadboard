@@ -334,6 +334,46 @@ impl Client {
             .await
     }
 
+    // --- agent claims --------------------------------------------------
+
+    pub async fn list_agents(&self) -> Result<Vec<breadboard_core::AgentClaim>> {
+        self.send(self.build(reqwest::Method::GET, "/api/agents")).await
+    }
+
+    pub async fn agent_status(&self) -> Result<breadboard_core::dto::AgentStatusSummary> {
+        self.send(self.build(reqwest::Method::GET, "/api/agents/status"))
+            .await
+    }
+
+    pub async fn claim_issue(
+        &self,
+        key: &str,
+        claim: &breadboard_core::dto::ClaimUpsert,
+    ) -> Result<breadboard_core::AgentClaim> {
+        self.send(
+            self.build(reqwest::Method::POST, &format!("/api/issues/{key}/claim"))
+                .json(claim),
+        )
+        .await
+    }
+
+    pub async fn heartbeat_claim(
+        &self,
+        key: &str,
+        update: &breadboard_core::dto::ClaimUpdate,
+    ) -> Result<breadboard_core::AgentClaim> {
+        self.send(
+            self.build(reqwest::Method::PUT, &format!("/api/issues/{key}/claim"))
+                .json(update),
+        )
+        .await
+    }
+
+    pub async fn release_claim(&self, key: &str) -> Result<()> {
+        self.send_empty(self.build(reqwest::Method::DELETE, &format!("/api/issues/{key}/claim")))
+            .await
+    }
+
     // --- device auth --------------------------------------------------
 
     pub async fn device_start(&self) -> Result<DeviceStart> {

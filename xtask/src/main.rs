@@ -28,14 +28,19 @@ fn check_docs() -> anyhow::Result<()> {
     // Every bread.board.* event name must be documented.
     for name in all_event_names() {
         if !docs.contains(name) {
-            missing.push(format!("event `{name}` is not mentioned in Documentation.md"));
+            missing.push(format!(
+                "event `{name}` is not mentioned in Documentation.md"
+            ));
         }
     }
 
     // Every workflow status must be listed.
     for s in Status::ALL {
         if !docs.contains(s.as_str()) {
-            missing.push(format!("status `{}` is not mentioned in Documentation.md", s.as_str()));
+            missing.push(format!(
+                "status `{}` is not mentioned in Documentation.md",
+                s.as_str()
+            ));
         }
     }
 
@@ -54,13 +59,56 @@ fn all_event_names() -> Vec<&'static str> {
     use breadboard_core::event::BoardEvent::*;
     // One sample of each variant, purely to reach `bread_event_name()`.
     let samples: Vec<BoardEvent> = vec![
-        CardCreated { id: 0, key: String::new() },
-        CardUpdated { id: 0, key: String::new() },
-        CardMoved { id: 0, key: String::new(), from: Status::Backlog, to: Status::Todo },
-        CardAssigned { id: 0, key: String::new(), assignee_id: None },
-        CardDeleted { id: 0, key: String::new() },
-        CycleStarted { id: 0, name: String::new(), issues: 0 },
-        CycleEnded { id: 0, name: String::new() },
+        CardCreated {
+            id: 0,
+            key: String::new(),
+        },
+        CardUpdated {
+            id: 0,
+            key: String::new(),
+        },
+        CardMoved {
+            id: 0,
+            key: String::new(),
+            from: Status::Backlog,
+            to: Status::Todo,
+        },
+        CardAssigned {
+            id: 0,
+            key: String::new(),
+            assignee_id: None,
+        },
+        CardDeleted {
+            id: 0,
+            key: String::new(),
+        },
+        AgentClaimed {
+            id: 0,
+            key: String::new(),
+            agent: String::new(),
+            session_id: None,
+            state: String::new(),
+        },
+        AgentUpdated {
+            id: 0,
+            key: String::new(),
+            agent: String::new(),
+            session_id: None,
+            state: String::new(),
+        },
+        AgentReleased {
+            id: 0,
+            key: String::new(),
+        },
+        CycleStarted {
+            id: 0,
+            name: String::new(),
+            issues: 0,
+        },
+        CycleEnded {
+            id: 0,
+            name: String::new(),
+        },
         SyncDrift {
             issue_id: 0,
             key: String::new(),

@@ -48,6 +48,14 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/activity", get(api::issue_activity))
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route("/repos/{owner}/{name}", axum::routing::delete(api::remove_repo))
+        .route("/agents", get(api::list_agents))
+        .route("/agents/status", get(api::agent_status))
+        .route(
+            "/issues/{key}/claim",
+            post(api::claim_issue)
+                .put(api::heartbeat_claim)
+                .delete(api::release_claim),
+        )
         .route("/sync/reconcile", post(api::reconcile_now))
         .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))

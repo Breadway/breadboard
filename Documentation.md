@@ -6,8 +6,9 @@ verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
 Status: **deployed** at `breadboard.breadway.dev`. Server (REST CRUD, OAuth2,
-SSE), the Svelte web client (board with keyboard nav · backlog · roadmap/epics ·
-issue drawer with activity timeline · notification bell · settings · `cmd-k`),
+SSE), the Svelte web client (board with keyboard nav and per-agent claim tints ·
+backlog · roadmap/epics · Agents live page · issue drawer with claim controls and
+activity timeline · notification bell · settings · `cmd-k`),
 the `breadboard` CLI + `ratatui` TUI (device-flow auth), the Forgejo sync engine
 (bidirectional issues / comments / PR mirroring / milestone), and notifications
 (assigned / @mention / cycle, with a `notified` SSE event, browser pop-ups, and
@@ -29,6 +30,13 @@ One global workflow, no per-project variants:
 
 `done` is the only status that maps to a **closed** Forgejo issue; `backlog`
 through `review` are **open**.
+
+Agents are exclusive server-side presence on top of this workflow: at most one
+claim per issue. Claiming from `backlog`/`todo` moves the card to `doing` and
+assigns it to the claimer, tinting the card on the board; releasing keeps the
+status and only removes the tint. A claim with no heartbeat for 5+ minutes
+reads as **stale** on the Agents page but never auto-expires: only an explicit
+release (or a new claim after release) removes it.
 
 Priority: `none` · `low` · `medium` · `high` · `urgent`.
 
@@ -76,6 +84,11 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. Exclusive, first claim wins (`409` on conflict); claiming a `backlog`/`todo` card also moves it to `doing` and assigns it to the claimer. Emits `agent.claimed`. `201` |
+| `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. Only the claiming user may update, and a mismatched `session_id` is `409`. Emits `agent.updated` |
+| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); the card keeps its status. Emits `agent.released`. `204` |
+| `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), most-recent heartbeat first |
+| `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, done, active, review, verifying, blocked, remaining, line, claims[] }` |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -131,6 +144,9 @@ exactly one digest.
 | `card.moved` | `bread.board.card.moved` | `id`, `key`, `from`, `to` |
 | `card.assigned` | `bread.board.card.assigned` | `id`, `key`, `assignee_id` |
 | `card.deleted` | `bread.board.card.deleted` | `id`, `key` |
+| `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `session_id`, `state` |
+| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `session_id`, `state` |
+| `agent.released` | `bread.board.agent.released` | `id`, `key` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
@@ -225,6 +241,11 @@ repo with no mapped project are skipped with a warning.
 | `auth logout` · `auth status` | |
 | `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name |
 | `mv <key> <status>` | |
+| `claim <key> --agent NAME [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | exclusive agent claim (first wins); claiming from backlog/todo moves to doing + assigns to you |
+| `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID]` | heartbeat / update your claim (refreshes the live signal) |
+| `release <key>` | release your claim (status stays, tint goes away) |
+| `agents list [--stale]` | live agent claims |
+| `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
@@ -260,8 +281,15 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `create_project` / `update_project` / `create_cycle` / `start_cycle` /
 `end_cycle`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
+`claim_issue` / `update_claim` (heartbeat) / `release_claim` / `list_agents` /
+`agent_status`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
+
+Agent rule (also in the `claim_issue` / `update_issue` / `move_issue` tool
+descriptions): **claim first, heartbeat while working, release when done**.
+No implementation work without holding the claim; `409` means another agent
+holds it, so pick other work instead of fighting the lock.
 
 ## Operations
 

@@ -8,6 +8,7 @@
     { v: "board", label: "Board" },
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
+    { v: "agents", label: "Agents" },
     { v: "inbox", label: "Inbox" },
   ];
 
@@ -74,6 +75,8 @@
       <path d="M2 4h7M5 8h8M3 12h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
     {:else if v === "inbox"}
       <path d="M2 9.5 3.8 3h8.4L14 9.5V13H2zM2 9.5h3.5l1 1.7h3l1-1.7H14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
+    {:else if v === "agents"}
+      <circle cx="5.5" cy="5" r="2.3" fill="none" stroke="currentColor" stroke-width="1.4" /><circle cx="11" cy="6" r="1.8" fill="none" stroke="currentColor" stroke-width="1.3" opacity=".65" /><path d="M1.5 13.5c0-2.2 1.8-3.5 4-3.5s4 1.3 4 3.5M10 13.5c.2-1.8 1.5-2.8 3-2.8 1 0 1.9.4 2.4 1.2" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
     {:else}
       <circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.5" />
       <path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" />
@@ -104,6 +107,7 @@
       <button class="nav" class:on={store.view === v} aria-current={store.view === v ? "page" : undefined} onclick={() => go(v)}>
         {@render icon(v)}{label}
         {#if v === "backlog"}<span class="n">{totalOpen}</span>{/if}
+        {#if v === "agents" && store.activeAgents > 0}<span class="agent-count">{store.activeAgents}</span>{/if}
         {#if v === "inbox" && store.unread > 0}<span class="badge">{store.unread > 99 ? "99+" : store.unread}</span>{/if}
       </button>
     {/each}
@@ -275,6 +279,18 @@
     background: var(--accent);
     color: var(--on-accent);
     font: 600 10px/16px var(--font-mono);
+    text-align: center;
+    padding: 0 4px;
+  }
+  .agent-count {
+    margin-left: auto;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--ok) 20%, transparent);
+    color: var(--ok);
+    border: 1px solid color-mix(in srgb, var(--ok) 45%, transparent);
+    font: 600 10px/15px var(--font-mono);
     text-align: center;
     padding: 0 4px;
   }

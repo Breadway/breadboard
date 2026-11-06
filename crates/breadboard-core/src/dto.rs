@@ -50,7 +50,11 @@ pub struct ProjectPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
     /// `Some(None)` detaches the repo mapping.
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub forgejo_repo: Option<Option<String>>,
 }
 
@@ -74,7 +78,11 @@ pub struct NewEpic {
 pub struct EpicPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub description: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub archived: Option<bool>,
@@ -130,20 +138,40 @@ pub struct IssuePatch {
     pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub estimate: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub assignee_id: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub epic_id: Option<Option<i64>>,
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cycle_id: Option<Option<i64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub labels: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links: Option<Vec<IssueLink>>,
     /// Sync-managed (Forgejo → breadboard); not pushed back.
-    #[serde(default, deserialize_with = "double_option", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub milestone: Option<Option<String>>,
 }
 
@@ -170,6 +198,121 @@ where
     T: Deserialize<'de>,
 {
     Deserialize::deserialize(de).map(Some)
+}
+
+/// Upsert body for `POST /api/issues/{key}/claim`. The agent names itself;
+/// auth comes from the existing session / bearer token (no separate agent
+/// tokens). `state` mirrors the opencode session lifecycle so the Agents
+/// page reads like the `bb-status` widget.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaimUpsert {
+    /// Human/agent-chosen name, e.g. `opencode`, `codex-hermes`, `bb-worker-2`.
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::AgentState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+}
+
+impl ClaimUpsert {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.agent_name)?;
+        if self.agent_name.len() > 64 {
+            return Err("agent_name must be 64 chars or fewer".into());
+        }
+        Ok(())
+    }
+}
+
+/// Heartbeat / field update for `PUT /api/issues/{key}/claim`. Every field
+/// optional; absent = unchanged. Nullable fields use `Option<Option<T>>` so
+/// an explicit `null` clears them. Any update refreshes `last_heartbeat`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaimUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::AgentState>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_id: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub note: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub branch: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worktree: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub repo: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pr_url: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pr_number: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub head_sha: Option<Option<String>>,
+}
+
+/// Server-side roll-up for `GET /api/agents/status`. Counts mirror the
+/// opencode `bb-status` widget line (`BB x/y done, a active, …`), computed
+/// from live claims instead of local session files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStatusSummary {
+    pub total: i64,
+    pub live: i64,
+    pub stale: i64,
+    pub done: i64,
+    pub active: i64,
+    pub review: i64,
+    pub verifying: i64,
+    pub blocked: i64,
+    pub remaining: i64,
+    pub line: String,
+    pub claims: Vec<crate::AgentClaim>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

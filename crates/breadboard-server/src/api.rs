@@ -509,3 +509,255 @@ pub async fn set_notification_prefs(
 ) -> AppResult<Json<store::NotificationPrefs>> {
     Ok(Json(store::set_prefs(&app.db, user.0.id, prefs).await?))
 }
+
+// --- agent claims -----------------------------------------------------------
+use breadboard_core::AgentState;
+
+/// Stale threshold for the live signal: 5 minutes without a heartbeat.
+pub const CLAIM_STALE_SECS: i64 = 300;
+
+fn claim_is_stale(claim: &breadboard_core::AgentClaim) -> bool {
+    (chrono::Utc::now() - claim.last_heartbeat).num_seconds() >= CLAIM_STALE_SECS
+}
+
+fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
+    let mut done = 0i64;
+    let mut active = 0i64;
+    let mut review = 0i64;
+    let mut verifying = 0i64;
+    let mut blocked = 0i64;
+    for c in claims {
+        match c.state {
+            AgentState::Done => done += 1,
+            AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,
+            AgentState::AwaitingReview | AgentState::AwaitingCi | AgentState::AwaitingMerge => {
+                review += 1
+            }
+            AgentState::Verifying => verifying += 1,
+            AgentState::Blocked | AgentState::NeedsUser => blocked += 1,
+        }
+    }
+    let total = claims.len() as i64;
+    let mut parts = vec![format!("BB {done}/{total} done")];
+    if active > 0 {
+        parts.push(format!("{active} active"));
+    }
+    if review > 0 {
+        parts.push(format!("{review} review/CI/merge"));
+    }
+    if verifying > 0 {
+        parts.push(format!("{verifying} verifying"));
+    }
+    if blocked > 0 {
+        parts.push(format!("{blocked} blocked"));
+    }
+    parts.push(format!("{} remaining", total - done));
+    parts.join(", ")
+}
+
+pub async fn list_agents(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<Vec<breadboard_core::AgentClaim>>> {
+    Ok(Json(store::list_claims(&app.db).await?))
+}
+
+pub async fn agent_status(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<breadboard_core::dto::AgentStatusSummary>> {
+    let claims = store::list_claims(&app.db).await?;
+    let stale = claims.iter().filter(|c| claim_is_stale(c)).count() as i64;
+    let live = claims.len() as i64 - stale;
+    let line = agent_line(&claims);
+    let mut done = 0i64;
+    let mut active = 0i64;
+    let mut review = 0i64;
+    let mut verifying = 0i64;
+    let mut blocked = 0i64;
+    for c in &claims {
+        match c.state {
+            AgentState::Done => done += 1,
+            AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,
+            AgentState::AwaitingReview | AgentState::AwaitingCi | AgentState::AwaitingMerge => {
+                review += 1
+            }
+            AgentState::Verifying => verifying += 1,
+            AgentState::Blocked | AgentState::NeedsUser => blocked += 1,
+        }
+    }
+    let total = claims.len() as i64;
+    Ok(Json(breadboard_core::dto::AgentStatusSummary {
+        total,
+        live,
+        stale,
+        done,
+        active,
+        review,
+        verifying,
+        blocked,
+        remaining: total - done,
+        line,
+        claims,
+    }))
+}
+
+/// Claim an issue exclusively. First claim wins (409 for a second agent).
+/// Claiming from `backlog`/`todo` also moves the card to `doing` and assigns
+/// it to the claimer, so the board colour follows the work.
+pub async fn claim_issue(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<breadboard_core::dto::ClaimUpsert>,
+) -> AppResult<(StatusCode, Json<breadboard_core::AgentClaim>)> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    if issue.issue_type == breadboard_core::IssueType::Pr {
+        return Err(crate::error::AppError::bad_request(
+            "cannot claim a PR card",
+        ));
+    }
+    if store::get_claim(&app.db, issue.id).await?.is_some() {
+        return Err(crate::error::AppError::Conflict(
+            "issue is already claimed".into(),
+        ));
+    }
+    let claim = store::insert_claim(&app.db, &issue, user.0.id, &body).await?;
+    // Side-effect: backlog/todo → doing + assign to the claimer.
+    if matches!(
+        issue.status,
+        breadboard_core::Status::Backlog | breadboard_core::Status::Todo
+    ) || issue.assignee_id.is_none()
+    {
+        let patch = breadboard_core::dto::IssuePatch {
+            status: if matches!(
+                issue.status,
+                breadboard_core::Status::Backlog | breadboard_core::Status::Todo
+            ) {
+                Some(breadboard_core::Status::Doing)
+            } else {
+                None
+            },
+            assignee_id: if issue.assignee_id.is_none() {
+                Some(Some(user.0.id))
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        if !patch.is_empty() {
+            let before = issue.clone();
+            let updated = store::update_issue(
+                &app.db,
+                &key,
+                &patch,
+                Some(user.0.id),
+                SyncSource::Breadboard,
+            )
+            .await?;
+            if updated.status != before.status {
+                app.bus.publish(BoardEvent::CardMoved {
+                    id: updated.id,
+                    key: updated.key.clone(),
+                    from: before.status,
+                    to: updated.status,
+                });
+            }
+            if updated.assignee_id != before.assignee_id {
+                app.bus.publish(BoardEvent::CardAssigned {
+                    id: updated.id,
+                    key: updated.key.clone(),
+                    assignee_id: updated.assignee_id,
+                });
+            }
+            store::refresh_claim_board_status(&app.db, issue.id, updated.status).await?;
+            sync::writeback(&app, &before, &updated).await;
+        }
+    }
+    let claim = store::get_claim(&app.db, issue.id)
+        .await?
+        .unwrap_or(claim);
+    app.bus.publish(BoardEvent::AgentClaimed {
+        id: claim.issue_id,
+        key: claim.key.clone(),
+        agent: claim.agent_name.clone(),
+        session_id: claim.session_id.clone(),
+        state: claim.state.as_str().to_string(),
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::AgentClaimed {
+            id: claim.issue_id,
+            key: claim.key.clone(),
+            agent: claim.agent_name.clone(),
+            session_id: claim.session_id.clone(),
+            state: claim.state.as_str().to_string(),
+        },
+    );
+    Ok((StatusCode::CREATED, Json(claim)))
+}
+
+/// Heartbeat / field update. Only the claiming user may update; when both
+/// sides carry a `session_id` they must match (prevents a second agent with
+/// the same login from hijacking the claim).
+pub async fn heartbeat_claim(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<breadboard_core::dto::ClaimUpdate>,
+) -> AppResult<Json<breadboard_core::AgentClaim>> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    let existing = store::get_claim(&app.db, issue.id)
+        .await?
+        .ok_or(crate::error::AppError::NotFound)?;
+    if existing.claimed_by != user.0.id {
+        return Err(crate::error::AppError::forbidden());
+    }
+    if let (Some(Some(want_inner)), Some(have)) = (&body.session_id, &existing.session_id) {
+        // Outer Some = field present, inner Some = set (not clear). A present
+        // session that disagrees with the active claim is a 409, not a hijack.
+        if want_inner.as_str() != have {
+            return Err(crate::error::AppError::Conflict(
+                "session_id does not match the active claim".into(),
+            ));
+        }
+    }
+    let claim = store::update_claim(&app.db, issue.id, &body).await?;
+    app.bus.publish(BoardEvent::AgentUpdated {
+        id: claim.issue_id,
+        key: claim.key.clone(),
+        agent: claim.agent_name.clone(),
+        session_id: claim.session_id.clone(),
+        state: claim.state.as_str().to_string(),
+    });
+    Ok(Json(claim))
+}
+
+/// Release a claim. Only the claiming user may release. The card keeps its
+/// status; only the agent tint goes away.
+pub async fn release_claim(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+) -> AppResult<StatusCode> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    let existing = store::get_claim(&app.db, issue.id)
+        .await?
+        .ok_or(crate::error::AppError::NotFound)?;
+    if existing.claimed_by != user.0.id {
+        return Err(crate::error::AppError::forbidden());
+    }
+    store::delete_claim(&app.db, issue.id).await?;
+    app.bus.publish(BoardEvent::AgentReleased {
+        id: issue.id,
+        key: issue.key.clone(),
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::AgentReleased {
+            id: issue.id,
+            key: issue.key.clone(),
+        },
+    );
+    Ok(StatusCode::NO_CONTENT)
+}

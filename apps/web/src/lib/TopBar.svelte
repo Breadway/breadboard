@@ -3,7 +3,7 @@
   import Menu, { type MenuItem } from "./ui/Menu.svelte";
   import { projectColor } from "./ui/colors";
 
-  const titles = { board: "Board", backlog: "Backlog", roadmap: "Roadmap", inbox: "Inbox", settings: "Settings" };
+  const titles = { board: "Board", backlog: "Backlog", roadmap: "Roadmap", agents: "Agents", inbox: "Inbox", settings: "Settings" };
   const filterable = $derived(store.view === "board" || store.view === "backlog");
 
   const project = $derived(store.projects.find((p) => p.key === store.filterProject));

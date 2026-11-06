@@ -1,11 +1,14 @@
 <script lang="ts">
   import type { Issue } from "@breadboard/api-client";
-  import { store } from "./store.svelte";
+  import { claimStale, store } from "./store.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
-  import { labelColor, projectColor } from "./ui/colors";
+  import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   let { issue, keyboardSelected = false }: { issue: Issue; keyboardSelected?: boolean } = $props();
+
+  const claim = $derived(store.claimForIssue(issue.id));
+  const stale = $derived(claim ? claimStale(claim.last_heartbeat) : false);
 
   const MAX_LABELS = 3;
 
@@ -30,6 +33,9 @@
   bind:this={el}
   class="card"
   class:done={issue.status === "done"}
+  class:claimed={!!claim}
+  class:stale={stale}
+  style={claim ? `--agent:${agentColor(claim.agent_name)}` : undefined}
   class:selected={store.selectedKey === issue.key}
   class:kb={keyboardSelected}
   class:dragging
@@ -45,6 +51,15 @@
     <span class="tick" style="background:{projectColor(pkey)}"></span>
     <span class="key">{issue.key}</span>
     {#if issue.type === "pr"}<span class="pr-tag">PR</span>{/if}
+    {#if claim}
+      <span
+        class="agent"
+        class:stale={stale}
+        title={stale
+          ? `Claimed by ${claim.agent_name} · stale (no heartbeat for 5+ min) · ${claim.state}`
+          : `Claimed by ${claim.agent_name} · ${claim.state} · heartbeat ${claim.last_heartbeat}`}
+      >🤖 {claim.agent_name}</span>
+    {/if}
     <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
   <div class="title">{issue.title}</div>
@@ -109,6 +124,33 @@
   }
   .card.dragging {
     opacity: 0.4;
+  }
+  .card.claimed {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 55%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent, var(--ok)) 45%, transparent);
+  }
+  .card.claimed:hover {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 75%, transparent);
+  }
+  .card.claimed.stale {
+    border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+  .agent {
+    font: 600 9px/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    padding: 2px 5px;
+    border-radius: 3px;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--agent, var(--ok));
+    background: color-mix(in srgb, var(--agent, var(--ok)) 14%, transparent);
+  }
+  .agent.stale {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .card:active {
     cursor: grabbing;
