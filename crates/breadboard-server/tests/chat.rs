@@ -394,3 +394,138 @@ async fn unread_counts_and_cursors() {
         .unwrap();
     assert_eq!(lobby["unread"], 3);
 }
+
+async fn pushes(c: &reqwest::Client, base: &str, auth: &str, agent: Option<&str>) -> Value {
+    let url = match agent {
+        Some(a) => format!("{base}/api/chat/pushes?agent={a}"),
+        None => format!("{base}/api/chat/pushes"),
+    };
+    c.get(url)
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn dms_always_push_and_pings_bypass_subscriptions() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    setup(&c, &base, &auth).await;
+    for agent in ["Alpha", "Beta", "Crumb Baron"] {
+        make_agent(&c, &base, &auth, agent).await;
+    }
+
+    // DM: always pushes to the other side.
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "to": "Beta", "body": "private note" }))
+        .send()
+        .await
+        .unwrap();
+    let beta = pushes(&c, &base, &auth, Some("Beta")).await;
+    assert_eq!(beta.as_array().unwrap().len(), 1);
+    assert_eq!(beta[0]["kind"], "dm");
+    let alpha = pushes(&c, &base, &auth, Some("Alpha")).await;
+    assert_eq!(alpha.as_array().unwrap().len(), 0, "author is not pushed");
+
+    // Group room: no push without a subscription.
+    let room: Value = c
+        .post(format!("{base}/api/chat/rooms"))
+        .header("authorization", &auth)
+        .json(&json!({ "name": "puns" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let room_id = room["id"].as_i64().unwrap();
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "room": room_id.to_string(), "body": "no ping here" }))
+        .send()
+        .await
+        .unwrap();
+    let beta = pushes(&c, &base, &auth, Some("Beta")).await;
+    assert_eq!(beta.as_array().unwrap().len(), 1, "no room subscription");
+
+    // Subscribe Beta, then a room message pushes.
+    let sub = c
+        .put(format!("{base}/api/chat/push-subs"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Beta", "room": room_id.to_string(), "enabled": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sub.status(), 204);
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "room": room_id.to_string(), "body": "room news" }))
+        .send()
+        .await
+        .unwrap();
+    let beta = pushes(&c, &base, &auth, Some("Beta")).await;
+    assert_eq!(beta.as_array().unwrap().len(), 2);
+    assert_eq!(beta[1]["kind"], "room");
+
+    // Ping works without a subscription, including a spaced agent name.
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "room": room_id.to_string(), "body": "hey @crumb-baron look" }))
+        .send()
+        .await
+        .unwrap();
+    let baron = pushes(&c, &base, &auth, Some("Crumb Baron")).await;
+    assert_eq!(baron[0]["kind"], "ping");
+    assert_eq!(baron[0]["message"]["body"], "hey @crumb-baron look");
+
+    // Humans can ping too (by login).
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "body": "ping @tester" }))
+        .send()
+        .await
+        .unwrap();
+    let human = pushes(&c, &base, &auth, None).await;
+    assert_eq!(human.as_array().unwrap().len(), 1);
+    assert_eq!(human[0]["kind"], "ping");
+}
+
+#[tokio::test]
+async fn pushes_acknowledge() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    setup(&c, &base, &auth).await;
+    for agent in ["Alpha", "Beta"] {
+        make_agent(&c, &base, &auth, agent).await;
+    }
+
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Alpha", "to": "Beta", "body": "yo" }))
+        .send()
+        .await
+        .unwrap();
+    let beta = pushes(&c, &base, &auth, Some("Beta")).await;
+    let up_to = beta[0]["id"].as_i64().unwrap();
+
+    let ack = c
+        .post(format!("{base}/api/chat/pushes/ack"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Beta", "up_to": up_to }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ack.status(), 204);
+
+    let beta = pushes(&c, &base, &auth, Some("Beta")).await;
+    assert_eq!(beta.as_array().unwrap().len(), 0);
+}

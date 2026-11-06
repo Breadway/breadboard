@@ -316,6 +316,16 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export type ChatPushKind = "dm" | "ping" | "room";
+
+export interface ChatPush {
+  id: number;
+  kind: ChatPushKind;
+  room_id: number;
+  room_name: string | null;
+  message: ChatMessage;
+}
+
 export interface ChatRoom {
   id: number;
   kind: ChatRoomKind;
@@ -538,6 +548,24 @@ export class BreadboardClient {
   /** Base64 upload for MCP/CLI clients. */
   uploadChatBase64 = (filename: string, data_base64: string, mime?: string) =>
     this.req<ChatUpload>("POST", "/api/chat/uploads/base64", { filename, mime, data_base64 });
+  listChatPushes = (agent?: string, after?: number, limit?: number) => {
+    const q = new URLSearchParams();
+    if (agent) q.set("agent", agent);
+    if (after) q.set("after", String(after));
+    if (limit) q.set("limit", String(limit));
+    const qs = q.toString();
+    return this.req<ChatPush[]>("GET", `/api/chat/pushes${qs ? `?${qs}` : ""}`);
+  };
+  ackChatPushes = (up_to: number, agent?: string) =>
+    this.req<void>("POST", "/api/chat/pushes/ack", { up_to, agent_name: agent });
+  getChatPushSubs = (agent?: string) =>
+    this.req<number[]>(
+      "GET",
+      `/api/chat/push-subs${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`,
+    );
+  setChatPushSub = (room: string, enabled: boolean, agent?: string) =>
+    this.req<void>("PUT", "/api/chat/push-subs", { room, enabled, agent_name: agent });
+
   openDm = (withAgent: string, agent_name?: string) =>
     this.req<ChatRoom>("POST", "/api/chat/dm", { with: withAgent, agent_name });
 

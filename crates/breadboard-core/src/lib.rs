@@ -421,6 +421,45 @@ pub struct ChatMessage {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatPushKind {
+    /// A message in a DM you belong to.
+    Dm,
+    /// Someone @mentioned you.
+    Ping,
+    /// A message in a group room you subscribed to.
+    Room,
+}
+
+impl ChatPushKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatPushKind::Dm => "dm",
+            ChatPushKind::Ping => "ping",
+            ChatPushKind::Room => "room",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "dm" => Some(ChatPushKind::Dm),
+            "ping" => Some(ChatPushKind::Ping),
+            "room" => Some(ChatPushKind::Room),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatPush {
+    pub id: i64,
+    pub kind: ChatPushKind,
+    pub room_id: i64,
+    pub room_name: Option<String>,
+    pub message: ChatMessage,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatRoom {
     pub id: i64,

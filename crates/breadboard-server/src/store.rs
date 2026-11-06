@@ -2284,7 +2284,7 @@ pub async fn log_claim_event(
 // chat
 // ---------------------------------------------------------------------------
 
-use breadboard_core::{ChatAuthorKind, ChatMessage, ChatRoom, ChatRoomKind};
+use breadboard_core::{ChatAuthorKind, ChatMessage, ChatPushKind, ChatRoom, ChatRoomKind};
 
 pub fn agent_member(name: &str) -> String {
     format!("agent:{}", name.trim().to_lowercase())
@@ -2562,6 +2562,260 @@ pub async fn chat_mark_read(
     .bind(now_rfc3339())
     .execute(db)
     .await?;
+    Ok(())
+}
+
+pub async fn set_chat_push_sub(
+    db: &SqlitePool,
+    user_id: i64,
+    member: &str,
+    room_id: i64,
+    enabled: bool,
+) -> AppResult<()> {
+    if enabled {
+        sqlx::query(
+            "INSERT OR IGNORE INTO chat_push_subs (user_id, member, room_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .bind(user_id)
+        .bind(member)
+        .bind(room_id)
+        .bind(now_rfc3339())
+        .execute(db)
+        .await?;
+    } else {
+        sqlx::query("DELETE FROM chat_push_subs WHERE user_id = ?1 AND member = ?2 AND room_id = ?3")
+            .bind(user_id)
+            .bind(member)
+            .bind(room_id)
+            .execute(db)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn chat_push_subs(db: &SqlitePool, user_id: i64, member: &str) -> AppResult<Vec<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT room_id FROM chat_push_subs WHERE user_id = ?1 AND member = ?2 ORDER BY room_id",
+    )
+    .bind(user_id)
+    .bind(member)
+    .fetch_all(db)
+    .await?)
+}
+
+/// Owners of an agent name (it may exist via a profile, claims, or both).
+async fn agent_owners(db: &SqlitePool, agent_name: &str) -> AppResult<Vec<i64>> {
+    let name = agent_name.trim().to_lowercase();
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT user_id FROM (
+            SELECT user_id FROM agent_profiles WHERE agent_name = ?1
+            UNION
+            SELECT claimed_by AS user_id FROM agent_claims WHERE lower(agent_name) = ?1
+         ) ORDER BY user_id",
+    )
+    .bind(&name)
+    .fetch_all(db)
+    .await?)
+}
+
+fn push_priority(kind: ChatPushKind) -> i64 {
+    match kind {
+        ChatPushKind::Ping => 3,
+        ChatPushKind::Dm => 2,
+        ChatPushKind::Room => 1,
+    }
+}
+
+fn add_recipient(
+    out: &mut std::collections::HashMap<String, (i64, ChatPushKind)>,
+    member: String,
+    user_id: i64,
+    kind: ChatPushKind,
+) {
+    match out.get(&member) {
+        Some((_, existing)) if push_priority(*existing) >= push_priority(kind) => {}
+        _ => {
+            out.insert(member, (user_id, kind));
+        }
+    }
+}
+
+fn mentions(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current: Option<String> = None;
+    for ch in body.chars() {
+        if ch == '@' {
+            current = Some(String::new());
+        } else if let Some(buf) = current.as_mut() {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                buf.push(ch.to_ascii_lowercase());
+            } else {
+                let token = std::mem::take(buf);
+                if !token.is_empty() {
+                    out.push(token);
+                }
+                current = None;
+            }
+        }
+    }
+    if let Some(token) = current {
+        if !token.is_empty() {
+            out.push(token);
+        }
+    }
+    out.dedup();
+    out
+}
+
+/// Build the push inbox for a freshly posted message.
+pub async fn create_chat_pushes(
+    db: &SqlitePool,
+    room: &ChatRoom,
+    message: &ChatMessage,
+    author_member: &str,
+) -> AppResult<()> {
+    let mut want: std::collections::HashMap<String, (i64, ChatPushKind)> =
+        std::collections::HashMap::new();
+
+    if room.kind == ChatRoomKind::Dm {
+        for member in &room.members {
+            if member == author_member {
+                continue;
+            }
+            if let Some(agent) = member.strip_prefix("agent:") {
+                for owner in agent_owners(db, agent).await? {
+                    add_recipient(&mut want, member.clone(), owner, ChatPushKind::Dm);
+                }
+            } else if let Some(login) = member.strip_prefix("human:") {
+                if let Some(id) = find_user_by_login(db, login).await? {
+                    add_recipient(&mut want, member.clone(), id, ChatPushKind::Dm);
+                }
+            }
+        }
+    } else {
+        let subs: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT user_id, member FROM chat_push_subs WHERE room_id = ?1",
+        )
+        .bind(room.id)
+        .fetch_all(db)
+        .await?;
+        for (user_id, member) in subs {
+            if member != author_member {
+                add_recipient(&mut want, member, user_id, ChatPushKind::Room);
+            }
+        }
+    }
+
+    for token in mentions(&message.body) {
+        let agents: Vec<(i64, String)> = sqlx::query_as(
+            "SELECT DISTINCT user_id, lower(agent_name) FROM (
+                SELECT user_id, agent_name FROM agent_profiles
+                 WHERE replace(lower(agent_name), ' ', '-') = ?1
+                UNION
+                SELECT claimed_by AS user_id, lower(agent_name) AS agent_name FROM agent_claims
+                 WHERE replace(lower(agent_name), ' ', '-') = ?1
+             )",
+        )
+        .bind(&token)
+        .fetch_all(db)
+        .await?;
+        for (user_id, agent_name) in agents {
+            let member = agent_member(&agent_name);
+            if member != author_member {
+                add_recipient(&mut want, member, user_id, ChatPushKind::Ping);
+            }
+        }
+        if let Some(user_id) = find_user_by_login(db, &token).await? {
+            let member = human_member(&token);
+            if member != author_member {
+                add_recipient(&mut want, member, user_id, ChatPushKind::Ping);
+            }
+        }
+    }
+
+    for (member, (user_id, kind)) in want {
+        sqlx::query(
+            "INSERT OR IGNORE INTO chat_pushes
+                (user_id, member, room_id, message_id, kind, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )
+        .bind(user_id)
+        .bind(&member)
+        .bind(room.id)
+        .bind(message.id)
+        .bind(kind.as_str())
+        .bind(now_rfc3339())
+        .execute(db)
+        .await?;
+    }
+    Ok(())
+}
+
+pub async fn list_chat_pushes(
+    db: &SqlitePool,
+    member: &str,
+    after: i64,
+    limit: i64,
+) -> AppResult<Vec<breadboard_core::ChatPush>> {
+    #[derive(FromRow)]
+    struct PushRow {
+        id: i64,
+        kind: String,
+        room_id: i64,
+        room_name: Option<String>,
+        message_id: i64,
+    }
+    let rows: Vec<PushRow> = sqlx::query_as(
+        "SELECT p.id, p.kind, p.room_id, r.name AS room_name, p.message_id
+           FROM chat_pushes p JOIN chat_rooms r ON r.id = p.room_id
+          WHERE p.member = ?1 AND p.id > ?2
+          ORDER BY p.id ASC LIMIT ?3",
+    )
+    .bind(member)
+    .bind(after)
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = rows.iter().map(|r| r.message_id).collect();
+    let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
+           FROM chat_messages WHERE id IN (",
+    );
+    let mut sep = qb.separated(", ");
+    for id in &ids {
+        sep.push_bind(id);
+    }
+    qb.push(")");
+    let message_rows: Vec<ChatMessageRow> = qb.build_query_as().fetch_all(db).await?;
+    let messages = hydrate_messages(db, message_rows).await?;
+    let by_id: std::collections::HashMap<i64, ChatMessage> =
+        messages.into_iter().map(|m| (m.id, m)).collect();
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let message = by_id.get(&row.message_id)?.clone();
+            Some(breadboard_core::ChatPush {
+                id: row.id,
+                kind: ChatPushKind::parse(&row.kind).unwrap_or(ChatPushKind::Room),
+                room_id: row.room_id,
+                room_name: row.room_name,
+                message,
+            })
+        })
+        .collect())
+}
+
+pub async fn ack_chat_pushes(db: &SqlitePool, member: &str, up_to: i64) -> AppResult<()> {
+    sqlx::query("DELETE FROM chat_pushes WHERE member = ?1 AND id <= ?2")
+        .bind(member)
+        .bind(up_to)
+        .execute(db)
+        .await?;
     Ok(())
 }
 

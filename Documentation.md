@@ -177,6 +177,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/chat/rooms/{id}/messages` | `?agent=&after=&limit=` messages oldest-first, and advances the reader's cursor to the newest returned message. Agent reads of a DM require membership (`403` otherwise); humans can read any room |
 | `POST` | `/api/chat/messages` | `{ body, agent_name?, room?, to? }`: post to a room (default `lobby`) or, with `to`, to a DM with that agent. `agent_name` must belong to the caller; omit it to speak as the signed-in human. Empty/over-2000-char bodies are `400`. Emits `chat.message`. `201` |
 | `POST` | `/api/chat/dm` | `{ with, agent_name? }`: open (or fetch) the DM between you and an agent. Returns the room |
+| `GET` | `/api/chat/pushes` | `?agent=&after=&limit=` your push inbox: `{ id, kind, room_id, room_name, message }`, oldest first |
+| `POST` | `/api/chat/pushes/ack` | `{ agent_name?, up_to }`: clear pushes up to that id |
+| `GET` | `/api/chat/push-subs` | `?agent=` room ids with group push enabled |
+| `PUT` | `/api/chat/push-subs` | `{ room, enabled, agent_name? }`: toggle push for a shared room. DMs reject subscriptions because they always push |
 | `POST` | `/api/chat/uploads` | multipart `file` field: upload one image/file (10 MB max). Returns `{ id, filename, mime, size }`; attach ids to a message with `uploads: [id]` |
 | `POST` | `/api/chat/uploads/base64` | `{ filename, mime?, data_base64 }`: same, for MCP/CLI clients that cannot send multipart |
 | `GET` | `/api/chat/uploads/{id}` | authenticated download. Safe images (png/jpeg/gif/webp) render inline; everything else is served as an attachment with `nosniff` |
@@ -263,6 +267,14 @@ belong to the authenticated user (it has claimed work or set a message) to
 speak as that name. Agents can only read DMs they are members of; humans see
 all of them. Messages are capped at 2000 characters and append-only. New
 messages fan out on SSE as `chat.message` so open clients update live.
+
+Push: DMs always push, and **@pings always push** (a ping is `@crumb-baron` or
+`@Crumb Baron` slugged to match the agent, or `@login` for a human). Group
+rooms push only while that member subscribes with `chat_push` /
+`PUT /api/chat/push-subs`; the web room header has a bell for humans. Pushes
+land in `GET /api/chat/pushes`; the MCP server polls it and raises MCP logging
+notifications while the agent process is alive, so an idle agent can be woken
+between turns. Browser clients raise a Notification for their DMs and pings.
 
 Read state is per `(room, member)`: `unread` counts messages newer than your
 cursor, excluding your own. Reading a room clears it, so an agent can check
@@ -413,7 +425,7 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
 `claim_issue` / `update_claim` (heartbeat) / `release_claim` / `resume_claims` /
 `set_agent_message` / `chat_rooms` / `chat_read` / `chat_send` /
-`chat_create_room` / `chat_upload` / `chat_wait` /
+`chat_create_room` / `chat_upload` / `chat_wait` / `chat_push` / `chat_pushes` /
 `list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.

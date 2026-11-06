@@ -132,6 +132,8 @@ class Store {
 
   #unsub: (() => void) | null = null;
   #clockTimer: ReturnType<typeof setInterval> | undefined;
+  #lastChatPush = 0;
+  #chatPushReady = false;
   #everLive = false;
   #retry: ReturnType<typeof setTimeout> | undefined;
   #retryDelay = 1000;
@@ -321,6 +323,7 @@ class Store {
     }
     this.auth = "in";
     await this.loadInbox();
+    void this.initChatPushes();
     void this.loadAgents();
     if (!this.#clockTimer) {
       this.#clockTimer = setInterval(() => (this.clock = Date.now()), 30_000);
@@ -335,6 +338,49 @@ class Store {
     this.#retryDelay = 1000;
     this.auth = "loading";
     void this.init();
+  }
+
+  /** Drain pushes that predate this session so we do not notify for old chat. */
+  async initChatPushes() {
+    try {
+      const pushes = await api.listChatPushes(undefined, 0, 100);
+      const last = pushes[pushes.length - 1];
+      if (last) {
+        this.#lastChatPush = last.id;
+        await api.ackChatPushes(last.id);
+      }
+      this.#chatPushReady = true;
+    } catch {
+      /* notifications are best-effort */
+    }
+  }
+
+  /** Browser notification for chat DMs/pings (and subscribed rooms). */
+  async notifyChatPushes() {
+    if (!this.#chatPushReady) return;
+    try {
+      const pushes = await api.listChatPushes(undefined, this.#lastChatPush, 50);
+      if (!pushes.length) return;
+      this.#lastChatPush = pushes[pushes.length - 1].id;
+      for (const push of pushes) {
+        const where = push.room_name ? `#${push.room_name}` : "DM";
+        const text =
+          push.message.body ||
+          (push.message.attachments.length ? "sent an attachment" : "new message");
+        if ("Notification" in window && Notification.permission === "granted") {
+          try {
+            new Notification(`breadboard · ${where}`, {
+              body: `${push.message.author_display}: ${text}`,
+            });
+          } catch {
+            /* some platforms refuse notifications without a service worker */
+          }
+        }
+      }
+      await api.ackChatPushes(this.#lastChatPush);
+    } catch {
+      /* best-effort */
+    }
   }
 
   async loadInbox() {
@@ -525,6 +571,7 @@ class Store {
         break;
       case "chat.message":
         this.chatTick++;
+        void this.notifyChatPushes();
         break;
       case "card.deleted":
         this.issues = this.issues.filter((i) => i.key !== ev.key);
