@@ -234,6 +234,67 @@ async function mergeLinks(
 
 const server = new McpServer({ name: "breadboard", version: "0.1.0" });
 
+// --- chat push -------------------------------------------------------------
+//
+// DMs and @pings always push; group rooms push when the agent subscribed with
+// chat_push. The server keeps the inbox; this loop turns new rows into MCP
+// logging notifications so the client sees them without polling tools.
+
+let chatPoller: ReturnType<typeof setInterval> | undefined;
+let lastPushId = 0;
+
+function stopChatPoller() {
+  if (chatPoller) clearInterval(chatPoller);
+  chatPoller = undefined;
+}
+
+function ensureChatPoller() {
+  if (chatPoller || !autoAgentName) return;
+  const name = autoAgentName;
+  chatPoller = setInterval(() => {
+    void (async () => {
+      try {
+        const pushes = await client.listChatPushes(name, lastPushId, 20);
+        for (const push of pushes) {
+          lastPushId = Math.max(lastPushId, push.id);
+          const where = push.room_name ? `#${push.room_name}` : "DM";
+          const text = `[chat ${push.kind}] ${push.message.author_display} in ${where}: ${push.message.body || "(attachment)"}`;
+          console.error(text);
+          try {
+            await (server as unknown as {
+              server?: {
+                sendLoggingMessage?: (msg: {
+                  level: "info";
+                  data: string;
+                  logger: string;
+                }) => Promise<void>;
+              };
+            }).server?.sendLoggingMessage?.({
+              level: "info",
+              data: text,
+              logger: "breadboard-chat",
+            });
+          } catch {
+            /* client may not support logging notifications */
+          }
+        }
+      } catch {
+        /* keep polling */
+      }
+    })();
+  }, 5_000);
+  chatPoller.unref?.();
+}
+
+const stopEverything = () => {
+  stopAllKeepalives();
+  stopChatPoller();
+};
+process.removeListener("SIGINT", stopAllKeepalives);
+process.removeListener("SIGTERM", stopAllKeepalives);
+process.once("SIGINT", stopEverything);
+process.once("SIGTERM", stopEverything);
+
 server.tool("whoami", "The signed-in user and the server URL.", {}, () =>
   run(async () => ({ server: cfg.server, user: await client.me() })),
 );
@@ -650,6 +711,7 @@ server.tool(
       try {
         const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
         startKeepalive(key, created.agent_name);
+        ensureChatPoller();
         return created;
       } catch (e) {
         // Re-claiming your own claim after a restart is not a conflict: find
@@ -663,6 +725,7 @@ server.tool(
           if (mine) {
             const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
             startKeepalive(key, resumed.agent_name);
+            ensureChatPoller();
             return { ...resumed, resumed: true };
           }
         }
@@ -720,6 +783,7 @@ server.tool(
     run(async () => {
       const name = agent_name?.trim() || autoAgentName;
       if (!name) throw new Error("no agent name yet: pass agent_name or call claim_issue first");
+      ensureChatPoller();
       return client.setAgentMessage(name, message);
     }),
 );
@@ -786,12 +850,56 @@ async function resolveChatRoom(name: string, room?: string, peer?: string): Prom
 }
 
 server.tool(
+  "chat_push",
+  "Turn push notifications on/off for a shared room. DMs and @pings always push; group rooms " +
+    "only push while subscribed. New pushes arrive as MCP notifications and in chat_pushes.",
+  {
+    room: z.string().describe("room name or id"),
+    enabled: z.boolean(),
+    agent_name: z.string().optional(),
+  },
+  ({ room, enabled, agent_name }) =>
+    run(async () => {
+      const name = chatAgent(agent_name);
+      ensureChatPoller();
+      await client.setChatPushSub(room, enabled, name);
+      return `${enabled ? "push on" : "push off"} for ${room}`;
+    }),
+);
+
+server.tool(
+  "chat_pushes",
+  "Drain your chat push inbox (DMs, @pings, and subscribed rooms). Pass ack:true to clear the " +
+    "ones returned. New pushes also arrive as MCP notifications while this process is running.",
+  {
+    after: z.number().optional().describe("only pushes with id greater than this"),
+    ack: z.boolean().optional(),
+    agent_name: z.string().optional(),
+  },
+  ({ after, ack, agent_name }) =>
+    run(async () => {
+      const name = chatAgent(agent_name);
+      ensureChatPoller();
+      const pushes = await client.listChatPushes(name, after, 100);
+      if (ack && pushes.length) {
+        await client.ackChatPushes(pushes[pushes.length - 1].id, name);
+      }
+      return { pushes };
+    }),
+);
+
+server.tool(
   "chat_rooms",
   "List chat rooms and DMs with an unread count per room. Shared rooms (including the global " +
     "lobby) are open to everyone; an agent only sees DMs it belongs to. Check this between tasks " +
     "to notice new chat.",
   { agent_name: z.string().optional().describe("defaults to this process's agent name") },
-  ({ agent_name }) => run(() => client.listChatRooms(chatAgent(agent_name))),
+  ({ agent_name }) =>
+    run(() => {
+      const name = chatAgent(agent_name);
+      ensureChatPoller();
+      return client.listChatRooms(name);
+    }),
 );
 
 server.tool(
@@ -808,6 +916,7 @@ server.tool(
   ({ room, with: peer, after, limit, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
+      ensureChatPoller();
       const roomId = await resolveChatRoom(name, room, peer);
       const messages = await client.listChatMessages(roomId, { agent: name, after, limit });
       return { room_id: roomId, messages };
@@ -871,6 +980,7 @@ server.tool(
       if (!body?.trim() && !uploads?.length) {
         throw new Error("message needs text or at least one upload");
       }
+      ensureChatPoller();
       return client.postChatMessage({
         body: body ?? "",
         to,

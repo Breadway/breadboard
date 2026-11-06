@@ -415,6 +415,24 @@ pub fn normalize_room_name(s: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// `PUT /api/chat/push-subs`: toggle push for a shared room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatPushSub {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    /// Room name or id.
+    pub room: String,
+    pub enabled: bool,
+}
+
+/// `POST /api/chat/pushes/ack`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AckChatPushes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    pub up_to: i64,
+}
+
 /// `POST /api/chat/dm`: open (or fetch) a DM with an agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenDm {

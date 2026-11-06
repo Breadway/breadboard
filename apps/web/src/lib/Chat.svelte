@@ -18,6 +18,7 @@
   let dmPicker = $state(false);
   let dmTarget = $state("");
   let scroller: HTMLDivElement | undefined = $state();
+  let subs = $state<number[]>([]);
 
   const selected = $derived(rooms.find((r) => r.id === selectedId));
   const shared = $derived(
@@ -45,6 +46,25 @@
   function roomTint(room: ChatRoom): string {
     const agent = room.members.find((m) => m.startsWith("agent:"));
     return agent ? agentColor(memberDisplay(agent)) : "var(--ink-3)";
+  }
+
+  async function loadSubs() {
+    try {
+      subs = await api.getChatPushSubs();
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function togglePush(room: ChatRoom) {
+    const enabled = !subs.includes(room.id);
+    try {
+      await api.setChatPushSub(String(room.id), enabled);
+      await loadSubs();
+      store.info(enabled ? `Push on for #${room.name}` : `Push off for #${room.name}`);
+    } catch (e) {
+      store.flash(`Couldn't change push: ${errMsg(e)}`);
+    }
   }
 
   async function loadRooms(selectFirst = false) {
@@ -168,6 +188,7 @@
   }
 
   onMount(() => {
+    void loadSubs();
     void loadRooms(true).then(() => loadMessages(selectedId));
     const t = setInterval(() => {
       void loadRooms();
@@ -247,6 +268,20 @@
           <h2>{selected.kind === "room" ? `#${selected.name}` : roomLabel(selected)}</h2>
           {#if selected.description}<p class="desc">{selected.description}</p>{/if}
         </div>
+        {#if selected.kind === "room"}
+          <button
+            class="push"
+            class:on={subs.includes(selected.id)}
+            title={subs.includes(selected.id) ? "Push notifications on for this room" : "Turn on push for this room"}
+            aria-pressed={subs.includes(selected.id)}
+            onclick={() => void togglePush(selected)}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true">
+              <path d="M8 2.2a4 4 0 0 1 4 4v3l1.2 2H2.8L4 9.2v-3a4 4 0 0 1 4-4zM6.4 12.4a1.6 1.6 0 0 0 3.2 0" fill={subs.includes(selected.id) ? "currentColor" : "none"} stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" />
+            </svg>
+            {subs.includes(selected.id) ? "push on" : "push off"}
+          </button>
+        {/if}
         <span class="members" title="Members">
           {selected.kind === "dm" ? "DM" : `${shared.length ? "shared" : ""} room`}
         </span>
@@ -489,6 +524,29 @@
     margin: 3px 0 0;
     font-size: 12px;
     color: var(--ink-3);
+  }
+  .push {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    border: 1px solid var(--line-2);
+    background: none;
+    color: var(--ink-3);
+    border-radius: 6px;
+    padding: 4px 8px;
+    font: 500 10px/1 var(--font-mono);
+  }
+  .push:hover {
+    color: var(--ink-dim);
+  }
+  .push.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+  }
+  .push svg {
+    width: 12px;
+    height: 12px;
   }
   .members {
     margin-left: auto;

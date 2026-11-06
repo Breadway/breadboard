@@ -72,6 +72,12 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/chat/uploads/{id}", get(api::get_chat_upload))
         .route("/chat/dm", post(api::open_dm))
+        .route("/chat/pushes", get(api::list_chat_pushes))
+        .route("/chat/pushes/ack", post(api::ack_chat_pushes))
+        .route(
+            "/chat/push-subs",
+            get(api::get_chat_push_subs).put(api::set_chat_push_sub),
+        )
         .route("/agents/status", get(api::agent_status))
         .route(
             "/issues/{key}/claim",

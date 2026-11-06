@@ -692,6 +692,84 @@ async fn resolve_chat_room(app: &AppState, room: Option<&str>) -> AppResult<brea
     }
 }
 
+
+#[derive(Deserialize)]
+pub struct PushQuery {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub after: Option<i64>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+async fn chat_member_for(
+    app: &AppState,
+    user: &AuthUser,
+    agent_name: Option<&str>,
+) -> AppResult<(String, i64)> {
+    match agent_name.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if !store::user_has_agent(&app.db, user.0.id, name).await? {
+                return Err(crate::error::AppError::forbidden());
+            }
+            Ok((store::agent_member(name), user.0.id))
+        }
+        None => Ok((store::human_member(&user.0.login), user.0.id)),
+    }
+}
+
+pub async fn list_chat_pushes(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<PushQuery>,
+) -> AppResult<Json<Vec<breadboard_core::ChatPush>>> {
+    let (member, _) = chat_member_for(&app, &user, q.agent.as_deref()).await?;
+    Ok(Json(
+        store::list_chat_pushes(
+            &app.db,
+            &member,
+            q.after.unwrap_or(0),
+            q.limit.unwrap_or(100).clamp(1, 500),
+        )
+        .await?,
+    ))
+}
+
+pub async fn ack_chat_pushes(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::AckChatPushes>,
+) -> AppResult<StatusCode> {
+    let (member, _) = chat_member_for(&app, &user, body.agent_name.as_deref()).await?;
+    store::ack_chat_pushes(&app.db, &member, body.up_to).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn get_chat_push_subs(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Query(q): Query<PushQuery>,
+) -> AppResult<Json<Vec<i64>>> {
+    let (member, _) = chat_member_for(&app, &user, q.agent.as_deref()).await?;
+    Ok(Json(store::chat_push_subs(&app.db, user.0.id, &member).await?))
+}
+
+pub async fn set_chat_push_sub(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::ChatPushSub>,
+) -> AppResult<StatusCode> {
+    let (member, _) = chat_member_for(&app, &user, body.agent_name.as_deref()).await?;
+    let room = resolve_chat_room(&app, Some(&body.room)).await?;
+    if room.kind == breadboard_core::ChatRoomKind::Dm {
+        return Err(crate::error::AppError::bad_request(
+            "DMs always push; subscriptions are for shared rooms",
+        ));
+    }
+    store::set_chat_push_sub(&app.db, user.0.id, &member, room.id, body.enabled).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
 pub async fn list_chat_rooms(
     State(app): State<AppState>,
     user: AuthUser,
@@ -1008,6 +1086,9 @@ pub async fn post_chat_message(
         user.0.id,
     )
     .await?;
+    if let Err(e) = store::create_chat_pushes(&app.db, &room, &message, &author).await {
+        tracing::warn!(error = %e, "chat push fan-out failed");
+    }
     app.bus.publish(BoardEvent::ChatMessage {
         room_id: room.id,
         id: message.id,
