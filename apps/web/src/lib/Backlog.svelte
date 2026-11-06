@@ -52,7 +52,7 @@
   {:else}
     <div class="none">
       <p>No issues match these filters.</p>
-      <button class="btn" onclick={() => { store.filterProject = ""; store.filterCycle = 0; store.filterEpic = 0; store.filterMine = false; }}>Clear filters</button>
+      <button class="btn" onclick={() => store.clearFilters()}>Clear filters</button>
     </div>
   {/each}
 </div>

@@ -63,7 +63,7 @@
 
   function epicMenu(e: EpicView): MenuItem[] {
     return [
-      { label: "Show its issues on the board", run: () => { store.filterEpic = e.id; store.view = "board"; } },
+      { label: "Show its issues on the board", run: () => { store.setOnlyFilter("epics", e.id); store.view = "board"; } },
       { label: e.archived ? "Unarchive" : "Archive", run: () => void run(() => api.updateEpic(e.id, { archived: !e.archived })) },
       { label: "Delete epic…", danger: true, run: () => (confirming = e.id) },
     ];
@@ -136,7 +136,7 @@
                   </button>
                 {/each}
                 {#if list.length > CELL_MAX}
-                  <button class="more" onclick={() => { store.filterEpic = e.id; store.filterCycle = c?.id ?? 0; store.view = "backlog"; }}>{list.length - CELL_MAX} more</button>
+                  <button class="more" onclick={() => { store.setOnlyFilter("epics", e.id); store.filters.cycles = c ? [c.id] : []; store.view = "backlog"; }}>{list.length - CELL_MAX} more</button>
                 {/if}
               {:else}
                 <span class="empty">·</span>

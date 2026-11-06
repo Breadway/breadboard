@@ -55,6 +55,18 @@ pub fn router(state: AppState) -> Router {
             "/repos/{owner}/{name}",
             axum::routing::delete(api::remove_repo),
         )
+        .route("/agents", get(api::list_agents))
+        .route("/agents/status", get(api::agent_status))
+        .route(
+            "/issues/{key}/claim",
+            post(api::claim_issue)
+                .put(api::heartbeat_claim)
+                .delete(api::release_claim),
+        )
+        .route(
+            "/claims/{id}",
+            axum::routing::delete(api::release_claim_by_id),
+        )
         .route("/sync/reconcile", post(api::reconcile_now))
         .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))
@@ -122,6 +134,9 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
             "status": if db_ok { "ok" } else { "degraded" },
             "version": env!("CARGO_PKG_VERSION"),
             "db": db_ok,
+            // Public so the SPA can decide whether to offer the dev-login
+            // form (local demos); it 403s unless BREADBOARD_DEV_LOGIN=1.
+            "dev_login": crate::auth::dev_login_enabled(),
         })),
     )
 }

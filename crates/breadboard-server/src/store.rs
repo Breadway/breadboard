@@ -747,14 +747,37 @@ pub async fn create_issue(
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(AppError::bad_request("unknown project"))?,
-        None => sqlx::query_as(&format!(
-            "SELECT {PROJECT_COLS} FROM projects WHERE archived = 0 ORDER BY id LIMIT 1"
-        ))
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(AppError::bad_request(
-            "no project exists yet: create one first",
-        ))?,
+        // No silent default once there is a choice. Filing into whichever
+        // project happens to be first is how unrelated work ends up in a
+        // repo's tracker or in the catch-all roadmap project.
+        None => {
+            let candidates: Vec<ProjectRow> = sqlx::query_as(&format!(
+                "SELECT {PROJECT_COLS} FROM projects WHERE archived = 0 ORDER BY key"
+            ))
+            .fetch_all(&mut *tx)
+            .await?;
+            match candidates.len() {
+                // Unambiguous: the only project there is.
+                1 => candidates.into_iter().next().unwrap(),
+                0 => {
+                    return Err(AppError::bad_request(
+                        "no project exists yet: create one first (POST /api/projects). \
+                         Use a repo-backed project for that repo's code, or a native \
+                         project for work that has no repo yet.",
+                    ))
+                }
+                _ => {
+                    let keys: Vec<&str> = candidates.iter().map(|p| p.key.as_str()).collect();
+                    return Err(AppError::bad_request(format!(
+                        "project is required: file the issue where the work actually lives. \
+                         Available: {}. Use a repo-backed project only for that repo's code; \
+                         create a native project for local config, tooling, or a project not \
+                         yet on Forgejo.",
+                        keys.join(", ")
+                    )));
+                }
+            }
+        }
     };
 
     let cycle_id = if let Some(explicit) = new.cycle_id {
@@ -1007,7 +1030,18 @@ pub async fn update_issue(
     }
 
     tx.commit().await?;
-    get_issue_by_key(db, key).await
+    let after = get_issue_by_key(db, key).await?;
+    if after.status != before.status {
+        let _ = sqlx::query(
+            "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
+        )
+        .bind(after.id)
+        .bind(after.status.as_str())
+        .bind(&ts)
+        .execute(db)
+        .await;
+    }
+    Ok(after)
 }
 
 /// Move an issue to a different project: allocate a fresh key from the
@@ -1771,17 +1805,421 @@ fn dedup(labels: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Seed a default project on an empty database so the API is usable immediately.
+// ---------------------------------------------------------------------------
+// agent claims (exclusive work + soft intents)
+// ---------------------------------------------------------------------------
+
+use breadboard_core::{AgentClaim, AgentState, ClaimMode};
+
+#[derive(FromRow)]
+struct AgentClaimRow {
+    id: i64,
+    issue_id: i64,
+    key: String,
+    issue_title: String,
+    issue_status: String,
+    claimed_by: i64,
+    claimed_by_login: String,
+    agent_name: String,
+    mode: String,
+    session_id: Option<String>,
+    state: String,
+    note: Option<String>,
+    branch: Option<String>,
+    worktree: Option<String>,
+    repo: Option<String>,
+    pr_url: Option<String>,
+    pr_number: Option<i64>,
+    head_sha: Option<String>,
+    board_status: String,
+    claimed_at: String,
+    updated_at: String,
+    last_heartbeat: String,
+}
+
+impl From<AgentClaimRow> for AgentClaim {
+    fn from(r: AgentClaimRow) -> Self {
+        AgentClaim {
+            id: r.id,
+            issue_id: r.issue_id,
+            key: r.key,
+            issue_title: r.issue_title,
+            issue_status: Status::parse(&r.issue_status).unwrap_or(Status::Doing),
+            claimed_by: r.claimed_by,
+            claimed_by_login: r.claimed_by_login,
+            agent_name: r.agent_name,
+            mode: ClaimMode::parse(&r.mode).unwrap_or(ClaimMode::Exclusive),
+            session_id: r.session_id,
+            state: AgentState::parse(&r.state).unwrap_or(AgentState::Implementing),
+            note: r.note,
+            branch: r.branch,
+            worktree: r.worktree,
+            repo: r.repo,
+            pr_url: r.pr_url,
+            pr_number: r.pr_number,
+            head_sha: r.head_sha,
+            board_status: Status::parse(&r.board_status).unwrap_or(Status::Doing),
+            claimed_at: parse_ts(&r.claimed_at),
+            updated_at: parse_ts(&r.updated_at),
+            last_heartbeat: parse_ts(&r.last_heartbeat),
+        }
+    }
+}
+
+const AGENT_CLAIM_COLS: &str = "c.id, c.issue_id, i.key AS key, i.title AS issue_title, \
+    i.status AS issue_status, c.claimed_by, u.login AS claimed_by_login, \
+    c.agent_name, c.mode, c.session_id, c.state, c.note, c.branch, c.worktree, c.repo, \
+    c.pr_url, c.pr_number, c.head_sha, c.board_status, c.claimed_at, c.updated_at, \
+    c.last_heartbeat";
+
+fn agent_claim_join() -> String {
+    format!(
+        "SELECT {AGENT_CLAIM_COLS} FROM agent_claims c \
+         JOIN issues i ON i.id = c.issue_id \
+         JOIN users u ON u.id = c.claimed_by"
+    )
+}
+
+/// True when the issue currently has an exclusive claim.
+pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bool> {
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_claims WHERE issue_id = ?1 AND mode = 'exclusive'",
+    )
+    .bind(issue_id)
+    .fetch_one(db)
+    .await?;
+    Ok(n > 0)
+}
+
+pub async fn get_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
+    let row: Option<AgentClaimRow> =
+        sqlx::query_as(&format!("{} WHERE c.id = ?1", agent_claim_join()))
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
+    Ok(row.map(Into::into))
+}
+
+/// Every claim (exclusive first) for one issue.
+pub async fn list_issue_claims(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<AgentClaim>> {
+    let rows: Vec<AgentClaimRow> = sqlx::query_as(&format!(
+        "{} WHERE c.issue_id = ?1 ORDER BY c.mode = 'intent', c.id",
+        agent_claim_join()
+    ))
+    .bind(issue_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+pub async fn list_claims(db: &SqlitePool) -> AppResult<Vec<AgentClaim>> {
+    let rows: Vec<AgentClaimRow> = sqlx::query_as(&format!(
+        "{} ORDER BY c.mode = 'intent', c.last_heartbeat DESC",
+        agent_claim_join()
+    ))
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// Claims owned by `user_id` on an issue, optionally narrowed to one agent.
+pub async fn find_user_claims(
+    db: &SqlitePool,
+    issue_id: i64,
+    user_id: i64,
+    agent: Option<&str>,
+) -> AppResult<Vec<AgentClaim>> {
+    let mut claims = list_issue_claims(db, issue_id).await?;
+    claims.retain(|c| c.claimed_by == user_id);
+    if let Some(agent) = agent {
+        claims.retain(|c| c.agent_name.eq_ignore_ascii_case(agent));
+    }
+    Ok(claims)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_claim(
+    db: &SqlitePool,
+    issue: &Issue,
+    claimed_by: i64,
+    input: &crate::dto::ClaimUpsert,
+) -> AppResult<AgentClaim> {
+    input.validate().map_err(AppError::BadRequest)?;
+    let mode = input.mode.unwrap_or(ClaimMode::Exclusive);
+    let ts = now_rfc3339();
+    let state = input.state.unwrap_or(AgentState::Implementing);
+
+    if mode == ClaimMode::Exclusive && has_exclusive_claim(db, issue.id).await? {
+        return Err(AppError::Conflict("issue is already claimed".into()));
+    }
+
+    // Taking the work makes the same agent's queued intent redundant, and
+    // leaving both would make "resolve my claim by key" ambiguous.
+    if mode == ClaimMode::Exclusive {
+        sqlx::query(
+            "DELETE FROM agent_claims
+              WHERE issue_id = ?1 AND claimed_by = ?2 AND mode = 'intent'
+                AND lower(agent_name) = lower(?3)",
+        )
+        .bind(issue.id)
+        .bind(claimed_by)
+        .bind(input.agent_name.trim())
+        .execute(db)
+        .await?;
+    }
+
+    // An intent re-claimed by the same agent is an update, not a duplicate.
+    if mode == ClaimMode::Intent {
+        let existing: Option<i64> = sqlx::query_scalar(
+            "SELECT id FROM agent_claims
+              WHERE issue_id = ?1 AND claimed_by = ?2 AND agent_name = ?3 AND mode = 'intent'",
+        )
+        .bind(issue.id)
+        .bind(claimed_by)
+        .bind(input.agent_name.trim())
+        .fetch_optional(db)
+        .await?;
+        if let Some(id) = existing {
+            // A re-claim refreshes the fields it carries and leaves the rest.
+            let upd = crate::dto::ClaimUpdate {
+                agent_name: Some(input.agent_name.trim().to_string()),
+                state: input.state,
+                session_id: input.session_id.clone().map(Some),
+                note: input.note.clone().map(Some),
+                branch: input.branch.clone().map(Some),
+                worktree: input.worktree.clone().map(Some),
+                repo: input.repo.clone().map(Some),
+                pr_url: input.pr_url.clone().map(Some),
+                pr_number: input.pr_number.map(Some),
+                head_sha: input.head_sha.clone().map(Some),
+            };
+            let claim = update_claim_row(db, id, &upd, &ts).await?;
+            return Ok(claim);
+        }
+    }
+
+    let res = sqlx::query(
+        "INSERT INTO agent_claims (issue_id, claimed_by, agent_name, mode, session_id, state,
+             note, branch, worktree, repo, pr_url, pr_number, head_sha, board_status,
+             claimed_at, updated_at, last_heartbeat)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?15, ?15)",
+    )
+    .bind(issue.id)
+    .bind(claimed_by)
+    .bind(input.agent_name.trim().to_lowercase())
+    .bind(mode.as_str())
+    .bind(input.session_id.clone())
+    .bind(state.as_str())
+    .bind(input.note.clone())
+    .bind(input.branch.clone())
+    .bind(input.worktree.clone())
+    .bind(input.repo.clone())
+    .bind(input.pr_url.clone())
+    .bind(input.pr_number)
+    .bind(input.head_sha.clone())
+    .bind(issue.status.as_str())
+    .bind(&ts)
+    .execute(db)
+    .await;
+    match res {
+        Ok(done) => get_claim_by_id(db, done.last_insert_rowid())
+            .await?
+            .ok_or(AppError::NotFound),
+        Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
+            // Two concurrent intent claims: the loser updates the winner's
+            // row instead of surfacing a conflict for a soft reservation.
+            if mode == ClaimMode::Intent {
+                let existing: Option<i64> = sqlx::query_scalar(
+                    "SELECT id FROM agent_claims
+                      WHERE issue_id = ?1 AND claimed_by = ?2
+                        AND lower(agent_name) = lower(?3) AND mode = 'intent'",
+                )
+                .bind(issue.id)
+                .bind(claimed_by)
+                .bind(input.agent_name.trim())
+                .fetch_optional(db)
+                .await?;
+                if let Some(id) = existing {
+                    let upd = crate::dto::ClaimUpdate {
+                        agent_name: Some(input.agent_name.trim().to_string()),
+                        state: input.state,
+                        session_id: input.session_id.clone().map(Some),
+                        note: input.note.clone().map(Some),
+                        branch: input.branch.clone().map(Some),
+                        worktree: input.worktree.clone().map(Some),
+                        repo: input.repo.clone().map(Some),
+                        pr_url: input.pr_url.clone().map(Some),
+                        pr_number: input.pr_number.map(Some),
+                        head_sha: input.head_sha.clone().map(Some),
+                    };
+                    return update_claim_row(db, id, &upd, &ts).await;
+                }
+            }
+            Err(AppError::Conflict("issue is already claimed".into()))
+        }
+        Err(other) => Err(AppError::Db(other)),
+    }
+}
+
+/// Apply claim fields to one row. `ts` is the heartbeat timestamp.
+async fn update_claim_row(
+    db: &SqlitePool,
+    id: i64,
+    input: &crate::dto::ClaimUpdate,
+    ts: &str,
+) -> AppResult<AgentClaim> {
+    // One transaction so a partial multi-column update can never leave a
+    // half-applied claim behind, and the heartbeat is always refreshed with
+    // the changes it accompanies.
+    let mut tx = db.begin().await?;
+
+    if let Some(agent_name) = &input.agent_name {
+        let name = agent_name.trim();
+        if name.is_empty() {
+            return Err(AppError::bad_request("agent_name must not be empty"));
+        }
+        if name.len() > 64 {
+            return Err(AppError::bad_request("agent_name must be 64 chars or fewer"));
+        }
+        sqlx::query("UPDATE agent_claims SET agent_name = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(name.to_lowercase())
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match e {
+                sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                    AppError::Conflict("another claim already uses that agent name".into())
+                }
+                other => AppError::Db(other),
+            })?;
+    }
+    if let Some(state) = input.state {
+        sqlx::query("UPDATE agent_claims SET state = ?2 WHERE id = ?1")
+            .bind(id)
+            .bind(state.as_str())
+            .execute(&mut *tx)
+            .await?;
+    }
+    // Nullable fields: Some(None) clears, Some(Some(v)) sets, None leaves alone.
+    macro_rules! set_nullable {
+        ($col:literal, $val:expr) => {
+            if let Some(v) = $val {
+                sqlx::query(concat!("UPDATE agent_claims SET ", $col, " = ?2 WHERE id = ?1"))
+                    .bind(id)
+                    .bind(v.clone())
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        };
+    }
+    set_nullable!("session_id", &input.session_id);
+    set_nullable!("note", &input.note);
+    set_nullable!("branch", &input.branch);
+    set_nullable!("worktree", &input.worktree);
+    set_nullable!("repo", &input.repo);
+    set_nullable!("pr_url", &input.pr_url);
+    set_nullable!("pr_number", &input.pr_number);
+    set_nullable!("head_sha", &input.head_sha);
+
+    // Refresh board_status from the live issue + heartbeat in the same tx.
+    let issue_id: i64 = sqlx::query_scalar("SELECT issue_id FROM agent_claims WHERE id = ?1")
+        .bind(id)
+        .fetch_one(&mut *tx)
+        .await?;
+    let status: String = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
+        .bind(issue_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    sqlx::query(
+        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3, last_heartbeat = ?3 WHERE id = ?1",
+    )
+    .bind(id)
+    .bind(&status)
+    .bind(ts)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)
+}
+
+pub async fn update_claim(
+    db: &SqlitePool,
+    claim_id: i64,
+    input: &crate::dto::ClaimUpdate,
+) -> AppResult<AgentClaim> {
+    update_claim_row(db, claim_id, input, &now_rfc3339()).await
+}
+
+/// Release one claim by id. Returns the claim that was removed.
+pub async fn delete_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
+    let claim = get_claim_by_id(db, id).await?;
+    if claim.is_some() {
+        sqlx::query("DELETE FROM agent_claims WHERE id = ?1")
+            .bind(id)
+            .execute(db)
+            .await?;
+    }
+    Ok(claim)
+}
+
+pub async fn refresh_claim_board_status(
+    db: &SqlitePool,
+    issue_id: i64,
+    status: Status,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
+    )
+    .bind(issue_id)
+    .bind(status.as_str())
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Append a claim lifecycle row to the issue's activity timeline. Heartbeats
+/// that change nothing are not logged, so this stays readable.
+pub async fn log_claim_event(
+    db: &SqlitePool,
+    issue_id: i64,
+    field: &str,
+    old_value: Option<&str>,
+    new_value: Option<&str>,
+    actor_id: Option<i64>,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
+         VALUES (?1, ?2, ?3, ?4, 'breadboard', ?5, ?6)",
+    )
+    .bind(issue_id)
+    .bind(field)
+    .bind(old_value)
+    .bind(new_value)
+    .bind(actor_id)
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Startup sanity check: there is deliberately no catch-all default project.
+///
+/// Seeding `ROAD` made it the silent destination for every title-only issue,
+/// including work that belonged to a repo or to a project of its own. The
+/// first issue on a fresh database now requires creating the right project
+/// (`POST /api/projects`), which keeps repo trackers and native projects
+/// honest.
 pub async fn ensure_seed(db: &SqlitePool) -> anyhow::Result<()> {
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM projects")
         .fetch_one(db)
         .await
         .context("counting projects")?;
     if count == 0 {
-        sqlx::query("INSERT INTO projects (key, name) VALUES ('ROAD', 'Roadmap')")
-            .execute(db)
-            .await?;
-        tracing::info!("seeded default project ROAD (Roadmap)");
+        tracing::info!(
+            "no projects yet: create one with POST /api/projects before filing issues"
+        );
     }
     Ok(())
 }

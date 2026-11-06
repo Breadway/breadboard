@@ -31,7 +31,7 @@ async fn issue_lifecycle_and_events() {
     let unauth_events = c.get(format!("{base}/events")).send().await.unwrap();
     assert_eq!(unauth_events.status(), 401);
 
-    // Seed project ROAD exists; create a real project too.
+    // No project is seeded: create the one this work belongs to.
     let project: Value = c
         .post(format!("{base}/api/projects"))
         .header("authorization", &auth)
@@ -313,6 +313,67 @@ async fn cycle_start_end_events() {
     assert_eq!(events.next_type().await, "cycle.ended");
 }
 
+/// There is no catch-all project: a title-only issue must name its home as
+/// soon as more than one project exists, rather than silently landing in
+/// whichever project happens to be first.
+#[tokio::test]
+async fn issue_requires_a_project_once_there_is_a_choice() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    // Empty database: nothing to file into, so say so.
+    let none = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({ "title": "orphan" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(none.status(), 400);
+    let body: Value = none.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("no project exists"));
+
+    // Exactly one project: the title-only shortcut is unambiguous again.
+    c.post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({ "key": "ONLY", "name": "Only project" }))
+        .send()
+        .await
+        .unwrap();
+    let single = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({ "title": "filed by default" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(single.status(), 201);
+    let single: Value = single.json().await.unwrap();
+    assert_eq!(single["key"], "ONLY-1");
+
+    // A second project makes the choice ambiguous: refuse and list them.
+    c.post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({ "key": "OTHER", "name": "Other project" }))
+        .send()
+        .await
+        .unwrap();
+    let ambiguous = c
+        .post(format!("{base}/api/issues"))
+        .header("authorization", &auth)
+        .json(&json!({ "title": "who owns this?" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ambiguous.status(), 400);
+    let body: Value = ambiguous.json().await.unwrap();
+    let err = body["error"].as_str().unwrap();
+    assert!(err.contains("project is required"), "{err}");
+    assert!(err.contains("ONLY") && err.contains("OTHER"), "{err}");
+}
+
 #[tokio::test]
 async fn reconcile_returns_json_body() {
     let app = tu::spawn().await;
@@ -327,7 +388,7 @@ async fn reconcile_returns_json_body() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 202);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
     assert_eq!(body["ok"], json!(true));
 }
 
@@ -344,15 +405,32 @@ async fn client_reconcile_tolerates_json_body() {
 async fn events_accept_session_cookie_for_browser_clients() {
     let app = tu::spawn().await;
     let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
     let mut events = tu::EventStream::connect_with_cookie(&base, &app.session_token).await;
+
+    // No seeded catch-all: this test files into its own project.
+    c_ok(
+        reqwest::Client::new()
+            .post(format!("{base}/api/projects"))
+            .header("authorization", &auth)
+            .json(&json!({ "key": "EVT", "name": "Events" }))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+    );
 
     let response = reqwest::Client::new()
         .post(format!("{base}/api/issues"))
-        .header("authorization", format!("Bearer {}", app.token))
-        .json(&json!({ "title": "cookie client event", "project": "ROAD" }))
+        .header("authorization", &auth)
+        .json(&json!({ "title": "cookie client event", "project": "EVT" }))
         .send()
         .await
         .unwrap();
     assert!(response.status().is_success());
     assert_eq!(events.next_type().await, "card.created");
+}
+
+fn c_ok(status: reqwest::StatusCode) {
+    assert!(status.is_success(), "setup failed: {status}");
 }

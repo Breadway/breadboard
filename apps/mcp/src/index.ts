@@ -46,6 +46,62 @@ function loadConfig(): { server: string; token?: string } {
 const cfg = loadConfig();
 const client = new BreadboardClient(cfg.server, cfg.token);
 
+// --- claim keepalive ------------------------------------------------------
+//
+// The Agents page marks a claim stale after 5 minutes without a heartbeat, so
+// a long agent run must keep poking. Doing that from the MCP server means the
+// agent does not have to remember: claim_issue starts a 60s timer, and
+// release_claim (or the process exiting) stops it.
+
+const KEEPALIVE_MS = 60_000;
+const keepalives = new Map<string, ReturnType<typeof setInterval>>();
+
+const keepaliveId = (key: string, agent: string) => `${key}:${agent}`;
+
+function stopKeepalive(key: string, agent?: string) {
+  if (agent) {
+    const id = keepaliveId(key, agent);
+    const timer = keepalives.get(id);
+    if (timer) clearInterval(timer);
+    keepalives.delete(id);
+    return;
+  }
+  for (const [id, timer] of keepalives) {
+    if (id.startsWith(`${key}:`)) {
+      clearInterval(timer);
+      keepalives.delete(id);
+    }
+  }
+}
+
+function startKeepalive(key: string, agent: string) {
+  const id = keepaliveId(key, agent);
+  if (keepalives.has(id)) return;
+  const timer = setInterval(() => {
+    void client.heartbeatClaim(key, { agent_name: agent }, agent).catch((e) => {
+      // Only a missing claim stops the timer. A network blip or a transient
+      // 5xx must not silently let the claim go stale.
+      const gone = e instanceof ApiError && (e.status === 404 || e.status === 410);
+      if (gone) {
+        const t = keepalives.get(id);
+        if (t) clearInterval(t);
+        keepalives.delete(id);
+      } else {
+        console.error(`breadboard keepalive failed for ${key}/${agent}: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    });
+  }, KEEPALIVE_MS);
+  timer.unref?.();
+  keepalives.set(id, timer);
+}
+
+const stopAllKeepalives = () => {
+  for (const timer of keepalives.values()) clearInterval(timer);
+  keepalives.clear();
+};
+process.once("SIGINT", stopAllKeepalives);
+process.once("SIGTERM", stopAllKeepalives);
+
 // --- helpers ------------------------------------------------------------
 
 const ok = (data: unknown) => ({
@@ -193,13 +249,22 @@ server.tool(
 
 server.tool(
   "create_issue",
-  "Create an issue. Only title is required. If the project maps to a synced repo it is also created on Forgejo. " +
+  "Create an issue. Title is required, and so is the right project once there is more than one. " +
+    "ROUTING RULES (important): file the issue where the work actually lives. " +
+    "(1) A repo-backed project is for that repo's code and issues only; its cards sync to the repo's tracker, " +
+    "so never put local machine config, dotfiles, environment breakage, or a misbehaving bread module there. " +
+    "(2) Work about the machine, tooling, or several repos at once belongs in a native (repo-less) project; " +
+    "create one with create_project if none fits. " +
+    "(3) A brand-new project that is not on Forgejo yet should get its own native breadboard project now and be " +
+    "tracked there; attach the repo later with update_project or add_repo. " +
+    "(4) Do not use a catch-all/roadmap project (for example ROAD) as a dumping ground. " +
+    "If no existing project clearly owns the work, stop and create the right one rather than guessing. " +
     "If you later open a PR that resolves this issue, reference its key with a closing keyword in the PR body " +
     "(e.g. \"Closes ECO-17\" or \"Closes #17\"); breadboard links the PR to the issue and collapses them into " +
     "one card instead of showing two unrelated ones.",
   {
     title: z.string(),
-    project: z.string().optional().describe("project key; defaults to the first project"),
+    project: z.string().optional().describe("project key, e.g. BREAD; required when more than one project exists"),
     body: z.string().optional(),
     priority: z.enum(PRIORITIES as [string, ...string[]]).optional(),
     estimate: z.number().optional(),
@@ -224,8 +289,11 @@ server.tool(
 
 server.tool(
   "update_issue",
-  "Patch an issue. Any omitted field is left unchanged. " +
-    "Workflow: move to doing when you actually start work (not just at the end); backlog/todo "
+  "Patch an issue. Any omitted field is left unchanged. CLAIM FIRST: agents must " +
+    "call claim_issue before starting work (first claim wins; 409 means someone else is on it: " +
+    "check list_agents / agent_status and work something else). Heartbeat with update_claim at " +
+    "least every 5 minutes while work is in progress or the Agents page marks the claim stale. " +
+    "Release with release_claim when done. Workflow: move to doing when you actually start work (not just at the end); backlog/todo "
     + "→ doing → review (implemented, not yet verified/deployed) → done (verified live). "
     + "Don't jump straight from backlog/todo to review or done.",
   {
@@ -271,7 +339,8 @@ server.tool(
 
 server.tool(
   "move_issue",
-  "Shorthand: set an issue's status. Workflow: doing when work actually starts, review once "
+  "Shorthand: set an issue's status. CLAIM FIRST with claim_issue (and heartbeat via " +
+    "update_claim); 409 means another agent holds it. Workflow: doing when work actually starts, review once "
     + "implemented (not yet verified/deployed), done only after you've verified it. Don't skip "
     + "doing on the way to review/done.",
   { key: z.string(), status: z.enum(STATUSES as [string, ...string[]]) },
@@ -426,12 +495,14 @@ server.tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => cli
 
 server.tool(
   "create_project",
-  "Create a project. Repo-less by default (for planning items); pass forgejo_repo to also map a "
-    + "synced Forgejo repo at creation time (equivalent to add_repo right after).",
+  "Create a project. Repo-less by default, which is the right choice for a new project that does not have a " +
+    "Forgejo repo yet, and for work about the machine/tooling rather than one repo's code. " +
+    "Pass forgejo_repo only when this project tracks an actual repo (equivalent to add_repo right after). " +
+    "Prefer creating a focused project over filing unrelated work into another project's tracker.",
   {
     key: z.string(),
     name: z.string(),
-    forgejo_repo: z.string().optional().describe("owner/name"),
+    forgejo_repo: z.string().optional().describe("owner/name, only for a project that tracks that repo"),
   },
   ({ key, name, forgejo_repo }) =>
     run(() => client.createProject({ key: key.toUpperCase(), name, forgejo_repo })),
@@ -481,6 +552,97 @@ server.tool("reconcile", "Run a Forgejo reconcile pass now.", {}, () =>
     await client.reconcile();
     return "reconcile queued";
   }),
+);
+
+const AGENT_STATES = [
+  "planned",
+  "implementing",
+  "awaiting-review",
+  "reworking",
+  "awaiting-ci",
+  "awaiting-merge",
+  "verifying",
+  "blocked",
+  "needs-user",
+  "done",
+] as const;
+
+server.tool(
+  "claim_issue",
+  "Claim an issue as an agent. REQUIRED FIRST STEP before any implementation work: " +
+    "no code changes without holding the claim. " +
+    "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
+    "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
+    "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
+    "never moves the card and never blocks anyone. " +
+    "The MCP server auto-heartbeats your claim every 60s while this process is alive, so it stays live; " +
+    "call release_claim when done and update_claim to report state/PR progress.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().describe("agent-chosen name, e.g. opencode, bb-worker-2"),
+    mode: z.enum(["exclusive", "intent"]).optional().describe("exclusive (default) or soft intent"),
+    session_id: z.string().optional().describe("agent session id for ownership checks"),
+    state: z.enum(AGENT_STATES).optional().describe("lifecycle state, default implementing"),
+    note: z.string().optional().describe("what you are doing right now"),
+    branch: z.string().optional(),
+    worktree: z.string().optional(),
+    repo: z.string().optional(),
+    pr_url: z.string().optional(),
+    pr_number: z.number().optional(),
+    head_sha: z.string().optional(),
+  },
+  ({ key, ...claim }) =>
+    run(async () => {
+      const created = await client.claimIssue(key, claim as never);
+      startKeepalive(key, created.agent_name);
+      return created;
+    }),
+);
+
+server.tool(
+  "update_claim",
+  "Heartbeat / update your claim (refreshes the live signal on the Agents page). Only the claiming user may update.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().optional(),
+    state: z.enum(AGENT_STATES).optional(),
+    session_id: z.string().nullable().optional(),
+    note: z.string().nullable().optional(),
+    branch: z.string().nullable().optional(),
+    worktree: z.string().nullable().optional(),
+    repo: z.string().nullable().optional(),
+    pr_url: z.string().nullable().optional(),
+    pr_number: z.number().nullable().optional(),
+    head_sha: z.string().nullable().optional(),
+  },
+  ({ key, ...update }) => run(() => client.heartbeatClaim(key, update as never)),
+);
+
+server.tool(
+  "release_claim",
+  "Release your claim (exclusive or intent). The card keeps its status; only the agent tint goes away. " +
+    "Pass agent_name when you hold more than one claim on the issue.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().optional().describe("which of your claims to release"),
+  },
+  ({ key, agent_name }) =>
+    run(async () => {
+      await client.releaseClaim(key, agent_name);
+      stopKeepalive(key, agent_name);
+      return `released ${key}`;
+    }),
+);
+
+server.tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>
+  run(() => client.listAgents()),
+);
+
+server.tool(
+  "agent_status",
+  "Server-side roll-up mirroring the opencode bb-status widget line, computed from live claims.",
+  {},
+  () => run(() => client.agentStatus()),
 );
 
 server.tool(

@@ -13,6 +13,16 @@ fn non_empty(s: &str) -> Result<(), String> {
     }
 }
 
+/// Only absolute http(s) URLs may be rendered as links. Anything else (a
+/// `javascript:` URL stored by a malicious agent) is rejected at the edge so
+/// the web client never has to trust it.
+pub fn is_safe_http_url(s: &str) -> bool {
+    let s = s.trim();
+    (s.starts_with("http://") || s.starts_with("https://"))
+        && s.len() > 8
+        && !s.chars().any(|c| c.is_whitespace())
+}
+
 /// Move an issue to a different project: `project` is a key or numeric id,
 /// same resolution as `NewIssue::project`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -104,12 +114,17 @@ pub struct CyclePatch {
 }
 
 /// Only `title` is required: the "create a card with just a title" rule.
+/// `project` is required as soon as there is more than one project, so a
+/// title-only card cannot silently land in the wrong tracker.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NewIssue {
     pub title: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub body: String,
-    /// Project key (`BREAD`) or id. Defaults to the first non-archived project.
+    /// Project key (`BREAD`) or id. Required once more than one project
+    /// exists: there is no catch-all default. Use a repo-backed project only
+    /// for that repo's code; create a native project for local config,
+    /// tooling, or a project that has no repo yet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -206,6 +221,131 @@ where
     T: Deserialize<'de>,
 {
     Deserialize::deserialize(de).map(Some)
+}
+
+/// Upsert body for `POST /api/issues/{key}/claim`. The agent names itself;
+/// auth comes from the existing session / bearer token (no separate agent
+/// tokens). `state` mirrors the opencode session lifecycle so the Agents
+/// page reads like the `bb-status` widget.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaimUpsert {
+    /// Human/agent-chosen name, e.g. `opencode`, `codex-hermes`, `bb-worker-2`.
+    pub agent_name: String,
+    /// `exclusive` (default) or `intent`. An intent reserves interest but
+    /// does not move the card or block another agent's exclusive claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::ClaimMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::AgentState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
+}
+
+impl ClaimUpsert {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.agent_name)?;
+        if self.agent_name.trim().len() > 64 {
+            return Err("agent_name must be 64 chars or fewer".into());
+        }
+        if let Some(url) = &self.pr_url {
+            if !is_safe_http_url(url) {
+                return Err("pr_url must be an absolute http(s) URL".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Heartbeat / field update for `PUT /api/issues/{key}/claim`. Every field
+/// optional; absent = unchanged. Nullable fields use `Option<Option<T>>` so
+/// an explicit `null` clears them. Any update refreshes `last_heartbeat`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClaimUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::AgentState>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub session_id: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub note: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub branch: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub worktree: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub repo: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pr_url: Option<Option<String>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub pr_number: Option<Option<i64>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub head_sha: Option<Option<String>>,
+}
+
+/// Server-side roll-up for `GET /api/agents/status`. Counts mirror the
+/// opencode `bb-status` widget line (`BB x/y done, a active, …`), computed
+/// from live claims instead of local session files.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentStatusSummary {
+    pub total: i64,
+    pub live: i64,
+    pub stale: i64,
+    pub queued: i64,
+    pub done: i64,
+    pub active: i64,
+    pub review: i64,
+    pub verifying: i64,
+    pub blocked: i64,
+    pub remaining: i64,
+    pub line: String,
+    pub claims: Vec<crate::AgentClaim>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

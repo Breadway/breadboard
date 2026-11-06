@@ -2,6 +2,7 @@
   import { fly } from "svelte/transition";
   import {
     PRIORITIES,
+    safeHttpUrl,
     STATUSES,
     type ActivityEntry,
     type Comment,
@@ -10,14 +11,14 @@
     type IssuePatch,
     type LinkKind,
   } from "@breadboard/api-client";
-  import { api, errMsg, store, statusName } from "./store.svelte";
+  import { api, claimStale, errMsg, store, statusName } from "./store.svelte";
   import { renderMarkdown } from "./markdown";
   import Menu, { type MenuItem } from "./ui/Menu.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
-  import { labelColor, projectColor } from "./ui/colors";
+  import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   // The issue's fields come straight from the store, so a drag on the board,
   // a live event from someone else, or a refused save (which leaves the store
@@ -41,6 +42,11 @@
   let posting = $state(false);
   let confirmingDelete = $state(false);
   let addingLink = $state(false);
+  let claiming = $state(false);
+  let claimAgent = $state("");
+  let claimNote = $state("");
+  let claimMode = $state<"exclusive" | "intent">("exclusive");
+  let claimBusy = $state(false);
   let linkKind = $state<LinkKind>("blocks");
   let linkTarget = $state("");
   let linkBusy = $state(false);
@@ -149,6 +155,30 @@
   }
   function removeLabel(l: string) {
     if (issue) void save({ labels: issue.labels.filter((x) => x !== l) });
+  }
+
+  const claim = $derived(issue ? store.claimForIssue(issue.id) : undefined);
+  const safePrUrl = $derived(claim ? safeHttpUrl(claim.pr_url) : null);
+  const intents = $derived(
+    issue ? store.claimsForIssue(issue.id).filter((c) => c.mode === "intent") : [],
+  );
+  const claimStaleFlag = $derived(claim ? claimStale(claim.last_heartbeat) : false);
+
+  async function doClaim() {
+    if (!issue) return;
+    const agent_name = claimAgent.trim() || store.me?.login || "agent";
+    claimBusy = true;
+    const ok = await store.claim(issue.key, {
+      agent_name,
+      mode: claimMode,
+      note: claimNote.trim() || undefined,
+    });
+    claimBusy = false;
+    if (ok) {
+      claiming = false;
+      claimAgent = "";
+      claimNote = "";
+    }
   }
 
   const statusItems = $derived<MenuItem[]>(
@@ -284,7 +314,16 @@
     ),
   );
 
-  const FIELD: Record<string, string> = { assignee_id: "assignee", epic_id: "epic", cycle_id: "cycle", estimate: "points" };
+  const FIELD: Record<string, string> = {
+    assignee_id: "assignee",
+    epic_id: "epic",
+    cycle_id: "cycle",
+    estimate: "points",
+    agent_claim: "agent claim",
+    agent_state: "agent state",
+    agent_release: "agent release",
+    agent_pr: "agent PR",
+  };
   // Activity stores raw column values; turn ids back into names.
   function val(field: string, v: string | null): string {
     if (v == null || v === "") return "none";
@@ -410,6 +449,111 @@
             />
           </div>
         </div>
+
+        <section class="sec agent-sec" class:claimed={!!claim} style={claim ? `--agent:${agentColor(claim.agent_name)}` : undefined}>
+          <h3>
+            Agent
+            {#if claim}
+              <span class="agent-pill" class:stale={claimStaleFlag} style="--agent:{agentColor(claim.agent_name)}" title="Last heartbeat: {claim.last_heartbeat}">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                {claim.agent_name} · {claim.state}{claimStaleFlag ? " · stale" : ""}
+              </span>
+            {/if}
+            <span class="grow"></span>
+            {#if claim}
+              {#if claim.claimed_by === store.me?.id}
+                <button onclick={() => claim && void store.releaseById(claim.id)}>Release</button>
+              {/if}
+            {:else}
+              <button onclick={() => (claiming = !claiming)}>{claiming ? "Cancel" : "+ Claim"}</button>
+            {/if}
+          </h3>
+          {#if claim}
+            <div class="agent-chips">
+              {#if claim.claimed_by_login !== store.me?.login}
+                <span class="achip" title="Claimed with this user's token">{claim.claimed_by_login}</span>
+              {/if}
+              {#if claim.session_id}
+                <span class="achip mono" title="Agent session">{claim.session_id.slice(0, 8)}</span>
+              {/if}
+              {#if claim.branch}
+                <span class="achip mono" title="Branch">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4.5" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4.5" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="11.5" cy="6" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4.5 5.1v5.8M11.5 7.6c0 2.2-2 2.6-4.6 3.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+                  {claim.branch}
+                </span>
+              {/if}
+              {#if claim.pr_url}
+                <a class="achip mono link" href={safePrUrl} target="_blank" rel="noreferrer" title="Pull request">
+                  {#if !safePrUrl}<span>{claim.pr_url}</span>{:else}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="4" cy="3.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="4" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><circle cx="12" cy="12.5" r="1.6" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M4 5.1v5.8M12 10.9V6.5a2 2 0 0 0-2-2H7.5m1.5-2-2 2 2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  PR{claim.pr_number ? ` #${claim.pr_number}` : ""}{/if}
+                </a>
+              {:else if claim.pr_number}
+                <span class="achip mono">PR #{claim.pr_number}</span>
+              {/if}
+              {#if claim.head_sha}<span class="achip mono" title="Head commit">{claim.head_sha.slice(0, 7)}</span>{/if}
+            </div>
+            {#if claim.note}<p class="agent-note">{claim.note}</p>{/if}
+            {#if claim.claimed_by !== store.me?.id}
+              <p class="dim small">Claimed by someone else. Only {claim.claimed_by_login} can heartbeat or release it.</p>
+            {/if}
+          {:else if claiming}
+            <div class="claim-form">
+              <div class="mode-seg" role="group" aria-label="Claim mode">
+                <button class:on={claimMode === "exclusive"} onclick={() => (claimMode = "exclusive")} title="Take the issue: first claim wins and the card moves to doing">
+                  Work it now
+                </button>
+                <button class:on={claimMode === "intent"} onclick={() => (claimMode = "intent")} title="Queue your interest without moving the card or blocking another agent">
+                  Queue intent
+                </button>
+              </div>
+              <input
+                class="field"
+                placeholder="Agent name (default: your login)"
+                bind:value={claimAgent}
+                aria-label="Agent name"
+              />
+              <input
+                class="field"
+                placeholder="What are you starting? (optional note)"
+                bind:value={claimNote}
+                aria-label="Claim note"
+                onkeydown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void doClaim();
+                  }
+                }}
+              />
+              <button class="btn primary" disabled={claimBusy} onclick={() => void doClaim()}>
+                {claimBusy
+                  ? "Claiming…"
+                  : claimMode === "intent"
+                    ? `Queue intent for ${issue.key}`
+                    : `Claim ${issue.key}`}
+              </button>
+            </div>
+            <p class="dim small">Claiming moves backlog/todo → doing and assigns the card to you.</p>
+            <p class="dim small">Planning to take it later? Ask for an <b>intent</b> instead: it shows as queued without blocking anyone.</p>
+          {:else}
+            <p class="dim small">No agent is working this. Claim it before starting so the board shows it live.</p>
+          {/if}
+
+          {#if intents.length}
+            <div class="intents">
+              <span class="intents-label">Queued</span>
+              {#each intents as it (it.id)}
+                <span class="achip intent" style="--agent:{agentColor(it.agent_name)}" title="Soft reservation by {it.claimed_by_login}">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                  {it.agent_name} · {it.state}
+                  {#if it.claimed_by === store.me?.id}
+                    <button class="intent-x" aria-label="Release queued claim {it.agent_name}" onclick={() => void store.releaseById(it.id)}>×</button>
+                  {/if}
+                </span>
+              {/each}
+            </div>
+          {/if}
+        </section>
 
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>
@@ -730,6 +874,141 @@
     flex-direction: column;
     gap: 8px;
   }
+  .agent-sec {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .agent-sec.claimed {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 45%, transparent);
+  }
+  .agent-sec .grow { flex: 1; }
+  .agent-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font: 600 9.5px/1 var(--font-mono);
+    letter-spacing: 0.03em;
+    color: var(--agent, var(--ok));
+    background: color-mix(in srgb, var(--agent, var(--ok)) 14%, transparent);
+    padding: 3px 7px;
+    border-radius: 5px;
+    text-transform: none;
+  }
+  .agent-pill svg {
+    width: 11px;
+    height: 11px;
+  }
+  .agent-pill.stale {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+  }
+  .intents {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding-top: 8px;
+    margin-top: 2px;
+    border-top: 1px dashed var(--line);
+  }
+  .intents-label {
+    font: 500 9px/1 var(--font-mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .achip.intent {
+    border-style: dashed;
+    color: var(--agent, var(--ink-dim));
+    background: color-mix(in srgb, var(--agent, var(--ink)) 6%, transparent);
+  }
+  .intent-x {
+    border: 0;
+    background: none;
+    color: var(--ink-3);
+    font-size: 12px;
+    line-height: 1;
+    padding: 0 0 0 2px;
+  }
+  .intent-x:hover {
+    color: var(--danger);
+  }
+  .agent-chips {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex-wrap: wrap;
+  }
+  .achip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 7px;
+    border-radius: 5px;
+    font-size: 10.5px;
+    color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 4%, transparent);
+    border: 1px solid var(--line);
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .achip svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+  }
+  .achip.link {
+    color: var(--status-review);
+    text-decoration: none;
+  }
+  .achip.link:hover {
+    border-color: color-mix(in srgb, var(--status-review) 45%, transparent);
+  }
+  .agent-note {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--ink-dim);
+    border-left: 2px solid color-mix(in srgb, var(--agent, var(--ok)) 50%, transparent);
+    padding-left: 8px;
+  }
+  .claim-form {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .mode-seg {
+    display: inline-flex;
+    align-self: flex-start;
+    padding: 2px;
+    border-radius: 7px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    gap: 2px;
+  }
+  .mode-seg button {
+    border: 0;
+    background: none;
+    padding: 4px 9px;
+    border-radius: 5px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+  .mode-seg button.on {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .claim-form .field {
+    background: var(--bg);
+    border: 1px solid var(--line-2);
+    border-radius: 7px;
+    padding: 7px 9px;
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .small { font-size: 11.5px; }
   h3 {
     margin: 0;
     display: flex;

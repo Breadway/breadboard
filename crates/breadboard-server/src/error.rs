@@ -29,6 +29,9 @@ impl AppError {
     pub fn bad_request(msg: impl Into<String>) -> Self {
         AppError::BadRequest(msg.into())
     }
+    pub fn forbidden() -> Self {
+        AppError::Forbidden
+    }
 }
 
 impl IntoResponse for AppError {

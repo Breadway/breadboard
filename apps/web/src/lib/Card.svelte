@@ -1,11 +1,17 @@
 <script lang="ts">
   import type { Issue } from "@breadboard/api-client";
-  import { store } from "./store.svelte";
+  import { claimStale, store } from "./store.svelte";
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
-  import { labelColor, projectColor } from "./ui/colors";
+  import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   let { issue, keyboardSelected = false }: { issue: Issue; keyboardSelected?: boolean } = $props();
+
+  const claim = $derived(store.claimForIssue(issue.id));
+  const intents = $derived(
+    store.claimsForIssue(issue.id).filter((c) => c.mode === "intent"),
+  );
+  const stale = $derived(claim ? claimStale(claim.last_heartbeat, store.clock) : false);
 
   const MAX_LABELS = 3;
 
@@ -30,6 +36,9 @@
   bind:this={el}
   class="card"
   class:done={issue.status === "done"}
+  class:claimed={!!claim}
+  class:stale={stale}
+  style={claim ? `--agent:${agentColor(claim.agent_name)}` : undefined}
   class:selected={store.selectedKey === issue.key}
   class:kb={keyboardSelected}
   class:dragging
@@ -45,6 +54,23 @@
     <span class="tick" style="background:{projectColor(pkey)}"></span>
     <span class="key">{issue.key}</span>
     {#if issue.type === "pr"}<span class="pr-tag">PR</span>{/if}
+    {#if claim}
+      <span
+        class="agent"
+        class:stale={stale}
+        title={stale
+          ? `Claimed by ${claim.agent_name} · stale (no heartbeat for 5+ min) · ${claim.state}`
+          : `Claimed by ${claim.agent_name} · ${claim.state} · heartbeat ${claim.last_heartbeat}`}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {claim.agent_name}
+      </span>
+    {:else if intents.length}
+      <span class="queued" title="{intents.map((i) => i.agent_name).join(', ')} queued for this">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2.4 2.2" /><path d="M8 4.6V8l2.4 1.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+        {intents.length} queued
+      </span>
+    {/if}
     <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
   <div class="title">{issue.title}</div>
@@ -109,6 +135,59 @@
   }
   .card.dragging {
     opacity: 0.4;
+  }
+  .card.claimed {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 55%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--agent, var(--ok)) 45%, transparent);
+  }
+  .card.claimed:hover {
+    border-color: color-mix(in srgb, var(--agent, var(--ok)) 75%, transparent);
+  }
+  .card.claimed.stale {
+    border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent);
+  }
+  .agent {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: 600 9px/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    padding: 3px 6px 3px 5px;
+    border-radius: 4px;
+    max-width: 140px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--agent, var(--ok));
+    background: color-mix(in srgb, var(--agent, var(--ok)) 13%, transparent);
+  }
+  .agent svg {
+    width: 10px;
+    height: 10px;
+    flex: none;
+  }
+  .queued {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: 600 9px/1 var(--font-mono);
+    letter-spacing: 0.04em;
+    padding: 3px 6px 3px 5px;
+    border-radius: 4px;
+    color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 5%, transparent);
+    border: 1px dashed var(--line-2);
+    white-space: nowrap;
+  }
+  .queued svg {
+    width: 10px;
+    height: 10px;
+    flex: none;
+  }
+  .agent.stale {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
   }
   .card:active {
     cursor: grabbing;

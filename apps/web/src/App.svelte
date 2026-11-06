@@ -7,6 +7,7 @@
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
   import Roadmap from "./lib/Roadmap.svelte";
+  import Agents from "./lib/Agents.svelte";
   import Inbox from "./lib/Inbox.svelte";
   import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
@@ -76,6 +77,7 @@
     { v: "board", label: "Board" },
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
+    { v: "agents", label: "Agents" },
     { v: "inbox", label: "Inbox" },
     { v: "settings", label: "Settings" },
   ];
@@ -109,7 +111,7 @@
     <h1>breadboard</h1>
     <p class="dim">Planning for the bread ecosystem, synced both ways with Forgejo.</p>
     <a class="btn primary big" href="/auth/login">Sign in with git.breadway.dev</a>
-    {#if store.isDev}
+    {#if store.isDev || store.devLoginAllowed}
       <div class="dev">
         <span class="dim">Dev login</span>
         <input class="field" bind:value={devLoginName} aria-label="Dev login name" />
@@ -129,6 +131,8 @@
           <Backlog />
         {:else if store.view === "roadmap"}
           <Roadmap />
+        {:else if store.view === "agents"}
+          <Agents />
         {:else if store.view === "inbox"}
           <Inbox />
         {:else}
@@ -138,7 +142,7 @@
       <nav class="tabbar" aria-label="Views">
         {#each tabs as t (t.v)}
           <button class:on={store.view === t.v} onclick={() => (store.view = t.v)}>
-            {t.label}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}
+            {t.label}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}{#if t.v === "agents" && store.activeAgents}<span class="pill">{store.activeAgents}</span>{/if}
           </button>
         {/each}
       </nav>
@@ -307,6 +311,19 @@
       height: 6px;
       border-radius: 50%;
       background: var(--accent);
+    }
+    .tabbar .pill {
+      display: inline-block;
+      margin-left: 4px;
+      min-width: 15px;
+      height: 15px;
+      line-height: 15px;
+      border-radius: 99px;
+      background: var(--ok);
+      color: #0c0f0c;
+      font: 600 9px/15px var(--font-mono);
+      text-align: center;
+      padding: 0 3px;
     }
     .toast {
       bottom: 70px;

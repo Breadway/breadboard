@@ -570,3 +570,428 @@ pub async fn set_notification_prefs(
 ) -> AppResult<Json<store::NotificationPrefs>> {
     Ok(Json(store::set_prefs(&app.db, user.0.id, prefs).await?))
 }
+
+// --- agent claims -----------------------------------------------------------
+use breadboard_core::{AgentState, ClaimMode};
+
+/// Stale threshold for the live signal: 5 minutes without a heartbeat.
+pub const CLAIM_STALE_SECS: i64 = 300;
+
+fn claim_is_stale(claim: &breadboard_core::AgentClaim) -> bool {
+    (chrono::Utc::now() - claim.last_heartbeat).num_seconds() >= CLAIM_STALE_SECS
+}
+
+/// Counts for exclusive claims only: an intent is a reservation, not work.
+fn exclusive(claims: &[breadboard_core::AgentClaim]) -> Vec<&breadboard_core::AgentClaim> {
+    claims.iter().filter(|c| c.mode == ClaimMode::Exclusive).collect()
+}
+
+fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
+    let work = exclusive(claims);
+    let queued = claims.len() - work.len();
+    let mut done = 0i64;
+    let mut active = 0i64;
+    let mut review = 0i64;
+    let mut verifying = 0i64;
+    let mut blocked = 0i64;
+    for c in &work {
+        match c.state {
+            AgentState::Done => done += 1,
+            AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,
+            AgentState::AwaitingReview | AgentState::AwaitingCi | AgentState::AwaitingMerge => {
+                review += 1
+            }
+            AgentState::Verifying => verifying += 1,
+            AgentState::Blocked | AgentState::NeedsUser => blocked += 1,
+        }
+    }
+    let total = work.len() as i64;
+    let mut parts = vec![format!("BB {done}/{total} done")];
+    if active > 0 {
+        parts.push(format!("{active} active"));
+    }
+    if review > 0 {
+        parts.push(format!("{review} review/CI/merge"));
+    }
+    if verifying > 0 {
+        parts.push(format!("{verifying} verifying"));
+    }
+    if blocked > 0 {
+        parts.push(format!("{blocked} blocked"));
+    }
+    if queued > 0 {
+        parts.push(format!("{queued} queued"));
+    }
+    parts.push(format!("{} remaining", total - done));
+    parts.join(", ")
+}
+
+pub async fn list_agents(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<Vec<breadboard_core::AgentClaim>>> {
+    Ok(Json(store::list_claims(&app.db).await?))
+}
+
+pub async fn agent_status(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<breadboard_core::dto::AgentStatusSummary>> {
+    let claims = store::list_claims(&app.db).await?;
+    let work = exclusive(&claims);
+    let queued = (claims.len() - work.len()) as i64;
+    let stale = work.iter().filter(|c| claim_is_stale(c)).count() as i64;
+    let live = work.len() as i64 - stale;
+    let line = agent_line(&claims);
+    let mut done = 0i64;
+    let mut active = 0i64;
+    let mut review = 0i64;
+    let mut verifying = 0i64;
+    let mut blocked = 0i64;
+    for c in &work {
+        match c.state {
+            AgentState::Done => done += 1,
+            AgentState::Implementing | AgentState::Reworking | AgentState::Planned => active += 1,
+            AgentState::AwaitingReview | AgentState::AwaitingCi | AgentState::AwaitingMerge => {
+                review += 1
+            }
+            AgentState::Verifying => verifying += 1,
+            AgentState::Blocked | AgentState::NeedsUser => blocked += 1,
+        }
+    }
+    let total = work.len() as i64;
+    Ok(Json(breadboard_core::dto::AgentStatusSummary {
+        total,
+        live,
+        stale,
+        queued,
+        done,
+        active,
+        review,
+        verifying,
+        blocked,
+        remaining: total - done,
+        line,
+        claims,
+    }))
+}
+
+/// Claim an issue. `exclusive` (default) is first-wins and moves a
+/// backlog/todo card to `doing`, assigning it to the claimer. `intent` is a
+/// soft reservation: it never blocks another agent and never moves the card.
+pub async fn claim_issue(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Json(body): Json<breadboard_core::dto::ClaimUpsert>,
+) -> AppResult<(StatusCode, Json<breadboard_core::AgentClaim>)> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    if issue.issue_type == breadboard_core::IssueType::Pr {
+        return Err(crate::error::AppError::bad_request(
+            "cannot claim a PR card",
+        ));
+    }
+    let mode = body.mode.unwrap_or(ClaimMode::Exclusive);
+    let claim = store::insert_claim(&app.db, &issue, user.0.id, &body).await?;
+    let audit = store::log_claim_event(
+        &app.db,
+        issue.id,
+        "agent_claim",
+        None,
+        Some(&format!("{} ({})", claim.agent_name, claim.mode.as_str())),
+        Some(user.0.id),
+    )
+    .await;
+    if let Err(e) = audit {
+        tracing::warn!(error = %e, key = %key, "claim audit write failed");
+    }
+
+    // Side-effect only for exclusive work: backlog/todo → doing + assign.
+    if mode == ClaimMode::Exclusive
+        && (matches!(
+            issue.status,
+            breadboard_core::Status::Backlog | breadboard_core::Status::Todo
+        ) || issue.assignee_id.is_none())
+    {
+        let patch = breadboard_core::dto::IssuePatch {
+            status: if matches!(
+                issue.status,
+                breadboard_core::Status::Backlog | breadboard_core::Status::Todo
+            ) {
+                Some(breadboard_core::Status::Doing)
+            } else {
+                None
+            },
+            assignee_id: if issue.assignee_id.is_none() {
+                Some(Some(user.0.id))
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        if !patch.is_empty() {
+            let before = issue.clone();
+            let updated = store::update_issue(
+                &app.db,
+                &key,
+                &patch,
+                Some(user.0.id),
+                SyncSource::Breadboard,
+            )
+            .await?;
+            if updated.status != before.status {
+                app.bus.publish(BoardEvent::CardMoved {
+                    id: updated.id,
+                    key: updated.key.clone(),
+                    from: before.status,
+                    to: updated.status,
+                });
+            }
+            if updated.assignee_id != before.assignee_id {
+                app.bus.publish(BoardEvent::CardAssigned {
+                    id: updated.id,
+                    key: updated.key.clone(),
+                    assignee_id: updated.assignee_id,
+                });
+            }
+            store::refresh_claim_board_status(&app.db, issue.id, updated.status).await?;
+            sync::writeback(&app, &before, &updated).await;
+        }
+    }
+    let claim = store::get_claim_by_id(&app.db, claim.id)
+        .await?
+        .unwrap_or(claim);
+    app.bus.publish(BoardEvent::AgentClaimed {
+        id: claim.issue_id,
+        key: claim.key.clone(),
+        agent: claim.agent_name.clone(),
+        mode: claim.mode.as_str().to_string(),
+        session_id: claim.session_id.clone(),
+        state: claim.state.as_str().to_string(),
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::AgentClaimed {
+            id: claim.issue_id,
+            key: claim.key.clone(),
+            agent: claim.agent_name.clone(),
+            mode: claim.mode.as_str().to_string(),
+            session_id: claim.session_id.clone(),
+            state: claim.state.as_str().to_string(),
+        },
+    );
+    Ok((StatusCode::CREATED, Json(claim)))
+}
+
+/// Pick the caller's claim on this issue. `agent` (query, optional) and
+/// `session_id` (body, optional) disambiguate when one user owns several.
+async fn resolve_own_claim(
+    app: &AppState,
+    issue_id: i64,
+    user_id: i64,
+    agent: Option<&str>,
+    mode: Option<ClaimMode>,
+    session_id: Option<&str>,
+) -> AppResult<breadboard_core::AgentClaim> {
+    let mut claims = store::find_user_claims(&app.db, issue_id, user_id, agent).await?;
+    if let Some(mode) = mode {
+        claims.retain(|c| c.mode == mode);
+    }
+    // Prefer the exclusive claim, then the freshest one. Never fail just
+    // because one agent also has an intent on the issue it is working.
+    claims.sort_by(|a, b| {
+        (a.mode == ClaimMode::Intent)
+            .cmp(&(b.mode == ClaimMode::Intent))
+            .then_with(|| b.last_heartbeat.cmp(&a.last_heartbeat))
+    });
+    if let Some(session) = session_id {
+        if let Some(matched) = claims.iter().find(|c| c.session_id.as_deref() == Some(session)) {
+            return Ok(matched.clone());
+        }
+    }
+    claims
+        .into_iter()
+        .next()
+        .ok_or(crate::error::AppError::NotFound)
+}
+
+#[derive(Deserialize)]
+pub struct ClaimQuery {
+    /// Agent name, when the caller owns more than one claim on the issue.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// `exclusive` or `intent`, when the same agent holds both.
+    #[serde(default)]
+    pub mode: Option<ClaimMode>,
+}
+
+/// Heartbeat / field update. Only the claiming user may update; when both
+/// sides carry a `session_id` they must match (prevents a second agent with
+/// the same login from hijacking the claim). Setting a new `pr_url` also
+/// comments the PR link on the issue so it syncs to Forgejo.
+pub async fn heartbeat_claim(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Query(q): Query<ClaimQuery>,
+    Json(body): Json<breadboard_core::dto::ClaimUpdate>,
+) -> AppResult<Json<breadboard_core::AgentClaim>> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    if let Some(Some(url)) = &body.pr_url {
+        if !breadboard_core::dto::is_safe_http_url(url) {
+            return Err(crate::error::AppError::bad_request(
+                "pr_url must be an absolute http(s) URL",
+            ));
+        }
+    }
+    let session = body
+        .session_id
+        .as_ref()
+        .and_then(|v| v.as_deref());
+    let existing = resolve_own_claim(
+        &app,
+        issue.id,
+        user.0.id,
+        q.agent.as_deref(),
+        q.mode,
+        session,
+    )
+    .await?;
+    if let (Some(Some(want_inner)), Some(have)) = (&body.session_id, &existing.session_id) {
+        // Outer Some = field present, inner Some = set (not clear). A present
+        // session that disagrees with the active claim is a 409, not a hijack.
+        if want_inner.as_str() != have {
+            return Err(crate::error::AppError::Conflict(
+                "session_id does not match the active claim".into(),
+            ));
+        }
+    }
+    let claim = store::update_claim(&app.db, existing.id, &body).await?;
+
+    // Audit the meaningful transitions, not every heartbeat.
+    if existing.state != claim.state {
+        let _ = store::log_claim_event(
+            &app.db,
+            issue.id,
+            "agent_state",
+            Some(existing.state.as_str()),
+            Some(claim.state.as_str()),
+            Some(user.0.id),
+        )
+        .await;
+    }
+    if claim.pr_url.is_some() && claim.pr_url != existing.pr_url {
+        let url = claim.pr_url.clone().unwrap_or_default();
+        let _ = store::log_claim_event(
+            &app.db,
+            issue.id,
+            "agent_pr",
+            existing.pr_url.as_deref(),
+            Some(&url),
+            Some(user.0.id),
+        )
+        .await;
+        // Comment once per URL so the PR link reaches the Forgejo thread
+        // without spamming it on every heartbeat.
+        let already = store::list_comments(&app.db, issue.id)
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|c| c.body.contains(&url));
+        if !already {
+            if let Ok(comment) = store::create_comment(
+                &app.db,
+                issue.id,
+                Some(user.0.id),
+                &format!("Pull request: {url}"),
+            )
+            .await
+            {
+                sync::writeback_comment(&app, &issue, comment.id, &comment.body).await;
+            }
+        }
+    }
+
+    app.bus.publish(BoardEvent::AgentUpdated {
+        id: claim.issue_id,
+        key: claim.key.clone(),
+        agent: claim.agent_name.clone(),
+        mode: claim.mode.as_str().to_string(),
+        session_id: claim.session_id.clone(),
+        state: claim.state.as_str().to_string(),
+    });
+    Ok(Json(claim))
+}
+
+/// Release the caller's claim on an issue. `?agent=` disambiguates when the
+/// caller holds more than one. The card keeps its status; only the tint goes
+/// away. Intents are released the same way.
+pub async fn release_claim(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(key): Path<String>,
+    Query(q): Query<ClaimQuery>,
+) -> AppResult<StatusCode> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    let claim =
+        resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), q.mode, None).await?;
+    store::delete_claim_by_id(&app.db, claim.id).await?;
+    let _ = store::log_claim_event(
+        &app.db,
+        issue.id,
+        "agent_release",
+        Some(&format!("{} ({})", claim.agent_name, claim.mode.as_str())),
+        None,
+        Some(user.0.id),
+    )
+    .await;
+    app.bus.publish(BoardEvent::AgentReleased {
+        id: issue.id,
+        key: issue.key.clone(),
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::AgentReleased {
+            id: issue.id,
+            key: issue.key.clone(),
+        },
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Release one claim by id (the Agents page uses this so each row is
+/// independently releasable). Only the owner may release.
+pub async fn release_claim_by_id(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    let claim = store::get_claim_by_id(&app.db, id)
+        .await?
+        .ok_or(crate::error::AppError::NotFound)?;
+    if claim.claimed_by != user.0.id {
+        return Err(crate::error::AppError::forbidden());
+    }
+    store::delete_claim_by_id(&app.db, id).await?;
+    let _ = store::log_claim_event(
+        &app.db,
+        claim.issue_id,
+        "agent_release",
+        Some(&format!("{} ({})", claim.agent_name, claim.mode.as_str())),
+        None,
+        Some(user.0.id),
+    )
+    .await;
+    app.bus.publish(BoardEvent::AgentReleased {
+        id: claim.issue_id,
+        key: claim.key.clone(),
+    });
+    notify::emit_bread(
+        &app,
+        &BoardEvent::AgentReleased {
+            id: claim.issue_id,
+            key: claim.key.clone(),
+        },
+    );
+    Ok(StatusCode::NO_CONTENT)
+}

@@ -40,3 +40,10 @@ const FIXED: Record<string, string> = {
 export function labelColor(label: string): string {
   return FIXED[label.toLowerCase()] ?? PALETTE[hash(label.toLowerCase()) % PALETTE.length];
 }
+
+// One stable tint per agent name, so each agent's claimed cards read as
+// theirs on the board and on the Agents page. Salted so agent hues don't
+// track project hues for the same string.
+export function agentColor(name: string): string {
+  return PALETTE[hash(`agent:${name.toLowerCase().trim()}`) % PALETTE.length];
+}

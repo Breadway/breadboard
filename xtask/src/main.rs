@@ -82,6 +82,26 @@ fn all_event_names() -> Vec<&'static str> {
             id: 0,
             key: String::new(),
         },
+        AgentClaimed {
+            id: 0,
+            key: String::new(),
+            agent: String::new(),
+            mode: String::new(),
+            session_id: None,
+            state: String::new(),
+        },
+        AgentUpdated {
+            id: 0,
+            key: String::new(),
+            agent: String::new(),
+            mode: String::new(),
+            session_id: None,
+            state: String::new(),
+        },
+        AgentReleased {
+            id: 0,
+            key: String::new(),
+        },
         CycleStarted {
             id: 0,
             name: String::new(),

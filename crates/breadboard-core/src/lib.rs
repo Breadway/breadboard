@@ -349,3 +349,115 @@ pub struct Notification {
     pub read: bool,
     pub created_at: DateTime<Utc>,
 }
+
+/// Lifecycle state of an agent working an issue. Mirrors the durable
+/// `~/.config/breadboard` session states used by the opencode `bb-status`
+/// widget, so the server-side Agents page speaks the same language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentState {
+    Planned,
+    Implementing,
+    AwaitingReview,
+    Reworking,
+    AwaitingCi,
+    AwaitingMerge,
+    Verifying,
+    Blocked,
+    NeedsUser,
+    Done,
+}
+
+impl AgentState {
+    pub const ALL: [AgentState; 10] = [
+        AgentState::Planned,
+        AgentState::Implementing,
+        AgentState::AwaitingReview,
+        AgentState::Reworking,
+        AgentState::AwaitingCi,
+        AgentState::AwaitingMerge,
+        AgentState::Verifying,
+        AgentState::Blocked,
+        AgentState::NeedsUser,
+        AgentState::Done,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentState::Planned => "planned",
+            AgentState::Implementing => "implementing",
+            AgentState::AwaitingReview => "awaiting-review",
+            AgentState::Reworking => "reworking",
+            AgentState::AwaitingCi => "awaiting-ci",
+            AgentState::AwaitingMerge => "awaiting-merge",
+            AgentState::Verifying => "verifying",
+            AgentState::Blocked => "blocked",
+            AgentState::NeedsUser => "needs-user",
+            AgentState::Done => "done",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+/// Whether a claim is exclusive work or a soft intent. Exclusive claims are
+/// unique per issue and move the card to `doing`; intents are reservations
+/// that show interest without blocking anyone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimMode {
+    #[default]
+    Exclusive,
+    Intent,
+}
+
+impl ClaimMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaimMode::Exclusive => "exclusive",
+            ClaimMode::Intent => "intent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "exclusive" => Some(ClaimMode::Exclusive),
+            "intent" => Some(ClaimMode::Intent),
+            _ => None,
+        }
+    }
+}
+
+/// One active agent claim on an issue. At most one *exclusive* claim exists
+/// per issue (the first wins; a second agent gets 409 until the first releases
+/// or re-claims). Additional `intent` claims may coexist: they reserve
+/// interest in queued work without changing the card or blocking another
+/// agent. `last_heartbeat` drives the live/stale signal on the Agents page;
+/// claims never auto-expire server-side.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentClaim {
+    pub id: i64,
+    pub issue_id: i64,
+    pub key: String,
+    pub issue_title: String,
+    pub issue_status: Status,
+    pub claimed_by: i64,
+    pub claimed_by_login: String,
+    pub agent_name: String,
+    pub mode: ClaimMode,
+    pub session_id: Option<String>,
+    pub state: AgentState,
+    pub note: Option<String>,
+    pub branch: Option<String>,
+    pub worktree: Option<String>,
+    pub repo: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
+    pub head_sha: Option<String>,
+    pub board_status: Status,
+    pub claimed_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_heartbeat: DateTime<Utc>,
+}

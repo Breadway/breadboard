@@ -15,6 +15,7 @@ export interface Health {
   status: string;
   version: string;
   db: boolean;
+  dev_login?: boolean;
 }
 
 export interface User {
@@ -203,6 +204,108 @@ export interface IssueFilter {
   mine?: boolean;
 }
 
+export type AgentState =
+  | "planned"
+  | "implementing"
+  | "awaiting-review"
+  | "reworking"
+  | "awaiting-ci"
+  | "awaiting-merge"
+  | "verifying"
+  | "blocked"
+  | "needs-user"
+  | "done";
+
+export type ClaimMode = "exclusive" | "intent";
+
+export const AGENT_STATES: AgentState[] = [
+  "planned",
+  "implementing",
+  "awaiting-review",
+  "reworking",
+  "awaiting-ci",
+  "awaiting-merge",
+  "verifying",
+  "blocked",
+  "needs-user",
+  "done",
+];
+
+/** Only absolute http(s) URLs may become links (blocks javascript: etc). */
+export function safeHttpUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const u = url.trim();
+  return /^https?:\/\/[^\s]+$/i.test(u) ? u : null;
+}
+
+export interface AgentClaim {
+  id: number;
+  issue_id: number;
+  key: string;
+  issue_title: string;
+  issue_status: Status;
+  claimed_by: number;
+  claimed_by_login: string;
+  agent_name: string;
+  mode: ClaimMode;
+  session_id: string | null;
+  state: AgentState;
+  note: string | null;
+  branch: string | null;
+  worktree: string | null;
+  repo: string | null;
+  pr_url: string | null;
+  pr_number: number | null;
+  head_sha: string | null;
+  board_status: Status;
+  claimed_at: string;
+  updated_at: string;
+  last_heartbeat: string;
+}
+
+export interface ClaimUpsert {
+  agent_name: string;
+  /** exclusive (default): real work, first-wins. intent: soft reservation. */
+  mode?: ClaimMode;
+  session_id?: string;
+  state?: AgentState;
+  note?: string;
+  branch?: string;
+  worktree?: string;
+  repo?: string;
+  pr_url?: string;
+  pr_number?: number;
+  head_sha?: string;
+}
+
+export interface ClaimUpdate {
+  agent_name?: string;
+  state?: AgentState;
+  session_id?: string | null;
+  note?: string | null;
+  branch?: string | null;
+  worktree?: string | null;
+  repo?: string | null;
+  pr_url?: string | null;
+  pr_number?: number | null;
+  head_sha?: string | null;
+}
+
+export interface AgentStatusSummary {
+  total: number;
+  live: number;
+  stale: number;
+  queued: number;
+  done: number;
+  active: number;
+  review: number;
+  verifying: number;
+  blocked: number;
+  remaining: number;
+  line: string;
+  claims: AgentClaim[];
+}
+
 // Mirrors breadboard_core::event::BoardEvent (serde tag = "type").
 export type BoardEvent =
   | { type: "card.created"; id: number; key: string }
@@ -222,7 +325,10 @@ export type BoardEvent =
       winner: "breadboard" | "forgejo";
       at: string;
     }
-  | { type: "notified"; user_id: number };
+  | { type: "notified"; user_id: number }
+  | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
+  | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
+  | { type: "agent.released"; id: number; key: string };
 
 export class ApiError extends Error {
   constructor(
@@ -342,6 +448,17 @@ export class BreadboardClient {
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
   getActivity = (key: string) =>
     this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
+
+  listAgents = () => this.req<AgentClaim[]>("GET", "/api/agents");
+  agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");
+  claimIssue = (key: string, claim: ClaimUpsert) =>
+    this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
+  heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>
+    this.req<AgentClaim>("PUT", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`, update);
+  releaseClaim = (key: string, agent?: string) =>
+    this.req<void>("DELETE", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
+  releaseClaimById = (id: number) =>
+    this.req<void>("DELETE", `/api/claims/${id}`);
 
   /**
    * Subscribe to the live event stream. `onStatus(true|false)` reports the

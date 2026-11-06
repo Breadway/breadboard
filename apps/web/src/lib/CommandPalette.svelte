@@ -90,9 +90,10 @@
       v("Board", "board"),
       v("Backlog", "backlog"),
       v("Roadmap", "roadmap"),
+      v("Agents", "agents"),
       v("Inbox", "inbox"),
       v("Settings", "settings"),
-      { kind: "view", label: store.filterMine ? "Show everyone's issues" : "Show only issues assigned to me", go: () => (store.filterMine = !store.filterMine) },
+      { kind: "view", label: store.me && store.isFiltered("assignees", store.me.id) ? "Show everyone's issues" : "Show only issues assigned to me", go: () => store.toggleMine() },
     ];
   }
 
@@ -104,9 +105,9 @@
       optBody = "";
       optPriority = "";
       optLabels = "";
-      optProject = store.filterProject;
-      optEpic = store.filterEpic;
-      optCycle = store.filterCycle;
+      optProject = store.filters.projects.length === 1 ? store.filters.projects[0] : "";
+      optEpic = store.filters.epics.length === 1 ? store.filters.epics[0] : 0;
+      optCycle = store.filters.cycles.length === 1 ? store.filters.cycles[0] : 0;
       optEstimate = "";
       queueMicrotask(() => inputEl?.focus());
     }
@@ -135,6 +136,14 @@
       const priority = q.priority ?? optPriority;
       if (priority) input.priority = priority;
       const project = q.project ?? optProject;
+      // No silent default when there is a choice: a title-only card must not
+      // land in whichever project happens to be first (or in a repo tracker
+      // it doesn't belong to). Ask instead.
+      if (!project && store.projects.filter((p) => !p.archived).length > 1) {
+        showOptions = true;
+        store.flash("Choose a project for this issue", "error");
+        return;
+      }
       if (project) input.project = project;
       if (optEpic) input.epic_id = optEpic;
       if (optCycle) input.cycle_id = optCycle;

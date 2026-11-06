@@ -196,6 +196,18 @@ async fn existing_unlinked_card_is_repaired_without_changing_its_key() {
 #[tokio::test]
 async fn repositoryless_import_stays_local() {
     let app = common::spawn().await;
+    // No catch-all project is seeded any more; the test creates the native
+    // project it files into.
+    store::create_project(
+        &app.db,
+        &breadboard_core::dto::NewProject {
+            key: "ROAD".into(),
+            name: "Roadmap".into(),
+            forgejo_repo: None,
+        },
+    )
+    .await
+    .unwrap();
     let result = import::run(
         &app.state,
         &ImportRequest {

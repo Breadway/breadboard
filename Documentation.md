@@ -6,8 +6,9 @@ verifies the event names and workflow statuses below still match the code; CI
 enforces it.
 
 Status: **deployed** at `breadboard.breadway.dev`. Server (REST CRUD, OAuth2,
-SSE), the Svelte web client (board with keyboard nav · backlog · roadmap/epics ·
-issue drawer with activity timeline · notification bell · settings · `cmd-k`),
+SSE), the Svelte web client (board with keyboard nav and per-agent claim tints ·
+backlog · roadmap/epics · Agents live page · issue drawer with claim controls and
+activity timeline · notification bell · settings · `cmd-k`),
 the `breadboard` CLI + `ratatui` TUI (device-flow auth), the Forgejo sync engine
 (bidirectional issues / comments / PR mirroring / milestone), and notifications
 (assigned / @mention / cycle, with a `notified` SSE event, browser pop-ups, and
@@ -15,6 +16,12 @@ best-effort `bread-emit` for a co-located breadd; see `modules/breadboard.lua`).
 
 Web board keys: `h`/`l`/`←`/`→` column, `j`/`k`/`↑`/`↓` card, `[`/`]` move card
 between statuses, `enter`/`e` open, `c` command palette.
+
+Filtering is multi-select and composable: project, cycle, epic, status,
+priority, label, assignee (including unassigned), agent name, agent claim state,
+claimed/unclaimed, issue type, and free text. Facets combine with AND, values
+inside one facet with OR, so any number can be active at once. Active filters
+show as removable chips in the top bar.
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -29,6 +36,65 @@ One global workflow, no per-project variants:
 
 `done` is the only status that maps to a **closed** Forgejo issue; `backlog`
 through `review` are **open**.
+
+Agents claim issues on top of this workflow. There are two claim modes:
+
+- **exclusive** (default): real work. At most one per issue, first claim wins
+  (`409` otherwise). Claiming from `backlog`/`todo` moves the card to `doing`
+  and assigns it to the claimer, tinting the card on the board.
+- **intent**: a soft reservation for work you plan to take later. Any number
+  may coexist per issue (one per agent), it never blocks an exclusive claim,
+  and it never moves or assigns the card. It shows as "queued" on the Agents
+  page and issue drawer.
+
+Releasing keeps the status and only removes the tint. A claim with no
+heartbeat for 5+ minutes reads as **stale** for exclusive work on the Agents
+page but never auto-expires: only an explicit release (or a new claim after
+release) removes it. Claim, state, PR and release transitions are appended to
+the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
+`agent_release`; routine heartbeats that change nothing are not logged.
+
+### Agent ownership and orchestration
+
+Ownership is per issue, not per agent: one agent may hold many exclusive
+claims, and the Agents tab groups them under that agent with each issue's
+state and an overall done/total ring.
+
+- An **exclusive claim is accountability** for one issue. Keep it with the
+  agent that will actually finish that issue.
+- An **orchestrator owns its own umbrella issue**, not its subagents' issues.
+  A subagent that does real work gets its own issue (or slice issue linked to
+  the parent) and claims that one exclusively. Sharing a single exclusive
+  claim across a tree of agents hides who is responsible, makes one agent's
+  completion look better than it is, and blocks subagents from claiming.
+- Subagents that are only waiting, observing, or queued use **intent** claims
+  on the parent: intents never move the card or block the owner, and show as
+  "queued" in the agent group.
+- Roll up across the tree with epics or links (parent `blocks`/`relates-to`
+  child), not by merging claims. That keeps the server roll-up, the board
+  tint, and per-agent completion honest.
+
+### Where work belongs
+
+A project is the routing decision, not a label. File an issue where the work
+actually lives:
+
+- **Repo-backed projects** (`forgejo_repo` set, e.g. `BREAD` → `Breadway/bread`)
+  are for that repo's code. Their cards sync to the repo's tracker, so local
+  machine config, dotfiles, environment breakage, or a misbehaving bread module
+  do **not** belong there: they would pollute the repo's issue list.
+- **Native (repo-less) projects** are for work that has no repo of its own:
+  the machine, tooling, homelab operations, or several repos at once.
+- **A new project that is not on Forgejo yet** gets its own native project in
+  breadboard now and is tracked there; attach the repo later
+  (`PATCH /api/projects/{id}` with `forgejo_repo`, or `POST /api/repos`).
+- **No catch-all.** `ROAD` is no longer seeded and must not be used as a
+  dumping ground for unrelated work. On an existing database where it holds
+  cards, move each one to the project that owns it (`PUT
+  /api/issues/{key}/project`) rather than adding more.
+
+If no existing project clearly owns the work, create the right one instead of
+guessing; an issue filed in the wrong project is worse than a new project key.
 
 Priority: `none` · `low` · `medium` · `high` · `urgent`.
 
@@ -49,7 +115,7 @@ neither is valid.
 
 | Method | Path | Notes |
 | --- | --- | --- |
-| `GET` | `/healthz` | `{ status, version, db }`; `503` if the DB is unreachable |
+| `GET` | `/healthz` | `{ status, version, db, dev_login }`; `503` if the DB is unreachable |
 | `GET` | `/events` | Authenticated SSE stream of `BoardEvent` (see below); browser EventSource sends the session cookie, CLI/TUI clients use a bearer token |
 | `GET` | `/auth/login` | redirect to Forgejo OAuth2 authorize (sets a state cookie) |
 | `GET` | `/auth/callback` | exchange code, upsert user, set session, redirect to `/` |
@@ -77,13 +143,19 @@ selecting that project's id. No selected cycle means no default. Multiple matchi
 open cycles return `409 conflict`; callers must provide `cycle_id`. Explicit cycle
 assignment always takes precedence. Changing project selections never moves existing
 issues. Markdown imports use the same issue-creation rule.
-| `POST` | `/api/issues` | create; only `title` required. `project` defaults to the first non-archived project; key allocated from that project's counter. `201` |
+| `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. `201` |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
+| `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. `?agent=` / `?mode=exclusive|intent` pick one when you hold several; with neither, the exclusive claim wins over an intent and the freshest wins otherwise. Only the claiming user may update, and a mismatched `session_id` is `409`. `pr_url` must be an absolute http(s) URL. A newly set `pr_url` also comments the link on the issue once (synced to Forgejo). Emits `agent.updated` |
+| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
+| `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
+| `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
+| `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -142,6 +214,9 @@ after reconnecting to recover missed changes.
 | `card.moved` | `bread.board.card.moved` | `id`, `key`, `from`, `to` |
 | `card.assigned` | `bread.board.card.assigned` | `id`, `key`, `assignee_id` |
 | `card.deleted` | `bread.board.card.deleted` | `id`, `key` |
+| `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
+| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
+| `agent.released` | `bread.board.agent.released` | `id`, `key` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
@@ -237,15 +312,21 @@ repo with no mapped project are skipped with a warning.
 | `ping` | connectivity check |
 | `auth login` | device flow: prints a code + URL, opens the browser, polls until approved |
 | `auth logout` · `auth status` | |
-| `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name |
+| `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name; `--project` is required once more than one project exists |
+| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project, the right home for a new project that has no repo yet |
 | `mv <key> <status>` | |
+| `claim <key> --agent NAME [--mode exclusive\|intent] [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | claim an issue; `exclusive` (default) is first-wins and moves backlog/todo to doing + assigns it, `intent` queues interest without moving or blocking |
+| `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID] [--every SECS]` | heartbeat / update your claim; `--every` keeps repeating until interrupted (wrap long runs so they never go stale) |
+| `release <key> [--agent NAME]` | release your claim (status stays, tint goes away) |
+| `agents list [--stale]` | live agent claims with mode, state and heartbeat |
+| `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
 | `show <key>` | issue + comments |
 | `activity <key>` | change history |
 | `inbox [--read]` | your notifications; `--read` marks all read |
 | `comment <key> "<text>"` | add a comment (pushed to Forgejo if linked) |
-| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project |
+| `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project, the right home for a new project that has no repo yet |
 | `epic list` · `epic new <KEY> <TITLE> [--project]` · `epic rename <KEY> <TITLE>` · `epic archive`/`unarchive <KEY>` | `list` shows done/total |
 | `cycle list` · `cycle new <name> <start> <end>` · `cycle start <name>` · `cycle end <name>` | dates `YYYY-MM-DD` |
 | `repos list` · `repos add <owner/name> <key> [--name N]` · `repos remove <owner/name>` | |
@@ -274,8 +355,19 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `create_project` / `update_project` / `create_cycle` / `start_cycle` /
 `end_cycle`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
+`claim_issue` / `update_claim` (heartbeat) / `release_claim` / `list_agents` /
+`agent_status`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
+
+Agent rule (also in the `claim_issue` / `update_issue` / `move_issue` tool
+descriptions): **claim first, keep the heartbeat alive, release when done**.
+No implementation work without an exclusive claim; `409` means another agent
+holds it, so pick other work instead of fighting the lock. `mode: "intent"`
+queues interest in work you are not starting yet. The MCP server auto-
+heartbeats every claim it creates every 60 seconds while it is running, so an
+agent using MCP cannot go stale mid-run; CLI-driven agents pass
+`heartbeat --every 60` (or loop it) for the same guarantee.
 
 ## Operations
 

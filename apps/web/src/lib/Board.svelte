@@ -22,7 +22,15 @@
   const columns = $derived(all.map((list, i) => (STATUSES[i] === "done" ? list.slice(0, DONE_LIMIT) : list)));
   const points = $derived(all.map((list) => list.reduce((a, i) => a + (i.estimate ?? 0), 0)));
 
-  const stripCycle = $derived(store.cycles.find((c) => c.id === store.filterCycle) ?? store.activeCycle);
+  // A single explicitly selected cycle drives the strip; with several
+  // selected, one strip would be misleading, so hide it.
+  const stripCycle = $derived(
+    store.filters.cycles.length === 0
+      ? store.activeCycle
+      : store.filters.cycles.length === 1
+        ? store.cycles.find((c) => c.id === store.filters.cycles[0])
+        : undefined,
+  );
 
   function clamp() {
     col = Math.max(0, Math.min(col, 4));

@@ -50,6 +50,30 @@ pub enum BoardEvent {
     /// A user has a new in-app notification. Clients filter by their own id.
     #[serde(rename = "notified")]
     Notified { user_id: i64 },
+    /// An agent claimed an issue (exclusive). Clients re-fetch the Agents
+    /// view and tint the claimed card.
+    #[serde(rename = "agent.claimed")]
+    AgentClaimed {
+        id: i64,
+        key: String,
+        agent: String,
+        mode: String,
+        session_id: Option<String>,
+        state: String,
+    },
+    /// A claim heartbeat / field update.
+    #[serde(rename = "agent.updated")]
+    AgentUpdated {
+        id: i64,
+        key: String,
+        agent: String,
+        mode: String,
+        session_id: Option<String>,
+        state: String,
+    },
+    /// A claim was released. The card returns to its normal colour.
+    #[serde(rename = "agent.released")]
+    AgentReleased { id: i64, key: String },
 }
 
 impl BoardEvent {
@@ -65,6 +89,9 @@ impl BoardEvent {
             BoardEvent::CycleEnded { .. } => "bread.board.cycle.ended",
             BoardEvent::SyncDrift { .. } => "bread.board.sync.drift",
             BoardEvent::Notified { .. } => "bread.board.notified",
+            BoardEvent::AgentClaimed { .. } => "bread.board.agent.claimed",
+            BoardEvent::AgentUpdated { .. } => "bread.board.agent.updated",
+            BoardEvent::AgentReleased { .. } => "bread.board.agent.released",
         }
     }
 }

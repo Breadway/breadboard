@@ -29,6 +29,8 @@ pub struct Health {
     pub status: String,
     pub version: String,
     pub db: bool,
+    #[serde(default)]
+    pub dev_login: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -364,6 +366,56 @@ impl Client {
 
     pub async fn reconcile(&self) -> Result<()> {
         self.send_empty(self.build(reqwest::Method::POST, "/api/sync/reconcile"))
+            .await
+    }
+
+    // --- agent claims --------------------------------------------------
+
+    pub async fn list_agents(&self) -> Result<Vec<breadboard_core::AgentClaim>> {
+        self.send(self.build(reqwest::Method::GET, "/api/agents")).await
+    }
+
+    pub async fn agent_status(&self) -> Result<breadboard_core::dto::AgentStatusSummary> {
+        self.send(self.build(reqwest::Method::GET, "/api/agents/status"))
+            .await
+    }
+
+    pub async fn claim_issue(
+        &self,
+        key: &str,
+        claim: &breadboard_core::dto::ClaimUpsert,
+    ) -> Result<breadboard_core::AgentClaim> {
+        self.send(
+            self.build(reqwest::Method::POST, &format!("/api/issues/{key}/claim"))
+                .json(claim),
+        )
+        .await
+    }
+
+    pub async fn heartbeat_claim(
+        &self,
+        key: &str,
+        agent: Option<&str>,
+        update: &breadboard_core::dto::ClaimUpdate,
+    ) -> Result<breadboard_core::AgentClaim> {
+        let mut rb = self.build(reqwest::Method::PUT, &format!("/api/issues/{key}/claim"));
+        if let Some(agent) = agent {
+            rb = rb.query(&[("agent", agent)]);
+        }
+        self.send(rb.json(update)).await
+    }
+
+    pub async fn release_claim(&self, key: &str, agent: Option<&str>) -> Result<()> {
+        let mut rb = self.build(reqwest::Method::DELETE, &format!("/api/issues/{key}/claim"));
+        if let Some(agent) = agent {
+            rb = rb.query(&[("agent", agent)]);
+        }
+        self.send_empty(rb).await
+    }
+
+    /// Release one claim by its id (multi-claim issues, Agents page).
+    pub async fn release_claim_by_id(&self, id: i64) -> Result<()> {
+        self.send_empty(self.build(reqwest::Method::DELETE, &format!("/api/claims/{id}")))
             .await
     }
 
