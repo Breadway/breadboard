@@ -140,7 +140,9 @@ fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
 /// - A closed PR (merged or not) appears as `done` on the board.
 /// - On merge (`pr_merged`): targets go to `done`, unless the target carries
 ///   the label `verify-before-done` (case-insensitive), in which case the
-///   target goes to `review` instead.
+///   target goes to `review` instead. This override applies at the moment the
+///   close is first observed (`just_closed`); a later, explicit move to `done`
+///   is not reverted by subsequent syncs.
 /// - On closed-unmerged (`pr_closed && !pr_merged`): never move targets to
 ///   `done`. Targets stay in their current status. If a target is `done`,
 ///   move it to `review` (undoing a completion the rejected PR had caused).
@@ -156,6 +158,7 @@ async fn sync_pr_closes(
     body: &str,
     pr_closed: bool,
     pr_merged: bool,
+    just_closed: bool,
 ) {
     let mut targets = Vec::new();
     for number in parse_closes_refs(body) {
@@ -191,6 +194,12 @@ async fn sync_pr_closes(
             .any(|l| l.eq_ignore_ascii_case("verify-before-done"));
 
         if pr_merged {
+            // A labelled target is held in review when the merge is first
+            // seen. Once it has been verified and moved to done, later syncs
+            // must not drag it back to review.
+            if has_verify && !just_closed && target.status == Status::Done {
+                continue;
+            }
             let desired = if has_verify {
                 Status::Review
             } else {
@@ -244,8 +253,9 @@ async fn sync_pr_closes(
                 }
             }
         } else {
-            // closed-unmerged: never complete; revert done targets to review.
-            if target.status != Status::Done {
+            // closed-unmerged: never complete; revert a done target to review
+            // only when the rejection is first observed, not on every sync.
+            if target.status != Status::Done || !just_closed {
                 continue;
             }
             let patch = IssuePatch {
@@ -360,6 +370,7 @@ pub async fn apply_issue(
                 &fg.body,
                 fg.is_closed(),
                 fg.is_merged(),
+                true,
             )
             .await;
         }
@@ -502,6 +513,7 @@ pub async fn apply_issue(
             &after.body,
             after.status == Status::Done,
             fg.is_merged(),
+            before.status != Status::Done,
         )
         .await;
     }

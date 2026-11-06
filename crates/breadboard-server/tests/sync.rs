@@ -780,6 +780,31 @@ async fn merged_pr_with_verify_before_done_label_goes_to_review() {
         Status::Review,
         "verify-before-done forces review on merge"
     );
+
+    // Verification passed later: an explicit move to done must stick even
+    // though the merged PR and the label are unchanged and keep syncing.
+    store::update_issue(
+        &app.db,
+        "TST-1",
+        &breadboard_core::dto::IssuePatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        },
+        None,
+        SyncSource::Breadboard,
+    )
+    .await
+    .unwrap();
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(
+        t.status,
+        Status::Done,
+        "a verified done is not dragged back to review by later syncs"
+    );
 }
 
 #[tokio::test]
