@@ -16,6 +16,7 @@ use serde_json::json;
 struct FakeForgejo {
     deny: Arc<AtomicBool>,
     creates: Arc<AtomicUsize>,
+    lists: Arc<AtomicUsize>,
     issues: Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
     states: Arc<std::sync::Mutex<Vec<String>>>,
 }
@@ -54,6 +55,7 @@ async fn patch_any_issue(
 }
 
 async fn list_issues(State(fake): State<FakeForgejo>) -> axum::Json<Vec<serde_json::Value>> {
+    fake.lists.fetch_add(1, Ordering::SeqCst);
     axum::Json(fake.issues.lock().unwrap().clone())
 }
 
@@ -61,6 +63,7 @@ async fn harness(deny: bool) -> (common::TestApp, FakeForgejo) {
     let fake = FakeForgejo {
         deny: Arc::new(AtomicBool::new(deny)),
         creates: Arc::new(AtomicUsize::new(0)),
+        lists: Arc::new(AtomicUsize::new(0)),
         issues: Arc::new(std::sync::Mutex::new(Vec::new())),
         states: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
@@ -261,8 +264,12 @@ async fn repair_dry_run_lists_existing_unlinked_keys_without_writeback() {
     assert_eq!(fake.creates.load(Ordering::SeqCst), 0);
 }
 
+/// The card must stay unlinked for the repair to reach the marker lookup. The
+/// old version of this test linked the card first (simulating the webhook
+/// echo), so `import::run` skipped writeback and the marker branch was never
+/// exercised.
 #[tokio::test]
-async fn repair_retry_finds_remote_marker_after_webhook_echo_and_link_failure() {
+async fn repair_retry_finds_remote_marker_when_the_link_failed() {
     let (app, fake) = harness(false).await;
     let local = store::create_issue(
         &app.db,
@@ -275,26 +282,35 @@ async fn repair_retry_finds_remote_marker_after_webhook_echo_and_link_failure() 
     )
     .await
     .unwrap();
-    // Simulate Forgejo accepted the POST and the webhook claimed the local
-    // card, but the subsequent writeback link returned an error.
+    // Simulate Forgejo accepting the POST but the writeback link (and the
+    // webhook echo) failing, so the local card is still unlinked.
     let marker = format!("<!-- breadboard-import:{} -->", local.key);
     fake.issues.lock().unwrap().push(json!({
         "number": 41, "title": "Task", "body": marker, "state": "open", "labels": [],
         "assignees": [], "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z"
     }));
-    store::claim_unlinked_issue(&app.db, local.project_id, "Task", "Breadway/test", 41)
-        .await
-        .unwrap();
     let mut req = request();
     req.repair = true;
     let result = import::run(&app.state, &req).await.unwrap();
     assert!(result.pending_writebacks.is_empty());
-    assert_eq!(fake.creates.load(Ordering::SeqCst), 0);
-    assert!(store::get_issue_by_key(&app.db, &local.key)
-        .await
-        .unwrap()
-        .forgejo_ref
-        .is_some());
+    assert_eq!(
+        fake.creates.load(Ordering::SeqCst),
+        0,
+        "the marker lookup must reuse the existing remote issue"
+    );
+    assert!(
+        fake.lists.load(Ordering::SeqCst) > 0,
+        "the marker lookup must actually run"
+    );
+    assert_eq!(
+        store::get_issue_by_key(&app.db, &local.key)
+            .await
+            .unwrap()
+            .forgejo_ref
+            .unwrap()
+            .number,
+        41
+    );
 }
 
 #[tokio::test]
