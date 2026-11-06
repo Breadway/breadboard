@@ -56,6 +56,10 @@ pub fn router(state: AppState) -> Router {
                 .put(api::heartbeat_claim)
                 .delete(api::release_claim),
         )
+        .route(
+            "/claims/{id}",
+            axum::routing::delete(api::release_claim_by_id),
+        )
         .route("/sync/reconcile", post(api::reconcile_now))
         .route("/import", post(api::import_markdown))
         .route("/notifications", get(api::list_notifications))

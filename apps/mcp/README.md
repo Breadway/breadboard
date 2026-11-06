@@ -45,7 +45,7 @@ or in `.mcp.json`:
 | `list_projects` `list_epics` `list_cycles` `list_repos` | metadata |
 | `get_epic` `create_epic` `update_epic` `delete_epic` | read and manage epics by key or id; `get_epic` includes child issues, progress, and counts; deleting an epic keeps and unlinks its child issues |
 | `create_project` `update_project` `create_cycle` `start_cycle` `end_cycle` `add_repo` `remove_repo` `reconcile` | admin (cycles can be created with ISO dates and started/ended by name or id; update_project can rename, archive/unarchive, attach/detach forgejo_repo) |
-| `claim_issue` `update_claim` `release_claim` | exclusive agent presence: claim before starting work (first wins, `409` means someone else is on it), heartbeat at least every 5 min while working, release when done |
+| `claim_issue` `update_claim` `release_claim` | claim before starting work. `mode=exclusive` (default) is first-wins (`409` means someone else has it); `mode=intent` queues interest later without moving or blocking. The MCP server auto-heartbeats every claim it creates every 60s, so claims stay live; report progress with `update_claim` and release when done |
 | `list_agents` `agent_status` | live claims + the `bb-status`-style server roll-up (`BB x/y done, …`) |
 | `import_markdown` | outline → epics + issues |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |

@@ -208,7 +208,10 @@ export type AgentState =
   | "needs-user"
   | "done";
 
+export type ClaimMode = "exclusive" | "intent";
+
 export interface AgentClaim {
+  id: number;
   issue_id: number;
   key: string;
   issue_title: string;
@@ -216,6 +219,7 @@ export interface AgentClaim {
   claimed_by: number;
   claimed_by_login: string;
   agent_name: string;
+  mode: ClaimMode;
   session_id: string | null;
   state: AgentState;
   note: string | null;
@@ -233,6 +237,8 @@ export interface AgentClaim {
 
 export interface ClaimUpsert {
   agent_name: string;
+  /** exclusive (default): real work, first-wins. intent: soft reservation. */
+  mode?: ClaimMode;
   session_id?: string;
   state?: AgentState;
   note?: string;
@@ -261,6 +267,7 @@ export interface AgentStatusSummary {
   total: number;
   live: number;
   stale: number;
+  queued: number;
   done: number;
   active: number;
   review: number;
@@ -291,8 +298,8 @@ export type BoardEvent =
       at: string;
     }
   | { type: "notified"; user_id: number }
-  | { type: "agent.claimed"; id: number; key: string; agent: string; session_id: string | null; state: string }
-  | { type: "agent.updated"; id: number; key: string; agent: string; session_id: string | null; state: string }
+  | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
+  | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.released"; id: number; key: string };
 
 export class ApiError extends Error {
@@ -407,10 +414,12 @@ export class BreadboardClient {
   agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");
   claimIssue = (key: string, claim: ClaimUpsert) =>
     this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
-  heartbeatClaim = (key: string, update: ClaimUpdate) =>
-    this.req<AgentClaim>("PUT", `/api/issues/${key}/claim`, update);
-  releaseClaim = (key: string) =>
-    this.req<void>("DELETE", `/api/issues/${key}/claim`);
+  heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>
+    this.req<AgentClaim>("PUT", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`, update);
+  releaseClaim = (key: string, agent?: string) =>
+    this.req<void>("DELETE", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
+  releaseClaimById = (id: number) =>
+    this.req<void>("DELETE", `/api/claims/${id}`);
 
   /**
    * Subscribe to the live event stream. `onStatus(true|false)` reports the

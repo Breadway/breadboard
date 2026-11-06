@@ -186,3 +186,206 @@ async fn claim_events_flow_over_sse() {
         .unwrap();
     assert_eq!(events.next_type().await, "agent.released");
 }
+
+/// Intents are soft reservations: they do not move the card, do not block an
+/// exclusive claim, and may coexist.
+#[tokio::test]
+async fn intents_do_not_block_or_move() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "queued later").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    // Intent: status stays backlog, and repeating it for the same agent updates
+    // rather than duplicating.
+    for _ in 0..2 {
+        let intent: Value = c
+            .post(format!("{base}/api/issues/{key}/claim"))
+            .header("authorization", &auth)
+            .json(&json!({ "agent_name": "planner", "mode": "intent", "state": "planned" }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(intent["mode"], "intent");
+    }
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["status"], "backlog");
+
+    // A second agent can also queue.
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "other-planner", "mode": "intent" }))
+        .send()
+        .await
+        .unwrap();
+
+    let agents: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let intents: Vec<&Value> = agents
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|a| a["key"] == key.as_str() && a["mode"] == "intent")
+        .collect();
+    assert_eq!(intents.len(), 2, "one intent per (agent), deduped");
+
+    // Exclusive work still claims it and moves it to doing.
+    let claim: Value = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "worker" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claim["mode"], "exclusive");
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["status"], "doing");
+
+    // Status roll-up counts work, not intents.
+    let status: Value = c
+        .get(format!("{base}/api/agents/status"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["total"], 1);
+    assert_eq!(status["queued"], 2);
+}
+
+/// Claim lifecycle changes are written to the issue activity timeline.
+#[tokio::test]
+async fn claim_changes_appear_in_activity() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "audited work").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let claim: Value = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "auditor" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claim_id = claim["id"].as_i64().unwrap();
+
+    c.put(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "state": "awaiting-review" }))
+        .send()
+        .await
+        .unwrap();
+    c.delete(format!("{base}/api/claims/{claim_id}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+
+    let activity: Value = c
+        .get(format!("{base}/api/issues/{key}/activity"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let fields: Vec<&str> = activity
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["field"].as_str())
+        .collect();
+    assert!(fields.contains(&"agent_claim"), "{fields:?}");
+    assert!(fields.contains(&"agent_state"), "{fields:?}");
+    assert!(fields.contains(&"agent_release"), "{fields:?}");
+}
+
+/// Heartbeating a PR URL comments it once on the issue so the link reaches
+/// Forgejo, and a repeated heartbeat does not duplicate the comment.
+#[tokio::test]
+async fn heartbeat_pr_url_comments_once() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "pr linkage").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "linker" }))
+        .send()
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        c.put(format!("{base}/api/issues/{key}/claim"))
+            .header("authorization", &auth)
+            .json(&json!({ "pr_url": "https://git.example/pulls/7", "pr_number": 7 }))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let detail: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let comments = detail["comments"].as_array().unwrap();
+    let pr_comments: Vec<&Value> = comments
+        .iter()
+        .filter(|c| c["body"].as_str().unwrap_or("").contains("https://git.example/pulls/7"))
+        .collect();
+    assert_eq!(pr_comments.len(), 1, "commented exactly once");
+}

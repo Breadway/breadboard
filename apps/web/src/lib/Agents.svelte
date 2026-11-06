@@ -18,16 +18,25 @@
     return () => clearInterval(t);
   });
 
+  // Exclusive claims are work; intents are queued reservations.
   const claims = $derived(
-    [...store.agents].sort((a, b) => b.last_heartbeat.localeCompare(a.last_heartbeat)),
+    [...store.agents].sort((a, b) =>
+      a.mode === b.mode
+        ? b.last_heartbeat.localeCompare(a.last_heartbeat)
+        : a.mode === "exclusive"
+          ? -1
+          : 1,
+    ),
   );
-  const shown = $derived(staleOnly ? claims.filter((c) => claimStale(c.last_heartbeat, now)) : claims);
-  const staleCount = $derived(claims.filter((c) => claimStale(c.last_heartbeat, now)).length);
-  const liveCount = $derived(claims.length - staleCount);
+  const work = $derived(claims.filter((c) => c.mode === "exclusive"));
+  const queued = $derived(claims.filter((c) => c.mode === "intent"));
+  const shown = $derived(staleOnly ? work.filter((c) => claimStale(c.last_heartbeat, now)) : claims);
+  const staleCount = $derived(work.filter((c) => claimStale(c.last_heartbeat, now)).length);
+  const liveCount = $derived(work.length - staleCount);
 
   const tallies = $derived.by(() => {
     const t = { active: 0, review: 0, verifying: 0, blocked: 0, done: 0 };
-    for (const c of claims) {
+    for (const c of work) {
       if (c.state === "done") t.done++;
       else if (c.state === "implementing" || c.state === "reworking" || c.state === "planned") t.active++;
       else if (c.state === "awaiting-review" || c.state === "awaiting-ci" || c.state === "awaiting-merge") t.review++;
@@ -53,14 +62,14 @@
   <header class="summary">
     <div class="progress">
       <div class="ptop">
-        <span class="plabel">{tallies.done} of {claims.length} done</span>
+        <span class="plabel">{tallies.done} of {work.length} done</span>
         <span class="plive" class:off={!store.connected}>
           <i></i>{store.connected ? "live" : "reconnecting"}
         </span>
       </div>
-      <div class="track" role="progressbar" aria-valuenow={tallies.done} aria-valuemin={0} aria-valuemax={claims.length}>
-        {#if claims.length}
-          <span class="fill" style="width:{(tallies.done / claims.length) * 100}%"></span>
+      <div class="track" role="progressbar" aria-valuenow={tallies.done} aria-valuemin={0} aria-valuemax={work.length}>
+        {#if work.length}
+          <span class="fill" style="width:{(tallies.done / work.length) * 100}%"></span>
         {/if}
       </div>
       <span class="widget-line" title="Server roll-up, same shape as the opencode bb-status widget">{store.agentLine || "No active agent claims"}</span>
@@ -72,6 +81,7 @@
       <div class="stat"><b>{tallies.verifying}</b><span>verifying</span></div>
       <div class="stat" class:bad={tallies.blocked > 0}><b>{tallies.blocked}</b><span>blocked</span></div>
       <div class="stat" class:bad={staleCount > 0}><b>{staleCount}</b><span>stale</span></div>
+      <div class="stat" class:queued={queued.length > 0}><b>{queued.length}</b><span>queued</span></div>
     </div>
   </header>
 
@@ -109,7 +119,7 @@
         {@const stale = claimStale(c.last_heartbeat, now)}
         {@const ownerDiffers = c.claimed_by_login !== store.me?.login}
         {@const session = c.session_id ? c.session_id.slice(0, 7) : ""}
-        <article class="claim" class:stale style="--agent:{agentColor(c.agent_name)}">
+        <article class="claim" class:stale class:intent={c.mode === "intent"} style="--agent:{agentColor(c.agent_name)}">
           <span class="stripe" aria-hidden="true"></span>
 
           <div class="who">
@@ -132,7 +142,8 @@
                 <StatusGlyph status={c.board_status} size={12} />{c.key}
               </button>
               <span class="state {tone(c.state)}">{stateLabel(c.state)}</span>
-              {#if stale}<span class="stale-pill">stale</span>{/if}
+              {#if c.mode === "intent"}<span class="queued-pill">queued</span>{/if}
+              {#if stale && c.mode === "exclusive"}<span class="stale-pill">stale</span>{/if}
             </div>
             <span class="title">{c.issue_title}</span>
             {#if c.note}<p class="note">{c.note}</p>{/if}
@@ -158,14 +169,14 @@
           </div>
 
           <div class="side">
-            <span class="hb" class:stale title="Last heartbeat: {c.last_heartbeat}">
+            <span class="hb" class:stale={stale && c.mode === "exclusive"} title="Last heartbeat: {c.last_heartbeat}">
               <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M1.5 8h3l1.7-4 2.6 8 1.7-4h4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
               {ago(c.last_heartbeat, now)}
             </span>
             <div class="actions">
               <button class="btn sm" onclick={() => (store.selectedKey = c.key)}>Open</button>
               {#if c.claimed_by === store.me?.id}
-                <button class="btn sm danger" onclick={() => void store.release(c.key)}>Release</button>
+                <button class="btn sm danger" onclick={() => void store.releaseById(c.id)}>Release</button>
               {/if}
             </div>
           </div>
@@ -291,6 +302,12 @@
   .stat.bad b {
     color: var(--danger);
   }
+  .stat.queued {
+    border-color: color-mix(in srgb, var(--status-review) 35%, transparent);
+  }
+  .stat.queued b {
+    color: var(--status-review);
+  }
 
   /* --- filter bar ---------------------------------------------------- */
   .bar {
@@ -370,6 +387,16 @@
   }
   .claim.stale {
     border-color: color-mix(in srgb, var(--danger) 30%, var(--line));
+  }
+  .claim.intent {
+    border-style: dashed;
+    background: color-mix(in srgb, var(--surface) 92%, var(--bg));
+  }
+  .claim.intent .stripe {
+    background: color-mix(in srgb, var(--agent) 40%, transparent);
+  }
+  .claim.intent .avatar {
+    opacity: 0.6;
   }
   .stripe {
     position: absolute;
@@ -475,6 +502,15 @@
   .state.bad {
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 11%, transparent);
+  }
+  .queued-pill {
+    font: 600 9px/1 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 13%, transparent);
+    padding: 3px 6px;
+    border-radius: 4px;
   }
   .stale-pill {
     font: 600 9px/1 var(--font-mono);

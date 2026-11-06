@@ -8,7 +8,7 @@ use breadboard_client::{Client, DevicePoll};
 use breadboard_core::dto::{
     EpicPatch, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject, ProjectPatch,
 };
-use breadboard_core::{AgentState, Priority, Status};
+use breadboard_core::{AgentState, ClaimMode, Priority, Status};
 use clap::{Parser, Subcommand};
 
 use crate::config::CliConfig;
@@ -19,6 +19,10 @@ fn parse_status(s: &str) -> std::result::Result<Status, String> {
 
 fn parse_priority(s: &str) -> std::result::Result<Priority, String> {
     Priority::parse(s).ok_or_else(|| format!("unknown priority {s:?} (none|low|medium|high|urgent)"))
+}
+
+fn parse_claim_mode(s: &str) -> std::result::Result<ClaimMode, String> {
+    ClaimMode::parse(s).ok_or_else(|| "unknown claim mode (exclusive|intent)".to_string())
 }
 
 fn parse_agent_state(s: &str) -> std::result::Result<AgentState, String> {
@@ -151,6 +155,10 @@ enum Command {
         /// Agent-chosen name, e.g. `opencode`, `bb-worker-2`.
         #[arg(long)]
         agent: String,
+        /// `exclusive` (default) claims the issue for real; `intent` is a soft
+        /// reservation that does not move the card or block another agent.
+        #[arg(long, value_parser = parse_claim_mode, default_value = "exclusive")]
+        mode: ClaimMode,
         #[arg(long)]
         session: Option<String>,
         #[arg(long, value_parser = parse_agent_state)]
@@ -173,6 +181,10 @@ enum Command {
     /// Heartbeat / update your claim (refreshes the live signal).
     Heartbeat {
         key: String,
+        /// Repeat forever every N seconds until interrupted (use in a loop
+        /// wrapper so a long-running agent never goes stale).
+        #[arg(long, value_name = "SECS")]
+        every: Option<u64>,
         #[arg(long)]
         agent: Option<String>,
         #[arg(long)]
@@ -196,7 +208,12 @@ enum Command {
     },
     /// Release your claim. The card keeps its status; only the agent tint
     /// goes away.
-    Release { key: String },
+    Release {
+        key: String,
+        /// Which claim to release when you hold more than one on the issue.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Live agent presence: active claims and the bb-status-style roll-up.
     Agents {
         #[command(subcommand)]
@@ -405,6 +422,7 @@ async fn main() -> Result<()> {
         Command::Claim {
             key,
             agent,
+            mode,
             session,
             state,
             note,
@@ -420,6 +438,7 @@ async fn main() -> Result<()> {
                     &key,
                     &breadboard_core::dto::ClaimUpsert {
                         agent_name: agent,
+                        mode: Some(mode),
                         session_id: session,
                         state,
                         note,
@@ -433,14 +452,16 @@ async fn main() -> Result<()> {
                 )
                 .await?;
             println!(
-                "claimed {} as {} ({})",
+                "claimed {} as {} ({}, {})",
                 claim.key,
                 claim.agent_name,
+                claim.mode.as_str(),
                 claim.state.as_str()
             );
         }
         Command::Heartbeat {
             key,
+            every,
             agent,
             session,
             state,
@@ -452,27 +473,48 @@ async fn main() -> Result<()> {
             pr_number,
             head_sha,
         } => {
-            let claim = client
-                .heartbeat_claim(
-                    &key,
-                    &breadboard_core::dto::ClaimUpdate {
-                        agent_name: agent,
-                        state,
-                        session_id: session.map(Some),
-                        note: note.map(Some),
-                        branch: branch.map(Some),
-                        worktree: worktree.map(Some),
-                        repo: repo.map(Some),
-                        pr_url: pr_url.map(Some),
-                        pr_number: pr_number.map(Some),
-                        head_sha: head_sha.map(Some),
-                    },
-                )
-                .await?;
-            println!("heartbeat {} ({} {})", claim.key, claim.agent_name, claim.state.as_str());
+            let update = breadboard_core::dto::ClaimUpdate {
+                agent_name: agent.clone(),
+                state,
+                session_id: session.clone().map(Some),
+                note: note.clone().map(Some),
+                branch: branch.clone().map(Some),
+                worktree: worktree.clone().map(Some),
+                repo: repo.clone().map(Some),
+                pr_url: pr_url.clone().map(Some),
+                pr_number: pr_number.map(Some),
+                head_sha: head_sha.clone().map(Some),
+            };
+            let claim = client.heartbeat_claim(&key, agent.as_deref(), &update).await?;
+            println!(
+                "heartbeat {} ({} {})",
+                claim.key,
+                claim.agent_name,
+                claim.state.as_str()
+            );
+            // Keep the claim alive until the process is interrupted. This is
+            // the escape hatch for long shell-driven agents: wrap the work in
+            // `breadboard heartbeat KEY --every 60 &` and stop it at the end.
+            if let Some(secs) = every {
+                let mut tick = 0u64;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(secs.max(5))).await;
+                    tick += 1;
+                    // Only send agent/session after the first pass; the
+                    // payload already carried the state change.
+                    let keepalive = breadboard_core::dto::ClaimUpdate {
+                        agent_name: agent.clone(),
+                        ..Default::default()
+                    };
+                    if let Err(e) = client.heartbeat_claim(&key, None, &keepalive).await {
+                        eprintln!("heartbeat {tick} failed for {key}: {e}");
+                        break;
+                    }
+                }
+            }
         }
-        Command::Release { key } => {
-            client.release_claim(&key).await?;
+        Command::Release { key, agent } => {
+            client.release_claim(&key, agent.as_deref()).await?;
             println!("released {key}");
         }
         Command::Agents { action } => agents(&client, action).await?,
@@ -760,8 +802,9 @@ async fn agents(client: &Client, action: AgentsAction) -> Result<()> {
                     ""
                 };
                 println!(
-                    "{:<12} {:<12} {:<14} {}{}  {}",
+                    "{:<12} {:<8} {:<12} {:<14} {}{}  {}",
                     c.key,
+                    c.mode.as_str(),
                     c.state.as_str(),
                     c.agent_name,
                     c.board_status.as_str(),

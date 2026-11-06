@@ -348,16 +348,30 @@ class Store {
     await api.markAllRead().catch(() => this.loadInbox());
   }
 
+  /** Exclusive claims only: intents are reservations, not active work. */
   get claimsByIssue(): Map<number, AgentClaim> {
-    return new Map(this.agents.map((a) => [a.issue_id, a]));
+    return new Map(
+      this.agents.filter((a) => a.mode === "exclusive").map((a) => [a.issue_id, a]),
+    );
   }
 
   get activeAgents(): number {
-    return this.agents.length;
+    return this.agents.filter((a) => a.mode === "exclusive").length;
+  }
+
+  get queuedAgents(): number {
+    return this.agents.filter((a) => a.mode === "intent").length;
   }
 
   claimForIssue(issueId: number): AgentClaim | undefined {
-    return this.agents.find((a) => a.issue_id === issueId);
+    return this.agents.find((a) => a.issue_id === issueId && a.mode === "exclusive");
+  }
+
+  /** Every claim on an issue, exclusive first, then queued intents. */
+  claimsForIssue(issueId: number): AgentClaim[] {
+    return this.agents
+      .filter((a) => a.issue_id === issueId)
+      .sort((a, b) => (a.mode === b.mode ? a.id - b.id : a.mode === "exclusive" ? -1 : 1));
   }
 
   async loadAgents() {
@@ -373,8 +387,9 @@ class Store {
   async claim(key: string, body: ClaimUpsert): Promise<boolean> {
     try {
       const c = await api.claimIssue(key, body);
-      this.agents = [...this.agents.filter((a) => a.issue_id !== c.issue_id), c];
-      this.info(`Claimed ${c.key} as ${c.agent_name}`);
+      this.agents = [...this.agents.filter((a) => a.id !== c.id), c];
+      const what = c.mode === "intent" ? "Queued for" : "Claimed";
+      this.info(`${what} ${c.key} as ${c.agent_name}`);
       return true;
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
@@ -386,10 +401,10 @@ class Store {
     }
   }
 
-  async heartbeat(key: string, body: ClaimUpdate): Promise<boolean> {
+  async heartbeat(key: string, body: ClaimUpdate, agent?: string): Promise<boolean> {
     try {
-      const c = await api.heartbeatClaim(key, body);
-      this.agents = [...this.agents.filter((a) => a.issue_id !== c.issue_id), c];
+      const c = await api.heartbeatClaim(key, body, agent);
+      this.agents = [...this.agents.filter((a) => a.id !== c.id), c];
       return true;
     } catch (e) {
       this.flash(`Couldn't update claim on ${key}: ${errMsg(e)}`);
@@ -397,22 +412,21 @@ class Store {
     }
   }
 
-  async release(key: string, undoable = true): Promise<boolean> {
+  /** Release one claim by id; the card keeps its status. */
+  async releaseById(id: number, undoable = true): Promise<boolean> {
     const snapshot = this.agents;
-    const claim = snapshot.find((a) => a.key === key);
-    this.agents = this.agents.filter((a) => a.key !== key);
+    const claim = snapshot.find((a) => a.id === id);
+    this.agents = this.agents.filter((a) => a.id !== id);
     try {
-      await api.releaseClaim(key);
+      await api.releaseClaimById(id);
       this.info(
-        `Released ${key}`,
-        undoable && claim
-          ? () => void this.reclaim(claim)
-          : undefined,
+        `Released ${claim?.key ?? "claim"}`,
+        undoable && claim ? () => void this.reclaim(claim) : undefined,
       );
       return true;
     } catch (e) {
       this.agents = snapshot;
-      this.flash(`Couldn't release ${key}: ${errMsg(e)}`);
+      this.flash(`Couldn't release the claim: ${errMsg(e)}`);
       return false;
     }
   }
@@ -420,6 +434,7 @@ class Store {
   private async reclaim(claim: AgentClaim): Promise<void> {
     await this.claim(claim.key, {
       agent_name: claim.agent_name,
+      mode: claim.mode,
       session_id: claim.session_id ?? undefined,
       state: claim.state as AgentState,
       note: claim.note ?? undefined,

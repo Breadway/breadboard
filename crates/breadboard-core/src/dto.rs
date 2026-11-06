@@ -213,6 +213,10 @@ where
 pub struct ClaimUpsert {
     /// Human/agent-chosen name, e.g. `opencode`, `codex-hermes`, `bb-worker-2`.
     pub agent_name: String,
+    /// `exclusive` (default) or `intent`. An intent reserves interest but
+    /// does not move the card or block another agent's exclusive claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<crate::ClaimMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -310,6 +314,7 @@ pub struct AgentStatusSummary {
     pub total: i64,
     pub live: i64,
     pub stale: i64,
+    pub queued: i64,
     pub done: i64,
     pub active: i64,
     pub review: i64,

@@ -401,12 +401,43 @@ impl AgentState {
     }
 }
 
-/// One active agent claim on an issue. At most one claim per issue
-/// (exclusive): the first claim wins, a second agent gets 409 until the
-/// first releases or re-claims. `last_heartbeat` drives the live/stale
-/// signal on the Agents page; claims never auto-expire server-side.
+/// Whether a claim is exclusive work or a soft intent. Exclusive claims are
+/// unique per issue and move the card to `doing`; intents are reservations
+/// that show interest without blocking anyone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaimMode {
+    #[default]
+    Exclusive,
+    Intent,
+}
+
+impl ClaimMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClaimMode::Exclusive => "exclusive",
+            ClaimMode::Intent => "intent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "exclusive" => Some(ClaimMode::Exclusive),
+            "intent" => Some(ClaimMode::Intent),
+            _ => None,
+        }
+    }
+}
+
+/// One active agent claim on an issue. At most one *exclusive* claim exists
+/// per issue (the first wins; a second agent gets 409 until the first releases
+/// or re-claims). Additional `intent` claims may coexist: they reserve
+/// interest in queued work without changing the card or blocking another
+/// agent. `last_heartbeat` drives the live/stale signal on the Agents page;
+/// claims never auto-expire server-side.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentClaim {
+    pub id: i64,
     pub issue_id: i64,
     pub key: String,
     pub issue_title: String,
@@ -414,6 +445,7 @@ pub struct AgentClaim {
     pub claimed_by: i64,
     pub claimed_by_login: String,
     pub agent_name: String,
+    pub mode: ClaimMode,
     pub session_id: Option<String>,
     pub state: AgentState,
     pub note: Option<String>,

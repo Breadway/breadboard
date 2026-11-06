@@ -46,6 +46,56 @@ function loadConfig(): { server: string; token?: string } {
 const cfg = loadConfig();
 const client = new BreadboardClient(cfg.server, cfg.token);
 
+// --- claim keepalive ------------------------------------------------------
+//
+// The Agents page marks a claim stale after 5 minutes without a heartbeat, so
+// a long agent run must keep poking. Doing that from the MCP server means the
+// agent does not have to remember: claim_issue starts a 60s timer, and
+// release_claim (or the process exiting) stops it.
+
+const KEEPALIVE_MS = 60_000;
+const keepalives = new Map<string, ReturnType<typeof setInterval>>();
+
+const keepaliveId = (key: string, agent: string) => `${key}:${agent}`;
+
+function stopKeepalive(key: string, agent?: string) {
+  if (agent) {
+    const id = keepaliveId(key, agent);
+    const timer = keepalives.get(id);
+    if (timer) clearInterval(timer);
+    keepalives.delete(id);
+    return;
+  }
+  for (const [id, timer] of keepalives) {
+    if (id.startsWith(`${key}:`)) {
+      clearInterval(timer);
+      keepalives.delete(id);
+    }
+  }
+}
+
+function startKeepalive(key: string, agent: string) {
+  const id = keepaliveId(key, agent);
+  if (keepalives.has(id)) return;
+  const timer = setInterval(() => {
+    void client.heartbeatClaim(key, { agent_name: agent }, agent).catch(() => {
+      // A 404 means the claim is gone (released elsewhere): stop poking.
+      const t = keepalives.get(id);
+      if (t) clearInterval(t);
+      keepalives.delete(id);
+    });
+  }, KEEPALIVE_MS);
+  timer.unref?.();
+  keepalives.set(id, timer);
+}
+
+const stopAllKeepalives = () => {
+  for (const timer of keepalives.values()) clearInterval(timer);
+  keepalives.clear();
+};
+process.once("SIGINT", stopAllKeepalives);
+process.once("SIGTERM", stopAllKeepalives);
+
 // --- helpers ------------------------------------------------------------
 
 const ok = (data: unknown) => ({
@@ -503,15 +553,18 @@ const AGENT_STATES = [
 
 server.tool(
   "claim_issue",
-  "Claim an issue exclusively as an agent. REQUIRED FIRST STEP before any implementation work: " +
-    "no code changes without holding the claim. First claim wins (409 means another agent is on it: " +
-    "do not fight the lock, check agent_status and pick other work). " +
-    "Claiming from backlog/todo moves the card to doing and assigns it to you, tinting it on the board. " +
-    "Heartbeat with update_claim at least every 5 minutes while work is in progress (stale claims stay " +
-    "visible but flagged) and release_claim when done.",
+  "Claim an issue as an agent. REQUIRED FIRST STEP before any implementation work: " +
+    "no code changes without holding the claim. " +
+    "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
+    "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
+    "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
+    "never moves the card and never blocks anyone. " +
+    "The MCP server auto-heartbeats your claim every 60s while this process is alive, so it stays live; " +
+    "call release_claim when done and update_claim to report state/PR progress.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z.string().describe("agent-chosen name, e.g. opencode, bb-worker-2"),
+    mode: z.enum(["exclusive", "intent"]).optional().describe("exclusive (default) or soft intent"),
     session_id: z.string().optional().describe("agent session id for ownership checks"),
     state: z.enum(AGENT_STATES).optional().describe("lifecycle state, default implementing"),
     note: z.string().optional().describe("what you are doing right now"),
@@ -522,7 +575,12 @@ server.tool(
     pr_number: z.number().optional(),
     head_sha: z.string().optional(),
   },
-  ({ key, ...claim }) => run(() => client.claimIssue(key, claim as never)),
+  ({ key, ...claim }) =>
+    run(async () => {
+      const created = await client.claimIssue(key, claim as never);
+      startKeepalive(key, created.agent_name);
+      return created;
+    }),
 );
 
 server.tool(
@@ -546,11 +604,16 @@ server.tool(
 
 server.tool(
   "release_claim",
-  "Release your claim. The card keeps its status; only the agent tint goes away.",
-  { key: z.string().describe("issue key, e.g. BREAD-42") },
-  ({ key }) =>
+  "Release your claim (exclusive or intent). The card keeps its status; only the agent tint goes away. " +
+    "Pass agent_name when you hold more than one claim on the issue.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    agent_name: z.string().optional().describe("which of your claims to release"),
+  },
+  ({ key, agent_name }) =>
     run(async () => {
-      await client.releaseClaim(key);
+      await client.releaseClaim(key, agent_name);
+      stopKeepalive(key, agent_name);
       return `released ${key}`;
     }),
 );

@@ -37,12 +37,22 @@ One global workflow, no per-project variants:
 `done` is the only status that maps to a **closed** Forgejo issue; `backlog`
 through `review` are **open**.
 
-Agents are exclusive server-side presence on top of this workflow: at most one
-claim per issue. Claiming from `backlog`/`todo` moves the card to `doing` and
-assigns it to the claimer, tinting the card on the board; releasing keeps the
-status and only removes the tint. A claim with no heartbeat for 5+ minutes
-reads as **stale** on the Agents page but never auto-expires: only an explicit
-release (or a new claim after release) removes it.
+Agents claim issues on top of this workflow. There are two claim modes:
+
+- **exclusive** (default): real work. At most one per issue, first claim wins
+  (`409` otherwise). Claiming from `backlog`/`todo` moves the card to `doing`
+  and assigns it to the claimer, tinting the card on the board.
+- **intent**: a soft reservation for work you plan to take later. Any number
+  may coexist per issue (one per agent), it never blocks an exclusive claim,
+  and it never moves or assigns the card. It shows as "queued" on the Agents
+  page and issue drawer.
+
+Releasing keeps the status and only removes the tint. A claim with no
+heartbeat for 5+ minutes reads as **stale** for exclusive work on the Agents
+page but never auto-expires: only an explicit release (or a new claim after
+release) removes it. Claim, state, PR and release transitions are appended to
+the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
+`agent_release`; routine heartbeats that change nothing are not logged.
 
 ### Where work belongs
 
@@ -112,11 +122,12 @@ web) or `Authorization: Bearer <token>` (CLI/TUI). `401` when neither is valid.
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
-| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. Exclusive, first claim wins (`409` on conflict); claiming a `backlog`/`todo` card also moves it to `doing` and assigns it to the claimer. Emits `agent.claimed`. `201` |
-| `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. Only the claiming user may update, and a mismatched `session_id` is `409`. Emits `agent.updated` |
-| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); the card keeps its status. Emits `agent.released`. `204` |
-| `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), most-recent heartbeat first |
-| `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, done, active, review, verifying, blocked, remaining, line, claims[] }` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; intent is a soft reservation that never blocks, moves or assigns. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
+| `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. `?agent=` picks one when you hold several. Only the claiming user may update, and a mismatched `session_id` is `409`. A newly set `pr_url` also comments the link on the issue once (synced to Forgejo). Emits `agent.updated` |
+| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` picks one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
+| `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
+| `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
+| `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -172,8 +183,8 @@ exactly one digest.
 | `card.moved` | `bread.board.card.moved` | `id`, `key`, `from`, `to` |
 | `card.assigned` | `bread.board.card.assigned` | `id`, `key`, `assignee_id` |
 | `card.deleted` | `bread.board.card.deleted` | `id`, `key` |
-| `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `session_id`, `state` |
-| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `session_id`, `state` |
+| `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
+| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
 | `agent.released` | `bread.board.agent.released` | `id`, `key` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
@@ -270,10 +281,10 @@ repo with no mapped project are skipped with a warning.
 | `add <title> [--project K] [--epic KEY] [--cycle NAME] [--label L]… [--priority P]` | epic/cycle resolved by key/name; `--project` is required once more than one project exists |
 | `project list` · `project new <KEY> <NAME>` · `project rename <KEY> <NAME>` · `project archive`/`unarchive <KEY>` | `new` makes a repo-less project, the right home for a new project that has no repo yet |
 | `mv <key> <status>` | |
-| `claim <key> --agent NAME [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | exclusive agent claim (first wins); claiming from backlog/todo moves to doing + assigns to you |
-| `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID]` | heartbeat / update your claim (refreshes the live signal) |
-| `release <key>` | release your claim (status stays, tint goes away) |
-| `agents list [--stale]` | live agent claims |
+| `claim <key> --agent NAME [--mode exclusive\|intent] [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | claim an issue; `exclusive` (default) is first-wins and moves backlog/todo to doing + assigns it, `intent` queues interest without moving or blocking |
+| `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID] [--every SECS]` | heartbeat / update your claim; `--every` keeps repeating until interrupted (wrap long runs so they never go stale) |
+| `release <key> [--agent NAME]` | release your claim (status stays, tint goes away) |
+| `agents list [--stale]` | live agent claims with mode, state and heartbeat |
 | `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
 | `board [--cycle NAME] [--project K] [--mine]` | columns |
 | `ls [--mine] [--status S] [--project K]` | |
@@ -316,9 +327,13 @@ board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
 
 Agent rule (also in the `claim_issue` / `update_issue` / `move_issue` tool
-descriptions): **claim first, heartbeat while working, release when done**.
-No implementation work without holding the claim; `409` means another agent
-holds it, so pick other work instead of fighting the lock.
+descriptions): **claim first, keep the heartbeat alive, release when done**.
+No implementation work without an exclusive claim; `409` means another agent
+holds it, so pick other work instead of fighting the lock. `mode: "intent"`
+queues interest in work you are not starting yet. The MCP server auto-
+heartbeats every claim it creates every 60 seconds while it is running, so an
+agent using MCP cannot go stale mid-run; CLI-driven agents pass
+`heartbeat --every 60` (or loop it) for the same guarantee.
 
 ## Operations
 

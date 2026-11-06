@@ -362,17 +362,27 @@ impl Client {
     pub async fn heartbeat_claim(
         &self,
         key: &str,
+        agent: Option<&str>,
         update: &breadboard_core::dto::ClaimUpdate,
     ) -> Result<breadboard_core::AgentClaim> {
-        self.send(
-            self.build(reqwest::Method::PUT, &format!("/api/issues/{key}/claim"))
-                .json(update),
-        )
-        .await
+        let mut rb = self.build(reqwest::Method::PUT, &format!("/api/issues/{key}/claim"));
+        if let Some(agent) = agent {
+            rb = rb.query(&[("agent", agent)]);
+        }
+        self.send(rb.json(update)).await
     }
 
-    pub async fn release_claim(&self, key: &str) -> Result<()> {
-        self.send_empty(self.build(reqwest::Method::DELETE, &format!("/api/issues/{key}/claim")))
+    pub async fn release_claim(&self, key: &str, agent: Option<&str>) -> Result<()> {
+        let mut rb = self.build(reqwest::Method::DELETE, &format!("/api/issues/{key}/claim"));
+        if let Some(agent) = agent {
+            rb = rb.query(&[("agent", agent)]);
+        }
+        self.send_empty(rb).await
+    }
+
+    /// Release one claim by its id (multi-claim issues, Agents page).
+    pub async fn release_claim_by_id(&self, id: i64) -> Result<()> {
+        self.send_empty(self.build(reqwest::Method::DELETE, &format!("/api/claims/{id}")))
             .await
     }
 
