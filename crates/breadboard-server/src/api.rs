@@ -633,6 +633,26 @@ fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
     parts.join(", ")
 }
 
+/// Set or clear the signed-in agent's one-liner. The name is normalised the
+/// same way claims are, so it lands on the same profile the Agents tab groups.
+pub async fn set_agent_message(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::AgentMessage>,
+) -> AppResult<Json<serde_json::Value>> {
+    let agent_name = body.agent_name.trim();
+    if agent_name.is_empty() {
+        return Err(crate::error::AppError::bad_request("agent_name is required"));
+    }
+    let message = breadboard_core::dto::normalize_agent_message(&body.message)
+        .map_err(crate::error::AppError::BadRequest)?;
+    store::set_agent_message(&app.db, user.0.id, agent_name, message.as_deref()).await?;
+    Ok(Json(serde_json::json!({
+        "agent_name": agent_name.to_lowercase(),
+        "message": message,
+    })))
+}
+
 pub async fn list_agents(
     State(app): State<AppState>,
     _user: AuthUser,

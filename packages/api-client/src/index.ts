@@ -247,6 +247,7 @@ export interface AgentClaim {
   claimed_by: number;
   claimed_by_login: string;
   agent_name: string;
+  message: string | null;
   mode: ClaimMode;
   session_id: string | null;
   state: AgentState;
@@ -265,6 +266,8 @@ export interface AgentClaim {
 
 export interface ClaimUpsert {
   agent_name: string;
+  /** One-line message shown under the agent name (max 120 chars). */
+  message?: string;
   /** exclusive (default): real work, first-wins. intent: soft reservation. */
   mode?: ClaimMode;
   session_id?: string;
@@ -281,6 +284,7 @@ export interface ClaimUpsert {
 export interface ClaimUpdate {
   agent_name?: string;
   state?: AgentState;
+  message?: string | null;
   session_id?: string | null;
   note?: string | null;
   branch?: string | null;
@@ -459,6 +463,11 @@ export class BreadboardClient {
     this.req<void>("DELETE", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
   releaseClaimById = (id: number) =>
     this.req<void>("DELETE", `/api/claims/${id}`);
+  setAgentMessage = (agent_name: string, message: string) =>
+    this.req<{ agent_name: string; message: string | null }>("PUT", "/api/agents/message", {
+      agent_name,
+      message,
+    });
 
   /**
    * Subscribe to the live event stream. `onStatus(true|false)` reports the

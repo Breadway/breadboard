@@ -45,6 +45,7 @@
     id: string;
     name: string;
     login: string;
+    message: string | null;
     claims: typeof claims;
     work: typeof claims;
     intents: typeof claims;
@@ -66,6 +67,7 @@
           id,
           name: c.agent_name,
           login: c.claimed_by_login,
+          message: null,
           claims: [],
           work: [],
           intents: [],
@@ -77,6 +79,7 @@
         map.set(id, g);
       }
       g.claims.push(c);
+      g.message ??= c.message;
       if (c.mode === "intent") g.intents.push(c);
       else {
         g.work.push(c);
@@ -265,6 +268,7 @@
             </span>
             <div class="aid">
               <span class="aname">{g.name}</span>
+              {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
               {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
             </div>
             {#if g.stale > 0}
@@ -328,6 +332,7 @@
             {selected.name}
             {#if selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
           </div>
+          {#if selected.message}<p class="mmessage">{selected.message}</p>{/if}
           <div class="msub">
             {selected.live} live
             {#if selected.stale}· <span class="bad">{selected.stale} stale</span>{/if}
@@ -623,6 +628,24 @@
   .alogin {
     font: 400 9.5px/1 var(--font-mono);
     color: var(--ink-3);
+  }
+  .amessage {
+    font-size: 11px;
+    line-height: 1.3;
+    color: var(--ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+  .mmessage {
+    margin: 3px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .stale-badge,
   .queued-badge {

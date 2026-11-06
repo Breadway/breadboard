@@ -591,3 +591,88 @@ async fn completion_follows_board_done() {
     assert_eq!(claim["board_status"], "done");
     assert_ne!(claim["state"], "done", "the lifecycle state is still the agent's");
 }
+
+/// An agent can carry a one-line message, set at claim time or later, and
+/// clear it with an empty value.
+#[tokio::test]
+async fn agent_message_roundtrip() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "message work").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let claim: Value = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Bouncy Bagel", "message": "Shipping   the sync fix" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claim["message"], "Shipping the sync fix", "message is normalised");
+
+    let agents: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(agents[0]["message"], "Shipping the sync fix");
+
+    // Update through the profile endpoint.
+    let updated: Value = c
+        .put(format!("{base}/api/agents/message"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "bouncy bagel", "message": "Now verifying on the live stack" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(updated["message"], "Now verifying on the live stack");
+
+    // Too long is rejected.
+    let long = "x".repeat(121);
+    let bad = c
+        .put(format!("{base}/api/agents/message"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "bouncy bagel", "message": long }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+
+    // Empty clears it.
+    let cleared: Value = c
+        .put(format!("{base}/api/agents/message"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "bouncy bagel", "message": "" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(cleared["message"].is_null());
+
+    let agents: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(agents[0]["message"].is_null());
+}
