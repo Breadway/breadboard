@@ -22,7 +22,13 @@
   const columns = $derived(all.map((list, i) => (STATUSES[i] === "done" ? list.slice(0, DONE_LIMIT) : list)));
   const points = $derived(all.map((list) => list.reduce((a, i) => a + (i.estimate ?? 0), 0)));
 
-  const stripCycle = $derived(store.cycles.find((c) => c.id === store.filterCycle) ?? store.activeCycle);
+  // A single explicitly selected cycle drives the strip; multiple selected
+  // cycles fall back to the active one (the board itself still honors them).
+  const stripCycle = $derived(
+    store.filters.cycles.length === 1
+      ? store.cycles.find((c) => c.id === store.filters.cycles[0])
+      : store.activeCycle,
+  );
 
   function clamp() {
     col = Math.max(0, Math.min(col, 4));

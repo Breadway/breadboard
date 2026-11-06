@@ -53,12 +53,12 @@
   }
 
   function pickCycle(id: number) {
-    store.filterCycle = store.filterCycle === id ? 0 : id;
+    store.toggleFilter("cycles", id);
     if (store.view !== "board" && store.view !== "backlog") store.view = "board";
   }
 
   function pickProject(key: string) {
-    store.filterProject = store.filterProject === key ? "" : key;
+    store.toggleFilter("projects", key);
     if (store.view !== "board" && store.view !== "backlog") store.view = "board";
   }
 </script>
@@ -117,7 +117,7 @@
     <div class="sh">Cycles</div>
     {#each cycles as c (c.id)}
       {@const s = cycleStats.get(c.id) ?? { done: 0, total: 0 }}
-      <button class="nav" class:on={store.filterCycle === c.id} class:closed={c.closed} onclick={() => pickCycle(c.id)} title="{c.starts_on} → {c.ends_on}">
+      <button class="nav" class:on={store.isFiltered("cycles", c.id)} class:closed={c.closed} onclick={() => pickCycle(c.id)} title="{c.starts_on} → {c.ends_on}">
         <Ring done={s.done} total={s.total} color={c.closed ? "var(--status-done)" : "var(--accent)"} />
         <span class="nm">{c.name}</span>
         <span class="n">{c.closed ? "closed" : `${s.done}/${s.total}`}</span>
@@ -128,7 +128,7 @@
   <div class="sh">Projects</div>
   <div class="projects">
     {#each projects as p (p.id)}
-      <button class="nav" class:on={store.filterProject === p.key} onclick={() => pickProject(p.key)} title={p.forgejo_repo ?? "Planning project, not synced"}>
+      <button class="nav" class:on={store.isFiltered("projects", p.key)} onclick={() => pickProject(p.key)} title={p.forgejo_repo ?? "Planning project, not synced"}>
         <span class="pj" style="background:{projectColor(p.key)}">{p.key[0]}</span>
         <span class="nm">{p.name}</span>
         <span class="n">{openCounts.get(p.id) ?? 0}</span>

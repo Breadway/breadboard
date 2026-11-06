@@ -17,6 +17,12 @@ best-effort `bread-emit` for a co-located breadd; see `modules/breadboard.lua`).
 Web board keys: `h`/`l`/`←`/`→` column, `j`/`k`/`↑`/`↓` card, `[`/`]` move card
 between statuses, `enter`/`e` open, `c` command palette.
 
+Filtering is multi-select and composable: project, cycle, epic, status,
+priority, label, assignee (including unassigned), agent name, agent claim state,
+claimed/unclaimed, issue type, and free text. Facets combine with AND, values
+inside one facet with OR, so any number can be active at once. Active filters
+show as removable chips in the top bar.
+
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
 

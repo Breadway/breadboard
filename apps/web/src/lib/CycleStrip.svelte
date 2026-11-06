@@ -5,16 +5,11 @@
 
   let { cycle }: { cycle: Cycle } = $props();
 
-  // Cycle-scoped, but still honours the project/epic/mine filters so the
-  // numbers match the cards below.
+  // Cycle-scoped, but still honours every other active filter so the numbers
+  // match the cards below.
   const issues = $derived(
     store.issues.filter(
-      (i) =>
-        i.cycle_id === cycle.id &&
-        i.type !== "pr" &&
-        (!store.filterProject || store.projectKey(i.project_id) === store.filterProject) &&
-        (!store.filterEpic || i.epic_id === store.filterEpic) &&
-        (!store.filterMine || i.assignee_id === store.me?.id),
+      (i) => i.cycle_id === cycle.id && i.type !== "pr" && store.matches(i, { ignoreCycles: true }),
     ),
   );
   const counts = $derived(STATUSES.map((s) => issues.filter((i) => i.status === s).length));
@@ -29,7 +24,7 @@
     return Math.ceil((end.getTime() - Date.now()) / DAY);
   });
   const fmt = (d: string) => new Date(d + "T12:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  const isFilter = $derived(store.filterCycle === cycle.id);
+  const isFilter = $derived(store.isFiltered("cycles", cycle.id));
 </script>
 
 <section class="cyc" aria-label="Cycle progress">
@@ -37,7 +32,7 @@
     <Ring done={done} total={issues.length} />
     <h2>{cycle.name}</h2>
     {#if !isFilter}
-      <button class="focus" onclick={() => (store.filterCycle = cycle.id)}>Show only this cycle</button>
+      <button class="focus" onclick={() => store.setOnlyFilter("cycles", cycle.id)}>Show only this cycle</button>
     {/if}
   </div>
   <div class="dates">

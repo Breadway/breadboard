@@ -5,7 +5,6 @@ import {
   ApiError,
   BreadboardClient,
   type AgentClaim,
-  type AgentStatusSummary,
   type AgentState,
   type BoardEvent,
   type ClaimUpdate,
@@ -15,7 +14,9 @@ import {
   type Notification,
   type Issue,
   type IssuePatch,
+  type IssueType,
   type NewIssue,
+  type Priority,
   type Project,
   type RepoView,
   type Status,
@@ -26,6 +27,44 @@ export const api = new BreadboardClient();
 
 type AuthState = "loading" | "in" | "out" | "error";
 export type View = "board" | "backlog" | "roadmap" | "agents" | "inbox" | "settings";
+
+/** Multi-select filter facets. Facets combine with AND; values inside one
+ *  facet combine with OR. An empty facet means "no constraint". */
+export interface Filters {
+  projects: string[];
+  cycles: number[];
+  epics: number[];
+  statuses: Status[];
+  priorities: Priority[];
+  labels: string[];
+  assignees: number[];
+  /** Separate toggle: only issues with no assignee. */
+  unassigned: boolean;
+  agents: string[];
+  agentStates: AgentState[];
+  /** Agent presence: any claim, no claim, or don't care. */
+  claimed: "" | "claimed" | "unclaimed";
+  types: IssueType[];
+  text: string;
+}
+
+export function emptyFilters(): Filters {
+  return {
+    projects: [],
+    cycles: [],
+    epics: [],
+    statuses: [],
+    priorities: [],
+    labels: [],
+    assignees: [],
+    unassigned: false,
+    agents: [],
+    agentStates: [],
+    claimed: "",
+    types: [],
+    text: "",
+  };
+}
 
 /** A claim with no heartbeat for this long reads as stale (never auto-released). */
 export const CLAIM_STALE_SECS = 300;
@@ -80,10 +119,9 @@ class Store {
   selectedKey = $state<string | null>(null);
   paletteOpen = $state(false);
   paletteStatus = $state<Status | null>(null);
-  filterProject = $state<string>("");
-  filterCycle = $state<number | 0>(0);
-  filterEpic = $state<number | 0>(0);
-  filterMine = $state(false);
+  /** Every facet is multi-select; facets combine with AND, values within a
+   *  facet with OR. */
+  filters = $state<Filters>(emptyFilters());
 
   #unsub: (() => void) | null = null;
   #everLive = false;
@@ -100,28 +138,113 @@ class Store {
     return api.baseUrl || location.origin;
   }
 
+  /** Number of individual filter values selected, for the trigger badge. */
+  get filterCount(): number {
+    const f = this.filters;
+    return (
+      f.projects.length +
+      f.cycles.length +
+      f.epics.length +
+      f.statuses.length +
+      f.priorities.length +
+      f.labels.length +
+      f.assignees.length +
+      (f.unassigned ? 1 : 0) +
+      f.agents.length +
+      f.agentStates.length +
+      (f.claimed ? 1 : 0) +
+      f.types.length +
+      (f.text.trim() ? 1 : 0)
+    );
+  }
+
+  get hasFilters(): boolean {
+    return this.filterCount > 0;
+  }
+
+  /** Issues that pass every facet. Claims narrow the set too. */
   get filtered(): Issue[] {
-    return this.issues.filter((i) => {
-      // A PR that closes a real issue collapses into that issue's card
-      // instead of showing as a second, seemingly-unrelated card; its
-      // status surfaces there as a small badge instead (see Card.svelte).
-      if (i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
-      // Once a cycle (release) ships and is closed, its done work archives
-      // off the default board/backlog view instead of piling up forever;
-      // still there if you explicitly pick that cycle from the filter.
-      if (!this.filterCycle && i.status === "done" && i.cycle_id) {
-        const cycle = this.cycles.find((c) => c.id === i.cycle_id);
-        if (cycle?.closed) return false;
-      }
-      if (this.filterProject) {
-        const p = this.projects.find((p) => p.id === i.project_id);
-        if (!p || p.key !== this.filterProject) return false;
-      }
-      if (this.filterCycle && i.cycle_id !== this.filterCycle) return false;
-      if (this.filterEpic && i.epic_id !== this.filterEpic) return false;
-      if (this.filterMine && i.assignee_id !== this.me?.id) return false;
-      return true;
-    });
+    return this.issues.filter((i) => this.matches(i));
+  }
+
+  /** True when `issue` passes every active facet. `ignoreCycles` lets a cycle
+   *  strip scope its own progress while still respecting the other filters. */
+  matches(issue: Issue, opts: { ignoreCycles?: boolean } = {}): boolean {
+    const i = issue;
+    const f = this.filters;
+    const projectKeys = new Set(f.projects);
+    const cycles = new Set(f.cycles);
+    const epics = new Set(f.epics);
+    const statuses = new Set(f.statuses);
+    const priorities = new Set(f.priorities);
+    const labels = new Set(f.labels);
+    const assignees = new Set(f.assignees);
+    const agents = new Set(f.agents);
+    const agentStates = new Set(f.agentStates);
+    const types = new Set(f.types);
+    const text = f.text.trim().toLowerCase();
+
+    // A PR that closes a real issue collapses into that issue's card
+    // instead of showing as a second, seemingly-unrelated card; its
+    // status surfaces there as a small badge instead (see Card.svelte).
+    if (i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
+    // Once a cycle (release) ships and is closed, its done work archives
+    // off the default board/backlog view instead of piling up forever;
+    // still there if you explicitly pick that cycle from the filter.
+    if (cycles.size === 0 && i.status === "done" && i.cycle_id) {
+      const cycle = this.cycles.find((c) => c.id === i.cycle_id);
+      if (cycle?.closed) return false;
+    }
+    if (projectKeys.size && !projectKeys.has(this.projectKey(i.project_id))) return false;
+    if (!opts.ignoreCycles && cycles.size && (i.cycle_id == null || !cycles.has(i.cycle_id))) return false;
+    if (epics.size && (i.epic_id == null || !epics.has(i.epic_id))) return false;
+    if (statuses.size && !statuses.has(i.status)) return false;
+    if (priorities.size && !priorities.has(i.priority)) return false;
+    if (labels.size && !i.labels.some((l) => labels.has(l))) return false;
+    if (assignees.size && (i.assignee_id == null || !assignees.has(i.assignee_id))) return false;
+    if (f.unassigned && i.assignee_id != null) return false;
+    if (types.size && !types.has(i.type)) return false;
+    if (text) {
+      const hay = `${i.key} ${i.title} ${i.body} ${i.labels.join(" ")}`.toLowerCase();
+      if (!hay.includes(text)) return false;
+    }
+    const claim = this.claimsByIssue.get(i.id);
+    if (f.claimed === "claimed" && !claim) return false;
+    if (f.claimed === "unclaimed" && claim) return false;
+    if (agents.size && (!claim || !agents.has(claim.agent_name))) return false;
+    if (agentStates.size && (!claim || !agentStates.has(claim.state))) return false;
+    return true;
+  }
+
+  toggleFilter<K extends "projects" | "cycles" | "epics" | "statuses" | "priorities" | "labels" | "assignees" | "agents" | "agentStates" | "types">(
+    facet: K,
+    value: Filters[K][number],
+  ) {
+    const list = this.filters[facet] as unknown as (typeof value)[];
+    const i = list.indexOf(value);
+    if (i === -1) list.push(value);
+    else list.splice(i, 1);
+  }
+
+  isFiltered<K extends "projects" | "cycles" | "epics" | "statuses" | "priorities" | "labels" | "assignees" | "agents" | "agentStates" | "types">(
+    facet: K,
+    value: Filters[K][number],
+  ): boolean {
+    return (this.filters[facet] as unknown as (typeof value)[]).includes(value);
+  }
+
+  setOnlyFilter(facet: "epics" | "cycles", value: number) {
+    this.filters[facet] = [value];
+  }
+
+  clearFilters() {
+    this.filters = emptyFilters();
+  }
+
+  /** Toggle "assigned to me" as an assignee facet value. */
+  toggleMine() {
+    if (!this.me) return;
+    this.toggleFilter("assignees", this.me.id);
   }
 
   byStatus(status: Status): Issue[] {
@@ -225,7 +348,7 @@ class Store {
     await api.markAllRead().catch(() => this.loadInbox());
   }
 
-  get agentsByIssue(): Map<number, AgentClaim> {
+  get claimsByIssue(): Map<number, AgentClaim> {
     return new Map(this.agents.map((a) => [a.issue_id, a]));
   }
 
