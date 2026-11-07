@@ -5,7 +5,7 @@
 //! items and prose are ignored. Idempotent-ish: an epic/issue whose title
 //! already exists in the project is skipped.
 
-use breadboard_core::{Status, SyncSource};
+use breadboard_core::{IssueType, Status, SyncSource};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -149,7 +149,13 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
     .await?;
     let mut existing_issues: std::collections::HashMap<String, Vec<breadboard_core::Issue>> =
         HashMap::new();
-    for issue in issue_list {
+    // Imports only create issues. Pull-request mirrors often reuse the card
+    // title ("Add X" for both the issue and the PR), so matching them here
+    // would make every implemented card look ambiguous and block repair.
+    for issue in issue_list
+        .into_iter()
+        .filter(|issue| issue.issue_type == IssueType::Issue)
+    {
         existing_issues
             .entry(issue.title.to_lowercase())
             .or_default()
