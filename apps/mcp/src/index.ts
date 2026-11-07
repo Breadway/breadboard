@@ -945,7 +945,7 @@ server.tool(
       .describe("seconds to wait, or 'inf' for no deadline; default 25"),
     agent_name: z.string().optional(),
   },
-  ({ room, with: peer, after, timeout, agent_name }) =>
+  ({ room, with: peer, after, timeout, agent_name }, extra: { signal?: AbortSignal } | undefined) =>
     run(async () => {
       const name = chatAgent(agent_name);
       const roomId = await resolveChatRoom(name, room, peer);
@@ -960,6 +960,9 @@ server.tool(
       }
 
       for (;;) {
+        if (extra?.signal?.aborted) {
+          return { room_id: roomId, messages: [], aborted: true };
+        }
         const messages = await client.listChatMessages(roomId, {
           agent: name,
           after: seen,
