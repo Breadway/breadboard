@@ -3,7 +3,7 @@
 
 mod common;
 
-use breadboard_core::{BoardEvent, IssueType, Status, SyncSource};
+use breadboard_core::{BoardEvent, IssueType, LinkKind, Status, SyncSource};
 use breadboard_server::forgejo::{FgComment, FgIssue, FgMilestone, FgUser};
 use breadboard_server::{store, sync};
 use chrono::{Duration, Utc};
@@ -840,6 +840,296 @@ async fn reopen_pr_does_not_cascade_done() {
     let t2 = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
     // Reopen of PR must not touch the target status (remains done until explicit move).
     assert_eq!(t2.status, Status::Done);
+}
+
+/// A new plain issue imported by reconcile used to fail with SQLITE_BUSY
+/// ("database is locked") under a concurrent writer: `import_issue` read the
+/// cycle defaults before its first write, and a deferred WAL transaction cannot
+/// upgrade its snapshot. Holding the write lock while the import runs proves it
+/// now waits for the writer instead of failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconcile_import_waits_for_a_busy_writer() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let mut fg = fg_issue(500, "imported under contention", Utc::now());
+    fg.created_at = Utc::now().to_rfc3339();
+
+    let holder = app.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let state = app.state.clone();
+    let import = tokio::spawn(async move {
+        sync::apply_issue(&state, repo, &fg, SyncSource::ForgejoReconcile).await
+    });
+    // Let the import reach its first write while the lock is held.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(holder);
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), import)
+        .await
+        .expect("import waited out the busy writer")
+        .expect("import task did not panic");
+    assert!(
+        result.is_ok(),
+        "reconcile import failed under contention: {result:?}"
+    );
+    let imported = store::find_issue_by_forgejo(&app.db, repo, 500)
+        .await
+        .unwrap()
+        .expect("issue imported despite the busy writer");
+    assert_eq!(imported.title, "imported under contention");
+}
+
+/// A PR can arrive before the issue it closes. Unchanged reconcile passes used
+/// to skip `sync_pr_closes` entirely, so the reverse `closed-by` link and the
+/// closing cascade stayed missing until some field changed on the PR. The heal
+/// pass must restore both without touching unrelated fields.
+#[tokio::test]
+async fn reconcile_heals_closing_links_when_target_arrives_after_pr() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    // Arrival order 1: merged PR referencing a target breadboard has not seen.
+    let pr = pr_issue(600, "land it", true, true, "Closes #501", Utc::now());
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let pr_card = store::find_issue_by_forgejo(&app.db, repo, 600)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pr_card.issue_type, IssueType::Pr);
+
+    // Arrival order 2: the missing target is imported afterwards.
+    let target_fg = fg_issue(501, "the missing target", Utc::now());
+    sync::apply_issue(&app.state, repo, &target_fg, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let target = store::find_issue_by_forgejo(&app.db, repo, 501)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        target.links.is_empty(),
+        "no closing link exists while the target is the newer arrival"
+    );
+
+    // Nothing changed on the PR; a reconcile pass must still heal the links
+    // and the merged closing cascade idempotently.
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+
+    let target = store::find_issue_by_forgejo(&app.db, repo, 501)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        target.status,
+        Status::Done,
+        "merged PR completes the target"
+    );
+    assert!(target
+        .links
+        .iter()
+        .any(|l| l.kind == LinkKind::ClosedBy && l.target_id == pr_card.id));
+    let pr_card = store::get_issue_by_key(&app.db, &pr_card.key)
+        .await
+        .unwrap();
+    assert!(pr_card
+        .links
+        .iter()
+        .any(|l| l.kind == LinkKind::Closes && l.target_id == target.id));
+}
+
+/// Under a busy writer, the closing transition must apply its two links and
+/// the status move together rather than leaving a linked but unclosed card.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contended_closing_transition_links_and_status_land_together() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 700, "close atomically", &[]).await;
+    let pr = pr_issue(701, "closing pr", true, true, "no refs", Utc::now());
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    let pr_card = store::find_issue_by_forgejo(&app.db, repo, 701)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(target.status, Status::Done);
+
+    let holder = app.db.begin_with("BEGIN IMMEDIATE").await.unwrap();
+    let db = app.db.clone();
+    let (pr_id, target_id) = (pr_card.id, target.id);
+    let task = tokio::spawn(async move {
+        store::sync_pr_close_target(
+            &db,
+            pr_id,
+            target_id,
+            Some(Status::Done),
+            SyncSource::ForgejoReconcile,
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    drop(holder);
+
+    let updated = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+        .await
+        .expect("closing transition waited out the busy writer")
+        .expect("task did not panic")
+        .expect("closing transition succeeded")
+        .expect("a status change was applied");
+    assert_eq!(updated.status, Status::Done);
+
+    let target = store::get_issue_by_key(&app.db, &target.key).await.unwrap();
+    assert_eq!(target.status, Status::Done);
+    assert!(
+        target
+            .links
+            .iter()
+            .any(|l| l.kind == LinkKind::ClosedBy && l.target_id == pr_id),
+        "the closed-by link is present with the status change"
+    );
+    let pr_card = store::get_issue_by_key(&app.db, &pr_card.key)
+        .await
+        .unwrap();
+    assert!(
+        pr_card
+            .links
+            .iter()
+            .any(|l| l.kind == LinkKind::Closes && l.target_id == target_id),
+        "the closes link is present with the status change"
+    );
+}
+
+/// A merged PR completes the target; a later abandoned (closed-unmerged) PR
+/// that also references it must not revert the accepted completion to review.
+#[tokio::test]
+async fn abandoned_pr_does_not_revert_done_completed_by_merged_pr() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 900, "completed by a merged PR", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    // PR A is merged and completes TST-1.
+    let merged = pr_issue(
+        910,
+        "the accepted fix",
+        true,
+        true,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &merged, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done
+    );
+
+    // PR B is abandoned and closed unmerged later, also referencing TST-1.
+    let abandoned = pr_issue(
+        911,
+        "the rejected attempt",
+        true,
+        false,
+        "Closes TST-1",
+        Utc::now() + Duration::seconds(5),
+    );
+    sync::apply_issue(&app.state, repo, &abandoned, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let after = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(
+        after.status,
+        Status::Done,
+        "an abandoned PR must not revert work completed by a merged PR"
+    );
+    let pr_b = store::find_issue_by_forgejo(&app.db, repo, 911)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        after
+            .links
+            .iter()
+            .any(|l| l.kind == LinkKind::ClosedBy && l.target_id == pr_b.id),
+        "the abandoned PR still records its closing link"
+    );
+
+    // A later title change on the abandoned PR must not revert it either.
+    let mut retitled = abandoned.clone();
+    retitled.title = "rejected attempt (retitled)".into();
+    retitled.updated_at = (Utc::now() + Duration::seconds(10)).to_rfc3339();
+    sync::apply_issue(&app.state, repo, &retitled, SyncSource::ForgejoReconcile)
+        .await
+        .unwrap();
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done
+    );
+}
+
+/// The same rule without a merged PR: an abandoned PR never changes a target
+/// that a human moved to done.
+#[tokio::test]
+async fn abandoned_pr_does_not_revert_a_manually_done_target() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 920, "manually completed", &[]).await;
+    store::update_issue(
+        &app.db,
+        &target.key,
+        &breadboard_core::dto::IssuePatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        },
+        None,
+        SyncSource::Breadboard,
+    )
+    .await
+    .unwrap();
+
+    let abandoned = pr_issue(
+        921,
+        "abandoned attempt",
+        true,
+        false,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &abandoned, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        store::get_issue_by_key(&app.db, "TST-1")
+            .await
+            .unwrap()
+            .status,
+        Status::Done,
+        "only a merged PR's closing transition or an explicit reopen changes done"
+    );
 }
 
 // --- helpers ---
