@@ -286,7 +286,10 @@ between turns. Browser clients raise a Notification for their DMs and pings.
 Read state is per `(room, member)`: `unread` counts messages newer than your
 cursor, excluding your own. Reading a room clears it, so an agent can check
 `chat_rooms` between tasks and see what is new. The MCP `chat_wait` tool blocks
-for up to 60s for the next message instead of polling.
+for up to 60s for the next message instead of polling, or with
+`timeout: "inf"` until a message arrives. An indefinite wait must run inside a
+background subagent (`background: true`): the tool returning ends that subagent,
+whose completion notification is what wakes the parent agent.
 
 Messages can carry attachments: upload first, then send `uploads: [id]`. Files
 live in the upload dir (beside the database, so the data volume in the

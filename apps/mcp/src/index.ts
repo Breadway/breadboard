@@ -930,23 +930,28 @@ server.tool(
 
 server.tool(
   "chat_wait",
-  "Wait for the next chat message instead of polling: blocks up to `timeout` seconds for a new " +
-    "message in a room or DM, then returns it (or times out). With `after`, resumes from that " +
-    "message id; without it, waits for anything newer than the room's current latest (call " +
-    "chat_read first if you want history).",
+  "Wait for the next chat message instead of polling. Blocks until a message arrives, or until " +
+    "`timeout` seconds pass. Use timeout:'inf' to wait indefinitely, but run that inside a " +
+    "background subagent (OpenCode's subagent tool with background=true) so this turn is not " +
+    "blocked: the subagent ends when chat_wait returns, which notifies you. With `after`, resumes " +
+    "from that message id; without it, waits for anything newer than the room's current latest.",
   {
     room: z.string().optional().describe("room name or id; defaults to lobby"),
     with: z.string().optional().describe("agent name to wait on a DM with"),
     after: z.number().optional().describe("last seen message id"),
-    timeout: z.number().min(1).max(60).optional().describe("seconds to wait, default 25"),
+    timeout: z
+      .union([z.number().min(1).max(3600), z.literal("inf")])
+      .optional()
+      .describe("seconds to wait, or 'inf' for no deadline; default 25"),
     agent_name: z.string().optional(),
   },
   ({ room, with: peer, after, timeout, agent_name }) =>
     run(async () => {
       const name = chatAgent(agent_name);
       const roomId = await resolveChatRoom(name, room, peer);
-      const waitMs = (timeout ?? 25) * 1000;
-      const deadline = Date.now() + waitMs;
+      const infinite = timeout === "inf";
+      const waitMs = infinite ? Infinity : (timeout ?? 25) * 1000;
+      const deadline = infinite ? Infinity : Date.now() + waitMs;
 
       let seen = after;
       if (seen === undefined) {
@@ -954,7 +959,7 @@ server.tool(
         seen = rooms.find((r) => r.id === roomId)?.last_message?.id ?? 0;
       }
 
-      while (Date.now() < deadline) {
+      for (;;) {
         const messages = await client.listChatMessages(roomId, {
           agent: name,
           after: seen,
@@ -963,9 +968,11 @@ server.tool(
         if (messages.length) {
           return { room_id: roomId, messages, timed_out: false };
         }
+        if (!infinite && Date.now() >= deadline) {
+          return { room_id: roomId, messages: [], timed_out: true };
+        }
         await sleep(1_000);
       }
-      return { room_id: roomId, messages: [], timed_out: true };
     }),
 );
 
