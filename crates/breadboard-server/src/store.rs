@@ -2813,6 +2813,35 @@ pub async fn create_chat_pushes(
                 add_recipient(&mut want, member, user_id, ChatPushKind::Room);
             }
         }
+
+        // @everyone is a room-wide ping: every known agent and every human,
+        // not just the members who opted into room pushes.
+        if mentions(&message.body).iter().any(|token| token == "everyone") {
+            let agents: Vec<(i64, String)> = sqlx::query_as(
+                "SELECT DISTINCT user_id, lower(agent_name) FROM (
+                    SELECT user_id, agent_name FROM agent_profiles
+                    UNION
+                    SELECT claimed_by AS user_id, lower(agent_name) AS agent_name FROM agent_claims
+                 )",
+            )
+            .fetch_all(db)
+            .await?;
+            for (user_id, agent_name) in agents {
+                let member = agent_member(&agent_name);
+                if member != author_member {
+                    add_recipient(&mut want, member, user_id, ChatPushKind::Ping);
+                }
+            }
+            let humans: Vec<(i64, String)> = sqlx::query_as("SELECT id, login FROM users")
+                .fetch_all(db)
+                .await?;
+            for (user_id, login) in humans {
+                let member = human_member(&login);
+                if member != author_member {
+                    add_recipient(&mut want, member, user_id, ChatPushKind::Ping);
+                }
+            }
+        }
     }
 
     for token in mentions(&message.body) {
