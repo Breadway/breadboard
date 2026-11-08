@@ -6,7 +6,8 @@
 //   BREADBOARD_SERVER / BREADBOARD_TOKEN env vars
 //   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -26,9 +27,10 @@ const LINK_KINDS = ["blocks", "blocked-by", "relates-to"] as const;
 
 // --- config ---------------------------------------------------------------
 
-function loadConfig(): { server: string; token?: string } {
+function loadConfig(): { server: string; token?: string; agent?: string } {
   let server = process.env.BREADBOARD_SERVER ?? "";
   let token = process.env.BREADBOARD_TOKEN;
+  let agent: string | undefined;
   try {
     const raw = readFileSync(
       join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "breadboard", "cli.toml"),
@@ -36,11 +38,12 @@ function loadConfig(): { server: string; token?: string } {
     );
     if (!server) server = raw.match(/^\s*server\s*=\s*"([^"]+)"/m)?.[1] ?? "";
     if (!token) token = raw.match(/^\s*token\s*=\s*"([^"]+)"/m)?.[1];
+    agent = raw.match(/^\s*agent\s*=\s*"([^"]+)"/m)?.[1]?.trim() || undefined;
   } catch {
     /* no config file */
   }
   if (!server) server = "https://breadboard.breadway.dev";
-  return { server, token };
+  return { server, token, agent: process.env.BREADBOARD_AGENT?.trim() || agent };
 }
 
 const cfg = loadConfig();
@@ -66,6 +69,30 @@ const FUN_NOUNS = [
   "Roll",
 ];
 
+/**
+ * The chat-inject plugin runs inside OpenCode and cannot see this process's
+ * environment, so the name we speak as is mirrored to a small state file. Set
+ * `agent = "..."` in cli.toml (or BREADBOARD_AGENT) to make the identity stable
+ * instead of the per-process random name.
+ */
+const AGENT_STATE = join(
+  process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+  "breadboard",
+  "agent.json",
+);
+
+function rememberAgent(name: string) {
+  try {
+    mkdirSync(dirname(AGENT_STATE), { recursive: true });
+    writeFileSync(
+      AGENT_STATE,
+      `${JSON.stringify({ name, pid: process.pid, at: new Date().toISOString() })}\n`,
+    );
+  } catch {
+    /* best effort only */
+  }
+}
+
 /** One playful name per MCP process, so an agent's claims group together. */
 let autoAgentName: string | undefined;
 
@@ -76,9 +103,15 @@ function pickFunName(): string {
 }
 
 function defaultAgentName(): string {
-  autoAgentName ??= pickFunName();
+  autoAgentName ??= cfg.agent ?? pickFunName();
+  rememberAgent(autoAgentName);
   return autoAgentName;
 }
+
+// Publish the identity at startup, before any tool call, so the OpenCode
+// chat-inject plugin can follow this process from the first message.
+autoAgentName = cfg.agent ?? pickFunName();
+rememberAgent(autoAgentName);
 
 function suggestNames(count: number): string[] {
   const out = new Set<string>();
@@ -839,6 +872,7 @@ function chatAgent(explicit?: string): string {
   if (!name) {
     throw new Error("no agent name yet: claim an issue or pass agent_name");
   }
+  rememberAgent(name);
   return name;
 }
 
