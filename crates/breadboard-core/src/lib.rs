@@ -375,6 +375,32 @@ impl ChatRoomKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageKind {
+    #[default]
+    Message,
+    /// A compaction summary that stands in for the messages hidden below it.
+    Summary,
+}
+
+impl ChatMessageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChatMessageKind::Message => "message",
+            ChatMessageKind::Summary => "summary",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "message" => Some(ChatMessageKind::Message),
+            "summary" => Some(ChatMessageKind::Summary),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatAuthorKind {
@@ -416,6 +442,8 @@ pub struct ChatMessage {
     /// What to show next to the message.
     pub author_display: String,
     pub author_kind: ChatAuthorKind,
+    #[serde(default)]
+    pub message_kind: ChatMessageKind,
     pub body: String,
     pub attachments: Vec<ChatUpload>,
     pub created_at: DateTime<Utc>,

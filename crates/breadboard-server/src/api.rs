@@ -847,6 +847,66 @@ pub async fn chat_messages(
     Ok(Json(messages))
 }
 
+pub async fn delete_chat_message(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+    Query(q): Query<ChatQuery>,
+) -> AppResult<StatusCode> {
+    let message = store::get_chat_message(&app.db, id)
+        .await?
+        .ok_or(crate::error::AppError::NotFound)?;
+
+    let actor = match q.agent.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => {
+            if !store::user_has_agent(&app.db, user.0.id, name).await? {
+                return Err(crate::error::AppError::forbidden());
+            }
+            let member = store::agent_member(name);
+            if message.author_member != member {
+                return Err(crate::error::AppError::forbidden());
+            }
+            member
+        }
+        None => store::human_member(&user.0.login),
+    };
+
+    if !store::delete_chat_message(&app.db, id, &actor).await? {
+        return Err(crate::error::AppError::NotFound);
+    }
+    app.bus.publish(BoardEvent::ChatMessage {
+        room_id: message.room_id,
+        id,
+    });
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn compact_chat_room(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<(StatusCode, Json<breadboard_core::ChatMessage>)> {
+    let room = store::get_chat_room(&app.db, id).await?;
+    if room.kind != breadboard_core::ChatRoomKind::Room {
+        return Err(crate::error::AppError::bad_request(
+            "only shared rooms can be compacted",
+        ));
+    }
+    let messages = store::chat_messages(&app.db, room.id, 0, 500).await?;
+    if messages.is_empty() {
+        return Err(crate::error::AppError::bad_request("nothing to compact"));
+    }
+    let summary = crate::summary::summarize(&app.config.summary, &room, &messages)
+        .await
+        .map_err(|e| crate::error::AppError::Upstream(e.to_string()))?;
+    let message = store::compact_chat_room(&app.db, room.id, &summary).await?;
+    app.bus.publish(BoardEvent::ChatMessage {
+        room_id: room.id,
+        id: message.id,
+    });
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
 pub async fn open_dm(
     State(app): State<AppState>,
     user: AuthUser,

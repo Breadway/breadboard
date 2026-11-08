@@ -17,6 +17,8 @@ pub enum AppError {
     Forbidden,
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("upstream: {0}")]
+    Upstream(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -42,6 +44,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Db(sqlx::Error::RowNotFound) => {
                 (StatusCode::NOT_FOUND, "not found".to_string())
             }

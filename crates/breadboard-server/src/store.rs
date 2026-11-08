@@ -2413,6 +2413,7 @@ struct ChatMessageRow {
     author_kind: String,
     body: String,
     created_at: String,
+    message_kind: String,
 }
 
 impl From<ChatMessageRow> for ChatMessage {
@@ -2423,6 +2424,8 @@ impl From<ChatMessageRow> for ChatMessage {
             author_member: r.author_member,
             author_display: r.author_display,
             author_kind: ChatAuthorKind::parse(&r.author_kind).unwrap_or(ChatAuthorKind::Human),
+            message_kind: breadboard_core::ChatMessageKind::parse(&r.message_kind)
+                .unwrap_or_default(),
             body: r.body,
             attachments: Vec::new(),
             created_at: parse_ts(&r.created_at),
@@ -2527,8 +2530,10 @@ async fn hydrate_room(
         None => 0,
     };
     let last: Option<ChatMessageRow> = sqlx::query_as(
-        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
-           FROM chat_messages WHERE room_id = ?1 ORDER BY id DESC LIMIT 1",
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at, message_kind
+           FROM chat_messages
+          WHERE room_id = ?1 AND deleted_at IS NULL AND compacted_at IS NULL
+          ORDER BY id DESC LIMIT 1",
     )
     .bind(row.id)
     .fetch_optional(db)
@@ -2634,7 +2639,8 @@ pub async fn chat_unread(db: &SqlitePool, room_id: i64, member: &str) -> AppResu
           WHERE room_id = ?1
             AND id > COALESCE(
                 (SELECT last_read_message_id FROM chat_reads WHERE room_id = ?1 AND member = ?2), 0)
-            AND author_member != ?2",
+            AND author_member != ?2
+            AND deleted_at IS NULL AND compacted_at IS NULL",
     )
     .bind(room_id)
     .bind(member)
@@ -2870,8 +2876,11 @@ pub async fn list_chat_pushes(
     }
     let rows: Vec<PushRow> = sqlx::query_as(
         "SELECT p.id, p.kind, p.room_id, r.name AS room_name, p.message_id
-           FROM chat_pushes p JOIN chat_rooms r ON r.id = p.room_id
+           FROM chat_pushes p
+           JOIN chat_rooms r ON r.id = p.room_id
+           JOIN chat_messages m ON m.id = p.message_id
           WHERE p.member = ?1 AND p.id > ?2
+            AND m.deleted_at IS NULL AND m.compacted_at IS NULL
           ORDER BY p.id ASC LIMIT ?3",
     )
     .bind(member)
@@ -2884,7 +2893,7 @@ pub async fn list_chat_pushes(
     }
     let ids: Vec<i64> = rows.iter().map(|r| r.message_id).collect();
     let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
-        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at, message_kind
            FROM chat_messages WHERE id IN (",
     );
     let mut sep = qb.separated(", ");
@@ -2980,9 +2989,10 @@ pub async fn chat_messages(
     limit: i64,
 ) -> AppResult<Vec<ChatMessage>> {
     let rows: Vec<ChatMessageRow> = sqlx::query_as(
-        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at, message_kind
            FROM chat_messages
           WHERE room_id = ?1 AND id > ?2
+            AND deleted_at IS NULL AND compacted_at IS NULL
           ORDER BY id ASC
           LIMIT ?3",
     )
@@ -3010,7 +3020,7 @@ pub async fn post_chat_message(
         "INSERT INTO chat_messages
             (room_id, author_member, author_display, author_kind, body, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-         RETURNING id, room_id, author_member, author_display, author_kind, body, created_at",
+         RETURNING id, room_id, author_member, author_display, author_kind, body, created_at, message_kind",
     )
     .bind(room_id)
     .bind(author_member)
@@ -3049,6 +3059,101 @@ pub async fn post_chat_message(
         .await?
         .remove(&message.id)
         .unwrap_or_default();
+    Ok(message)
+}
+
+/// One visible message by id, for authorization before delete.
+pub async fn get_chat_message(
+    db: &SqlitePool,
+    id: i64,
+) -> AppResult<Option<breadboard_core::ChatMessage>> {
+    let row: Option<ChatMessageRow> = sqlx::query_as(
+        "SELECT id, room_id, author_member, author_display, author_kind, body, created_at, message_kind
+           FROM chat_messages
+          WHERE id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    match row {
+        Some(row) => Ok(hydrate_messages(db, vec![row]).await?.pop()),
+        None => Ok(None),
+    }
+}
+
+/// Soft-delete one message and drop any pushes that referenced it.
+pub async fn delete_chat_message(
+    db: &SqlitePool,
+    id: i64,
+    deleted_by: &str,
+) -> AppResult<bool> {
+    let mut tx = crate::db::begin_write(db).await?;
+    let changed = sqlx::query(
+        "UPDATE chat_messages SET deleted_at = ?1, deleted_by = ?2
+          WHERE id = ?3 AND deleted_at IS NULL",
+    )
+    .bind(now_rfc3339())
+    .bind(deleted_by)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM chat_pushes WHERE message_id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+/// Insert a summary message and hide every visible message below it.
+pub async fn compact_chat_room(
+    db: &SqlitePool,
+    room_id: i64,
+    summary: &str,
+) -> AppResult<breadboard_core::ChatMessage> {
+    let mut tx = crate::db::begin_write(db).await?;
+    let now = now_rfc3339();
+    let row: ChatMessageRow = sqlx::query_as(
+        "INSERT INTO chat_messages
+            (room_id, author_member, author_display, author_kind, body, created_at, message_kind)
+         VALUES (?1, 'system', 'system', 'human', ?2, ?3, 'summary')
+         RETURNING id, room_id, author_member, author_display, author_kind, body, created_at, message_kind",
+    )
+    .bind(room_id)
+    .bind(summary)
+    .bind(&now)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE chat_messages SET compacted_at = ?1
+          WHERE room_id = ?2 AND id < ?3
+            AND deleted_at IS NULL AND compacted_at IS NULL",
+    )
+    .bind(&now)
+    .bind(room_id)
+    .bind(row.id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "DELETE FROM chat_pushes
+          WHERE message_id IN (
+            SELECT id FROM chat_messages WHERE room_id = ?1 AND compacted_at = ?2
+          )",
+    )
+    .bind(room_id)
+    .bind(&now)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    let mut message: breadboard_core::ChatMessage = row.into();
+    message.attachments = Vec::new();
     Ok(message)
 }
 

@@ -305,12 +305,16 @@ export interface ChatUpload {
   size: number;
 }
 
+export type ChatMessageKind = "message" | "summary";
+
 export interface ChatMessage {
   id: number;
   room_id: number;
   author_member: string;
   author_display: string;
   author_kind: ChatAuthorKind;
+  /** Missing on older servers, where every message is a normal one. */
+  message_kind?: ChatMessageKind;
   body: string;
   attachments: ChatUpload[];
   created_at: string;
@@ -521,6 +525,13 @@ export class BreadboardClient {
     const qs = q.toString();
     return this.req<ChatMessage[]>("GET", `/api/chat/rooms/${room}/messages${qs ? `?${qs}` : ""}`);
   };
+  deleteChatMessage = (id: number, agent?: string) =>
+    this.req<void>(
+      "DELETE",
+      `/api/chat/messages/${id}${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`,
+    );
+  compactChatRoom = (id: number) =>
+    this.req<ChatMessage>("POST", `/api/chat/rooms/${id}/compact`);
   postChatMessage = (body: {
     body: string;
     room?: string;
