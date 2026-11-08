@@ -185,17 +185,24 @@ async fn failed_writeback_is_retried_on_the_reconcile_pass() {
         .forgejo_ref
         .is_none());
 
-    // The remote recovers; the reconcile sweep is the durable retry.
+    // The remote recovers; the reconcile sweep is the durable retry. Retry a
+    // few times because a sweep that arrives while the failed background
+    // attempt is still in flight is skipped by design.
     fake.deny.store(false, Ordering::SeqCst);
-    sync::retry_pending_writebacks(&app.state).await;
-    assert!(
-        store::get_issue_by_key(&app.db, &key)
+    let mut linked = false;
+    for _ in 0..20 {
+        sync::retry_pending_writebacks(&app.state).await;
+        linked = store::get_issue_by_key(&app.db, &key)
             .await
             .unwrap()
             .forgejo_ref
-            .is_some(),
-        "retry links the card"
-    );
+            .is_some();
+        if linked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(linked, "retry links the card");
     assert_eq!(fake.creates.load(Ordering::SeqCst), 1);
 
     // A second pass is a no-op: the card is linked.
