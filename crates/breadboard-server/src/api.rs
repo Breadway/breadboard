@@ -7,7 +7,7 @@
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::StatusCode;
-use axum::http::{header, HeaderValue};
+use axum::http::{header, HeaderMap, HeaderValue};
 use axum::response::Response;
 use axum::Json;
 use breadboard_core::{BoardEvent, Comment, Cycle, Epic, Issue, Project, SyncSource};
@@ -225,10 +225,20 @@ pub async fn create_issue(
     State(app): State<AppState>,
     user: AuthUser,
     Json(body): Json<NewIssue>,
-) -> AppResult<(StatusCode, Json<Issue>)> {
+) -> AppResult<(StatusCode, HeaderMap, Json<Issue>)> {
     let issue = store::create_issue(&app.db, &body, Some(user.0.id)).await?;
-    // Push to Forgejo when the project maps to an enabled repo (no-op otherwise).
-    let issue = sync::writeback_new_issue(&app, issue).await;
+    // The local row is committed. Push to Forgejo in the background: a slow or
+    // failing remote must not turn a created card into a client-visible error
+    // (BB-132). A failed writeback is retried by the reconcile loop.
+    let pending = sync::writeback_needed(&app, &issue).await;
+    if pending {
+        sync::spawn_writeback_new_issue(&app, issue.clone());
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-breadboard-writeback",
+        HeaderValue::from_static(if pending { "pending" } else { "none" }),
+    );
     app.bus.publish(BoardEvent::CardCreated {
         id: issue.id,
         key: issue.key.clone(),
@@ -258,7 +268,7 @@ pub async fn create_issue(
         )
         .await;
     }
-    Ok((StatusCode::CREATED, Json(issue)))
+    Ok((StatusCode::CREATED, headers, Json(issue)))
 }
 
 pub async fn get_issue(
@@ -317,7 +327,7 @@ pub async fn patch_issue(
     user: AuthUser,
     Path(key): Path<String>,
     Json(patch): Json<IssuePatch>,
-) -> AppResult<Json<Issue>> {
+) -> AppResult<(HeaderMap, Json<Issue>)> {
     let before = store::get_issue_by_key(&app.db, &key).await?;
     let issue = store::update_issue(
         &app.db,
@@ -372,10 +382,19 @@ pub async fn patch_issue(
         .await;
     }
 
-    // Push synced-field changes back to Forgejo (no-op if not linked/enabled).
-    sync::writeback(&app, &before, &issue).await;
+    // Push synced-field changes back to Forgejo off the request path. The
+    // caller gets the local result; failures retry on the next reconcile pass.
+    let pending = sync::writeback_needed(&app, &issue).await;
+    if pending {
+        sync::spawn_writeback(&app, before, issue.clone());
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "x-breadboard-writeback",
+        HeaderValue::from_static(if pending { "pending" } else { "none" }),
+    );
 
-    Ok(Json(issue))
+    Ok((headers, Json(issue)))
 }
 
 pub async fn move_issue_project(
