@@ -474,4 +474,10 @@ pub struct IssueFilter {
     pub assignee_id: Option<i64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mine: bool,
+    /// Page size. Omitted means the server default (500), capped at 2000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    /// Rows to skip, for pagination with `limit`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
 }

@@ -635,6 +635,68 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
             .bind(r.id)
             .fetch_all(db)
             .await?;
+
+    Ok(finish_issue(r, labels, link_rows))
+}
+
+/// Hydrate a page in two grouped queries instead of two per row. A list of N
+/// issues costs 3 queries total (base select, labels, links), so the request
+/// cost no longer grows with the page size (BB-126).
+async fn hydrate_rows(db: &SqlitePool, rows: Vec<IssueRow>) -> AppResult<Vec<Issue>> {
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
+
+    let mut labels_qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
+        "SELECT issue_id, label FROM issue_labels WHERE issue_id IN (",
+    );
+    {
+        let mut separated = labels_qb.separated(", ");
+        for id in &ids {
+            separated.push_bind(*id);
+        }
+    }
+    labels_qb.push(") ORDER BY issue_id, label");
+    let label_rows: Vec<(i64, String)> = labels_qb.build_query_as().fetch_all(db).await?;
+
+    let mut links_qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
+        "SELECT issue_id, target_id, kind FROM issue_links WHERE issue_id IN (",
+    );
+    {
+        let mut separated = links_qb.separated(", ");
+        for id in &ids {
+            separated.push_bind(*id);
+        }
+    }
+    links_qb.push(") ORDER BY issue_id");
+    let link_rows: Vec<(i64, i64, String)> = links_qb.build_query_as().fetch_all(db).await?;
+
+    let mut labels_by_issue: std::collections::HashMap<i64, Vec<String>> =
+        std::collections::HashMap::new();
+    for (issue_id, label) in label_rows {
+        labels_by_issue.entry(issue_id).or_default().push(label);
+    }
+    let mut links_by_issue: std::collections::HashMap<i64, Vec<(i64, String)>> =
+        std::collections::HashMap::new();
+    for (issue_id, target_id, kind) in link_rows {
+        links_by_issue
+            .entry(issue_id)
+            .or_default()
+            .push((target_id, kind));
+    }
+
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let labels = labels_by_issue.remove(&r.id).unwrap_or_default();
+            let links = links_by_issue.remove(&r.id).unwrap_or_default();
+            finish_issue(r, labels, links)
+        })
+        .collect())
+}
+
+fn finish_issue(r: IssueRow, labels: Vec<String>, link_rows: Vec<(i64, String)>) -> Issue {
     let links = link_rows
         .into_iter()
         .filter_map(|(target_id, kind)| {
@@ -642,7 +704,7 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
         })
         .collect();
 
-    Ok(Issue {
+    Issue {
         id: r.id,
         key: r.key,
         project_id: r.project_id,
@@ -665,7 +727,7 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
         milestone: r.milestone,
         created_at: parse_ts(&r.created_at),
         updated_at: parse_ts(&r.updated_at),
-    })
+    }
 }
 
 pub async fn get_issue(db: &SqlitePool, id: i64) -> AppResult<Issue> {
@@ -686,7 +748,33 @@ pub async fn get_issue_by_key(db: &SqlitePool, key: &str) -> AppResult<Issue> {
     hydrate(db, row).await
 }
 
+/// Default page size for `GET /api/issues`; keeps a browser tab or CLI from
+/// pulling the whole history in one response.
+pub const DEFAULT_ISSUE_PAGE: u32 = 500;
+/// Hard ceiling on a single page.
+pub const MAX_ISSUE_PAGE: u32 = 2000;
+
 pub async fn list_issues(db: &SqlitePool, filter: &IssueFilter) -> AppResult<Vec<Issue>> {
+    let limit = Some(
+        filter
+            .limit
+            .unwrap_or(DEFAULT_ISSUE_PAGE)
+            .clamp(1, MAX_ISSUE_PAGE),
+    );
+    list_issues_page(db, filter, limit).await
+}
+
+/// Every matching issue, ignoring `limit`. Only for internal callers that need
+/// the full set (import title matching); HTTP callers page with `limit`/`offset`.
+pub async fn list_issues_all(db: &SqlitePool, filter: &IssueFilter) -> AppResult<Vec<Issue>> {
+    list_issues_page(db, filter, None).await
+}
+
+async fn list_issues_page(
+    db: &SqlitePool,
+    filter: &IssueFilter,
+    limit: Option<u32>,
+) -> AppResult<Vec<Issue>> {
     let mut qb: sqlx::QueryBuilder<sqlx::Sqlite> =
         sqlx::QueryBuilder::new(format!("SELECT {ISSUE_COLS} FROM issues WHERE 1=1"));
 
@@ -711,14 +799,24 @@ pub async fn list_issues(db: &SqlitePool, filter: &IssueFilter) -> AppResult<Vec
     if let Some(assignee_id) = filter.assignee_id {
         qb.push(" AND assignee_id = ").push_bind(assignee_id);
     }
-    qb.push(" ORDER BY updated_at DESC");
+    // `id` breaks updated_at ties so LIMIT/OFFSET pages cannot overlap or skip
+    // a row when several issues share a timestamp.
+    qb.push(" ORDER BY updated_at DESC, id DESC");
+
+    if let Some(limit) = limit {
+        qb.push(" LIMIT ").push_bind(i64::from(limit));
+    }
+    let offset = i64::from(filter.offset.unwrap_or(0));
+    if offset > 0 {
+        if limit.is_none() {
+            // SQLite needs a LIMIT before OFFSET; -1 means no limit.
+            qb.push(" LIMIT -1");
+        }
+        qb.push(" OFFSET ").push_bind(offset);
+    }
 
     let rows: Vec<IssueRow> = qb.build_query_as().fetch_all(db).await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        out.push(hydrate(db, r).await?);
-    }
-    Ok(out)
+    hydrate_rows(db, rows).await
 }
 
 /// Create an issue. Only `title` is guaranteed; the key is allocated from the

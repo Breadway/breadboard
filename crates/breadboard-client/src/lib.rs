@@ -184,7 +184,36 @@ impl Client {
 
     // --- issues ---------------------------------------------------------
 
+    /// List issues. With no `limit` this pages through the whole set so the
+    /// CLI keeps seeing everything while each request stays bounded; set
+    /// `limit` (and optionally `offset`) for one page.
     pub async fn list_issues(&self, filter: &IssueFilter) -> Result<Vec<Issue>> {
+        const PAGE: u32 = 500;
+        const MAX_PAGES: u32 = 40;
+        if let Some(limit) = filter.limit {
+            return self
+                .list_issue_page(filter, limit.clamp(1, 2000), filter.offset.unwrap_or(0))
+                .await;
+        }
+        let mut out = Vec::new();
+        for page in 0..MAX_PAGES {
+            let offset = filter.offset.unwrap_or(0) + page * PAGE;
+            let batch: Vec<Issue> = self.list_issue_page(filter, PAGE, offset).await?;
+            let last = batch.len() < PAGE as usize;
+            out.extend(batch);
+            if last {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn list_issue_page(
+        &self,
+        filter: &IssueFilter,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Issue>> {
         let mut q: Vec<(String, String)> = Vec::new();
         if let Some(p) = &filter.project {
             q.push(("project".into(), p.clone()));
@@ -201,6 +230,8 @@ impl Client {
         if filter.mine {
             q.push(("mine".into(), "true".into()));
         }
+        q.push(("limit".into(), limit.to_string()));
+        q.push(("offset".into(), offset.to_string()));
         self.send(self.build(reqwest::Method::GET, "/api/issues").query(&q))
             .await
     }
