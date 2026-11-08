@@ -139,7 +139,7 @@ pub async fn run(state: &AppState, req: &ImportRequest) -> AppResult<ImportResul
     let _guard = lock.lock().await;
 
     let parsed = parse(&req.markdown);
-    let issue_list = store::list_issues(
+    let issue_list = store::list_issues_all(
         &state.db,
         &crate::dto::IssueFilter {
             project: Some(project.key.clone()),

@@ -434,3 +434,105 @@ async fn events_accept_session_cookie_for_browser_clients() {
 fn c_ok(status: reqwest::StatusCode) {
     assert!(status.is_success(), "setup failed: {status}");
 }
+
+/// GET /api/issues is paged (`limit` default 500, `offset`, stable order) and
+/// hydrates labels/links for a page in grouped queries rather than per row.
+#[tokio::test]
+async fn list_issues_pages_and_batches_hydration() {
+    use breadboard_core::dto::NewIssue;
+
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    c.post(format!("{base}/api/projects"))
+        .header("authorization", &auth)
+        .json(&json!({ "key": "PAGE", "name": "paging" }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    for n in 0..600 {
+        breadboard_server::store::create_issue(
+            &app.db,
+            &NewIssue {
+                title: format!("paged item {n}"),
+                project: Some("PAGE".into()),
+                labels: vec!["batch".into(), format!("n{}", n % 3)],
+                ..Default::default()
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    let get = |query: &str| {
+        let c = c.clone();
+        let base = base.clone();
+        let auth = auth.clone();
+        let query = query.to_string();
+        async move {
+            let body: Value = c
+                .get(format!("{base}/api/issues{query}"))
+                .header("authorization", &auth)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            body.as_array().unwrap().clone()
+        }
+    };
+
+    // A bare request is capped at the default page, not the whole table.
+    let first = get("").await;
+    assert_eq!(first.len(), 500, "default page is 500 rows");
+    assert!(first[0]["labels"].as_array().unwrap().contains(&json!("batch")));
+    assert!(first[499]["labels"].as_array().unwrap().contains(&json!("batch")));
+
+    let page = get("?limit=50").await;
+    assert_eq!(page.len(), 50);
+
+    let second = get("?limit=50&offset=50").await;
+    assert_eq!(second.len(), 50);
+    let keys: std::collections::HashSet<&str> =
+        page.iter().map(|i| i["key"].as_str().unwrap()).collect();
+    assert!(
+        second
+            .iter()
+            .all(|i| !keys.contains(i["key"].as_str().unwrap())),
+        "offset pages do not overlap"
+    );
+
+    let tail = get("?limit=50&offset=550").await;
+    assert_eq!(tail.len(), 50);
+    let past = get("?limit=50&offset=600").await;
+    assert!(past.is_empty());
+
+    // A limit above the table returns what exists; the hard cap is internal.
+    let wide = get("?limit=9999").await;
+    assert_eq!(wide.len(), 600);
+
+    // Links hydrate for the whole page from the grouped query.
+    let target = first[0]["id"].as_i64().unwrap();
+    sqlx::query(
+        "INSERT INTO issue_links (issue_id, target_id, kind) VALUES (?1, ?2, 'relates-to')",
+    )
+    .bind(first[1]["id"].as_i64().unwrap())
+    .bind(target)
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let with_link = get("?limit=500").await;
+    let linked = with_link
+        .iter()
+        .find(|i| i["id"].as_i64() == Some(first[1]["id"].as_i64().unwrap()))
+        .expect("linked row is in the page");
+    assert_eq!(linked["links"][0]["target_id"], target);
+    assert_eq!(linked["links"][0]["kind"], "relates-to");
+}

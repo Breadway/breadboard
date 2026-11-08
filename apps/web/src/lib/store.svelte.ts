@@ -71,6 +71,9 @@ export function emptyFilters(): Filters {
  *  Must match CLAIM_STALE_SECS in crates/breadboard-server/src/api.rs. */
 export const CLAIM_STALE_SECS = 300;
 
+/** Page size for issue lists; matches the server default. */
+const ISSUE_PAGE = 500;
+
 export function claimStale(lastHeartbeat: string, now = Date.now()): boolean {
   const t = Date.parse(lastHeartbeat);
   if (Number.isNaN(t)) return false;
@@ -196,6 +199,7 @@ class Store {
   #lastChatPush = 0;
   #chatPushReady = false;
   #everLive = false;
+  #issuesGen = 0;
   #retry: ReturnType<typeof setTimeout> | undefined;
   #retryDelay = 1000;
   #toastTimer: ReturnType<typeof setTimeout> | undefined;
@@ -607,16 +611,39 @@ class Store {
   }
 
   async loadAll() {
+    // First page paints the board; the rest of the history fills in behind it
+    // so a 2.5MB snapshot never blocks startup (BB-124).
+    const gen = ++this.#issuesGen;
     const [issues, projects, cycles, epics] = await Promise.all([
-      api.listIssues(),
+      api.listIssues({ limit: ISSUE_PAGE }),
       api.listProjects(),
       api.listCycles(),
       api.listEpics(),
     ]);
+    if (gen !== this.#issuesGen) return;
     this.issues = issues;
     this.projects = projects;
     this.cycles = cycles;
     this.epics = epics;
+    if (issues.length === ISSUE_PAGE) void this.#fillIssues(gen, issues.length);
+  }
+
+  async #fillIssues(gen: number, start: number) {
+    try {
+      for (let offset = start; ; offset += ISSUE_PAGE) {
+        const page = await api.listIssues({ limit: ISSUE_PAGE, offset });
+        if (gen !== this.#issuesGen) return;
+        if (!page.length) return;
+        // Merge by id so a live event that landed while this page was in
+        // flight is not overwritten by the older snapshot.
+        const known = new Set(this.issues.map((i) => i.id));
+        const fresh = page.filter((i) => !known.has(i.id));
+        if (fresh.length) this.issues = [...this.issues, ...fresh];
+        if (page.length < ISSUE_PAGE) return;
+      }
+    } catch {
+      // The next SSE reconnect reloads everything.
+    }
   }
 
   async loadSettings() {

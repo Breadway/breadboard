@@ -153,7 +153,7 @@ neither is valid.
 | `PATCH` | `/api/cycles/{id}` | `{ project_ids }` replaces selected project defaults; existing issues are not moved |
 | `POST` | `/api/cycles/{id}/start` | emits `cycle.started` (with issue count) |
 | `POST` | `/api/cycles/{id}/end` | sets `closed`, emits `cycle.ended` |
-| `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine` |
+| `GET` | `/api/issues` | filter: `project` (key or id), `status`, `cycle_id`, `epic_id`, `assignee_id`, `mine`; pagination: `limit` (default 500, max 2000) and `offset`. Ordered `updated_at DESC, id DESC`. Clients that need the full history page through; a single request never returns the whole table |
 
 When creating an issue without `cycle_id`, Breadboard assigns the sole open cycle
 selecting that project's id. No selected cycle means no default. Multiple matching

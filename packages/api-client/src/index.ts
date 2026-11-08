@@ -202,6 +202,9 @@ export interface IssueFilter {
   epic_id?: number;
   assignee_id?: number;
   mine?: boolean;
+  /** Page size. The server defaults to 500 and caps at 2000. */
+  limit?: number;
+  offset?: number;
 }
 
 export type AgentState =
@@ -494,6 +497,19 @@ export class BreadboardClient {
     }
     const qs = q.toString();
     return this.req<Issue[]>("GET", `/api/issues${qs ? `?${qs}` : ""}`);
+  };
+  /** Every page for a filter. `listIssues` returns one bounded page; callers
+   *  that need the full set (MCP tools, scripts) use this. */
+  listAllIssues = async (filter: IssueFilter = {}): Promise<Issue[]> => {
+    const pageSize = filter.limit ?? 500;
+    const out: Issue[] = [];
+    for (let pageNo = 0; pageNo < 40; pageNo++) {
+      const offset = (filter.offset ?? 0) + pageNo * pageSize;
+      const page = await this.listIssues({ ...filter, limit: pageSize, offset });
+      out.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return out;
   };
   getIssue = (key: string) => this.req<IssueDetail>("GET", `/api/issues/${key}`);
   createIssue = (i: NewIssue) => this.req<Issue>("POST", "/api/issues", i);

@@ -347,14 +347,18 @@ server.tool(
     epic: z.string().optional().describe("epic key or id"),
     assignee_id: z.number().optional().describe("filter by an arbitrary assignee's user id"),
     mine: z.boolean().optional().describe("only issues assigned to me"),
+    limit: z.number().int().positive().max(2000).optional().describe("page size when you only want one page"),
+    offset: z.number().int().min(0).optional().describe("rows to skip, with limit"),
   },
-  ({ project, status, cycle, epic, assignee_id, mine }) =>
+  ({ project, status, cycle, epic, assignee_id, mine, limit, offset }) =>
     run(async () => {
-      const filter: IssueFilter = { project, mine, assignee_id };
+      const filter: IssueFilter = { project, mine, assignee_id, limit, offset };
       if (status) filter.status = status as IssueFilter["status"];
       if (cycle) filter.cycle_id = await resolveCycleId(cycle);
       if (epic) filter.epic_id = await resolveEpicId(epic);
-      return client.listIssues(filter);
+      // With no explicit limit, return the whole set by paging, so a caller
+      // that enumerates the board is not silently cut off at one page.
+      return limit === undefined ? client.listAllIssues(filter) : client.listIssues(filter);
     }),
 );
 
@@ -379,7 +383,7 @@ server.tool(
       const filter: IssueFilter = { project, assignee_id };
       if (cycle) filter.cycle_id = await resolveCycleId(cycle);
       if (epic) filter.epic_id = await resolveEpicId(epic);
-      const issues = await client.listIssues(filter);
+      const issues = await client.listAllIssues(filter);
       return STATUSES.map((s) => ({
         status: s,
         count: issues.filter((i) => i.status === s).length,
@@ -531,7 +535,7 @@ server.tool(
       if (id === undefined) throw new Error("epic key or id is required");
       const [details, issues] = await Promise.all([
         client.getEpic(id),
-        client.listIssues({ epic_id: id }),
+        client.listAllIssues({ epic_id: id }),
       ]);
       return { ...details, issues };
     }),
