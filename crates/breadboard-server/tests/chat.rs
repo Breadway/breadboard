@@ -336,24 +336,9 @@ async fn unread_counts_and_cursors() {
         .unwrap();
     assert_eq!(lobby["unread"], 2, "Beta's two messages are unread");
 
-    // Alpha reads them.
-    c.get(format!(
-        "{base}/api/chat/rooms/{}/messages?agent=Alpha",
-        lobby["id"].as_i64().unwrap()
-    ))
-    .header("authorization", &auth)
-    .send()
-    .await
-    .unwrap();
-
-    let alpha_rooms = rooms(&c, &base, &auth, Some("Alpha")).await;
-    let lobby = alpha_rooms
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|r| r["name"] == "lobby")
-        .unwrap();
-    assert_eq!(lobby["unread"], 0);
+    // Alpha reads them. Read receipts are recorded in the background, so wait
+    // for the cursor to settle rather than assuming it is already applied.
+    wait_for_unread(&c, &base, &auth, Some("Alpha"), 0).await;
 
     // Alpha replies: Beta now has two unread (Beta never read), and Alpha's
     // own message does not re-add unread for Alpha.
@@ -393,6 +378,50 @@ async fn unread_counts_and_cursors() {
         .find(|r| r["name"] == "lobby")
         .unwrap();
     assert_eq!(lobby["unread"], 3);
+}
+
+/// Read receipts are recorded in the background, so a room fetch followed by
+/// an immediate unread check can race. Fetch the room, then wait briefly for
+/// the count to settle.
+async fn wait_for_unread(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    agent: Option<&str>,
+    want: i64,
+) {
+    let listed = rooms(c, base, auth, agent).await;
+    let lobby_id = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "lobby")
+        .unwrap()["id"]
+        .as_i64()
+        .unwrap();
+    let agent_q = agent.map(|a| format!("?agent={a}")).unwrap_or_default();
+    c.get(format!(
+        "{base}/api/chat/rooms/{lobby_id}/messages{agent_q}"
+    ))
+    .header("authorization", auth)
+    .send()
+    .await
+    .unwrap();
+
+    for _ in 0..60 {
+        let listed = rooms(c, base, auth, agent).await;
+        let lobby = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["name"] == "lobby")
+            .unwrap();
+        if lobby["unread"].as_i64() == Some(want) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("unread never settled at {want}");
 }
 
 async fn pushes(c: &reqwest::Client, base: &str, auth: &str, agent: Option<&str>) -> Value {
@@ -448,7 +477,9 @@ async fn dms_always_push_and_pings_bypass_subscriptions() {
     let room_id = room["id"].as_i64().unwrap();
     c.post(format!("{base}/api/chat/messages"))
         .header("authorization", &auth)
-        .json(&json!({ "agent_name": "Alpha", "room": room_id.to_string(), "body": "no ping here" }))
+        .json(
+            &json!({ "agent_name": "Alpha", "room": room_id.to_string(), "body": "no ping here" }),
+        )
         .send()
         .await
         .unwrap();

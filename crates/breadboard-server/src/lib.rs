@@ -18,7 +18,8 @@ pub mod summary;
 pub mod sync;
 pub mod webhook;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use crate::bus::Bus;
 use crate::config::Config;
@@ -35,6 +36,10 @@ pub struct AppState {
     /// Single-flight guard for reconcile passes: the scheduled loop and the
     /// manual endpoint share it so two passes never run over the same repos.
     pub reconcile: Arc<tokio::sync::Mutex<()>>,
+    /// Best-effort read receipts: the last message id already recorded for a
+    /// `(room, member)` pair. Fetching messages never waits on the write, and
+    /// a repeated fetch that has not advanced does not write again.
+    pub read_marks: Arc<Mutex<HashMap<(i64, String), i64>>>,
 }
 
 impl AppState {
@@ -54,6 +59,7 @@ impl AppState {
             forgejo,
             config: Arc::new(config),
             reconcile: Arc::new(tokio::sync::Mutex::new(())),
+            read_marks: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 }
