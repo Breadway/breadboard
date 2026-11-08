@@ -19,15 +19,18 @@ struct FakeForgejo {
     attempts: Arc<AtomicUsize>,
     creates: Arc<AtomicUsize>,
     issues: Arc<std::sync::Mutex<Vec<Value>>>,
+    /// Held at zero by the create test so the writeback cannot finish before
+    /// the assertion; released once the API response has been checked.
+    gate: Arc<tokio::sync::Semaphore>,
 }
 
 async fn create_issue(
     State(fake): State<FakeForgejo>,
     axum::Json(payload): axum::Json<Value>,
 ) -> (StatusCode, axum::Json<Value>) {
-    // Slow enough that a synchronous writeback could not answer before this
-    // completes; the API must not wait for it.
-    tokio::time::sleep(Duration::from_millis(700)).await;
+    // The gate stands in for a slow remote: a synchronous writeback would
+    // block the API response here.
+    let _permit = fake.gate.acquire().await.unwrap();
     fake.attempts.fetch_add(1, Ordering::SeqCst);
     if fake.deny.load(Ordering::SeqCst) {
         return (
@@ -62,6 +65,7 @@ async fn harness() -> (common::TestApp, FakeForgejo) {
         attempts: Arc::new(AtomicUsize::new(0)),
         creates: Arc::new(AtomicUsize::new(0)),
         issues: Arc::new(std::sync::Mutex::new(Vec::new())),
+        gate: Arc::new(tokio::sync::Semaphore::new(0)),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -138,6 +142,8 @@ async fn create_answers_before_the_forgejo_writeback_runs() {
         "the response did not wait for the remote"
     );
 
+    // Let the blocked remote call through; the background task links the card.
+    fake.gate.add_permits(1);
     assert!(wait_linked(&app, &key).await, "background writeback links the card");
     assert_eq!(fake.creates.load(Ordering::SeqCst), 1);
 }
@@ -146,6 +152,8 @@ async fn create_answers_before_the_forgejo_writeback_runs() {
 async fn failed_writeback_is_retried_on_the_reconcile_pass() {
     let (app, fake) = harness().await;
     fake.deny.store(true, Ordering::SeqCst);
+    // This test does not check ordering, so let the fake through freely.
+    fake.gate.add_permits(100);
     let c = reqwest::Client::new();
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);

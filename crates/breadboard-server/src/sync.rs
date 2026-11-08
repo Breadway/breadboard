@@ -11,8 +11,6 @@
 use anyhow::Context;
 use breadboard_core::{BoardEvent, Issue, IssueType, Project, Status, SyncSource};
 use chrono::{DateTime, Utc};
-use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
 
 use crate::dto::IssuePatch;
 use crate::error::AppResult;
@@ -720,20 +718,13 @@ pub async fn writeback_needed(state: &AppState, issue: &Issue) -> bool {
     matches!(store::repo_enabled(&state.db, &repo).await, Ok(true))
 }
 
-/// Guard so the request-path spawn and the reconcile retry cannot write back
-/// the same card at once and create two remote issues.
-fn writeback_in_flight() -> &'static Mutex<HashSet<i64>> {
-    static IN_FLIGHT: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
-    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
-}
-
 async fn writeback_pending_issue(state: &AppState, issue: Issue) {
-    if !writeback_in_flight().lock().unwrap().insert(issue.id) {
+    if !state.writeback_in_flight.lock().unwrap().insert(issue.id) {
         return;
     }
     let key = issue.key.clone();
     let (linked, error) = writeback_new_issue_result(state, issue).await;
-    writeback_in_flight().lock().unwrap().remove(&linked.id);
+    state.writeback_in_flight.lock().unwrap().remove(&linked.id);
     if let Some(error) = error {
         tracing::warn!(key = %key, error = %error, "forgejo writeback still pending; the reconcile loop will retry");
         return;
