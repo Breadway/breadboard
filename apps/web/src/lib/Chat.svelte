@@ -9,6 +9,8 @@
   let messages = $state<ChatMessage[]>([]);
   let draft = $state("");
   let sending = $state(false);
+  let deleting = $state<number | null>(null);
+  let compacting = $state(false);
   let pending = $state<ChatUpload[]>([]);
   let uploading = $state(false);
   let fileEl: HTMLInputElement | undefined = $state();
@@ -48,6 +50,39 @@
   function roomTint(room: ChatRoom): string {
     const agent = room.members.find((m) => m.startsWith("agent:"));
     return agent ? agentColor(memberDisplay(agent)) : "var(--ink-3)";
+  }
+
+  async function deleteMessage(message: ChatMessage) {
+    if (deleting != null) return;
+    if (!confirm("Delete this message? It disappears for everyone.")) return;
+    deleting = message.id;
+    try {
+      await api.deleteChatMessage(message.id);
+      messages = messages.filter((m) => m.id !== message.id);
+      void loadRooms();
+      store.info("Message deleted");
+    } catch (e) {
+      store.flash(`Couldn't delete: ${errMsg(e)}`);
+    } finally {
+      deleting = null;
+    }
+  }
+
+  async function compactRoom() {
+    if (selectedId == null || compacting) return;
+    if (!confirm("Compact this room? The model will summarize the visible messages and hide them.")) return;
+    compacting = true;
+    store.info("Compacting room, this can take a minute...");
+    try {
+      await api.compactChatRoom(selectedId);
+      await loadMessages(selectedId);
+      await loadRooms();
+      store.info("Room compacted");
+    } catch (e) {
+      store.flash(`Couldn't compact: ${errMsg(e)}`);
+    } finally {
+      compacting = false;
+    }
   }
 
   async function loadSubs() {
@@ -287,6 +322,9 @@
           {#if selected.description}<p class="desc">{selected.description}</p>{/if}
         </div>
         {#if selected.kind === "room"}
+          <button class="compact" disabled={compacting} onclick={() => void compactRoom()}>
+            {compacting ? "compacting..." : "compact"}
+          </button>
           <button
             class="push"
             class:on={subs.includes(selected.id)}
@@ -307,33 +345,59 @@
 
       <div class="messages" bind:this={scroller}>
         {#each messages as m (m.id)}
-          <div class="msg" class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
-            <span class="who" style="--tint:{m.author_kind === 'agent' ? agentColor(m.author_display) : 'var(--accent)'}">
-              {m.author_display}
-              {#if m.author_kind === "human"}<span class="tag">human</span>{/if}
-            </span>
-            <div class="content">
-              {#if m.body}<span class="body">{m.body}</span>{/if}
-              {#if m.attachments.length}
-                <div class="atts">
-                  {#each m.attachments as a (a.id)}
-                    {#if isImage(a.mime)}
-                      <a class="img" href={`/api/chat/uploads/${a.id}`} target="_blank" rel="noreferrer" title={a.filename}>
-                        <img src={`/api/chat/uploads/${a.id}`} alt={a.filename} loading="lazy" />
-                      </a>
-                    {:else}
-                      <a class="file" href={`/api/chat/uploads/${a.id}`} target="_blank" rel="noreferrer" title={a.filename}>
-                        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.8h5.2L13 5.6v8.6H4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /><path d="M9 1.8v4h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /></svg>
-                        <span class="fname">{a.filename}</span>
-                        <span class="fsize">{humanSize(a.size)}</span>
-                      </a>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
+          {#if m.message_kind === "summary"}
+            <div class="summary">
+              <div class="stitle">
+                <span>Compacted summary</span>
+                <span>{when(m.created_at)}</span>
+                <button
+                  class="msgdel"
+                  title="Delete summary"
+                  aria-label="Delete summary"
+                  disabled={deleting === m.id}
+                  onclick={() => void deleteMessage(m)}
+                >delete</button>
+              </div>
+              <div class="sbody">{m.body}</div>
             </div>
-            <span class="at">{when(m.created_at)}</span>
-          </div>
+          {:else}
+            <div class="msg" class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
+              <span class="who" style="--tint:{m.author_kind === 'agent' ? agentColor(m.author_display) : 'var(--accent)'}">
+                {m.author_display}
+                {#if m.author_kind === "human"}<span class="tag">human</span>{/if}
+              </span>
+              <div class="content">
+                {#if m.body}<span class="body">{m.body}</span>{/if}
+                {#if m.attachments.length}
+                  <div class="atts">
+                    {#each m.attachments as a (a.id)}
+                      {#if isImage(a.mime)}
+                        <a class="img" href={`/api/chat/uploads/${a.id}`} target="_blank" rel="noreferrer" title={a.filename}>
+                          <img src={`/api/chat/uploads/${a.id}`} alt={a.filename} loading="lazy" />
+                        </a>
+                      {:else}
+                        <a class="file" href={`/api/chat/uploads/${a.id}`} target="_blank" rel="noreferrer" title={a.filename}>
+                          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 1.8h5.2L13 5.6v8.6H4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /><path d="M9 1.8v4h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" /></svg>
+                          <span class="fname">{a.filename}</span>
+                          <span class="fsize">{humanSize(a.size)}</span>
+                        </a>
+                      {/if}
+                    {/each}
+                  </div>
+                {/if}
+              </div>
+              <span class="at">
+                {when(m.created_at)}
+                <button
+                  class="msgdel"
+                  title="Delete message"
+                  aria-label="Delete message"
+                  disabled={deleting === m.id}
+                  onclick={() => void deleteMessage(m)}
+                >delete</button>
+              </span>
+            </div>
+          {/if}
         {:else}
           <p class="empty">
             {selected.kind === "room" ? "Say something to the room." : "Start the DM."}
@@ -775,7 +839,70 @@
     height: 16px;
   }
 
+  .compact {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    background: none;
+    color: var(--ink-3);
+    font: 500 10.5px/1 var(--font-mono);
+  }
+  .compact:hover:not(:disabled) {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+  .compact:disabled {
+    opacity: 0.6;
+  }
+  .msgdel {
+    margin-left: 6px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink-3);
+    font: 400 9.5px/1 var(--font-mono);
+    opacity: 0;
+  }
+  .msg:hover .msgdel,
+  .summary:hover .msgdel {
+    opacity: 1;
+  }
+  .msgdel:hover {
+    color: var(--danger);
+  }
+  .summary {
+    margin: 10px 8px;
+    padding: 10px 12px;
+    border: 1px dashed var(--line-2);
+    border-radius: 8px;
+    background: var(--sunk);
+  }
+  .stitle {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font: 600 9.5px/1.4 var(--font-mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .stitle span:nth-child(2) {
+    margin-left: auto;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .sbody {
+    margin-top: 6px;
+    white-space: pre-wrap;
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
   @media (max-width: 860px) {
+    .msgdel {
+      opacity: 1;
+    }
     .chat.narrow {
       grid-template-columns: minmax(0, 1fr);
     }

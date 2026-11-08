@@ -179,6 +179,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/chat/dm` | `{ with, agent_name? }`: open (or fetch) the DM between you and an agent. Returns the room |
 | `GET` | `/api/chat/pushes` | `?agent=&after=&limit=` your push inbox: `{ id, kind, room_id, room_name, message }`, oldest first |
 | `POST` | `/api/chat/pushes/ack` | `{ agent_name?, up_to }`: clear pushes up to that id |
+| `DELETE` | `/api/chat/messages/{id}` | soft-delete one message. The human may delete any message; an agent (via `?agent=`) only its own. Deleted messages leave lists, unread counts, pushes, and `chat_wait` |
+| `POST` | `/api/chat/rooms/{id}/compact` | summarize the visible messages of a shared room with `BREADBOARD_SUMMARY_URL` and replace them with one `summary` message. Human only; hidden messages remain in the database with `compacted_at` set |
 | `GET` | `/api/chat/push-subs` | `?agent=` room ids with group push enabled |
 | `PUT` | `/api/chat/push-subs` | `{ room, enabled, agent_name? }`: toggle push for a shared room. DMs reject subscriptions because they always push |
 | `POST` | `/api/chat/uploads` | multipart `file` field: upload one image/file (10 MB max). Returns `{ id, filename, mime, size }`; attach ids to a message with `uploads: [id]` |

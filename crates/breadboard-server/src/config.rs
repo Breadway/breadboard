@@ -29,6 +29,7 @@ pub struct Config {
     pub web_dir: Option<PathBuf>,
     pub forgejo: ForgejoConfig,
     pub notifications: NotificationConfig,
+    pub summary: SummaryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -48,6 +49,17 @@ pub struct ForgejoConfig {
     pub reconcile_interval_mins: u64,
     /// `owner/repo` entries to sync. Empty = sync nothing until `breadboard repos add`.
     pub repos: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SummaryConfig {
+    /// OpenAI-compatible chat completions endpoint used to compact a room.
+    /// Empty disables compaction with a clear error.
+    pub url: String,
+    pub model: String,
+    /// Optional bearer token for the endpoint.
+    pub token: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -75,6 +87,7 @@ impl Default for Config {
             web_dir: None,
             forgejo: ForgejoConfig::default(),
             notifications: NotificationConfig::default(),
+            summary: SummaryConfig::default(),
         }
     }
 }
@@ -89,6 +102,16 @@ impl Default for ForgejoConfig {
             api_token: String::new(),
             reconcile_interval_mins: 10,
             repos: Vec::new(),
+        }
+    }
+}
+
+impl Default for SummaryConfig {
+    fn default() -> Self {
+        Self {
+            url: String::new(),
+            model: "Bonsai2-9B-Q2_0".to_string(),
+            token: String::new(),
         }
     }
 }
@@ -132,6 +155,15 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BREADBOARD_WEB_DIR") {
             self.web_dir = Some(PathBuf::from(v));
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_SUMMARY_URL") {
+            self.summary.url = v;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_SUMMARY_MODEL") {
+            self.summary.model = v;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_SUMMARY_TOKEN") {
+            self.summary.token = v;
         }
         if let Ok(v) = std::env::var("BREADBOARD_FORGEJO_OAUTH_CLIENT_ID") {
             self.forgejo.oauth_client_id = v;

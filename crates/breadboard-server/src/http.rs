@@ -61,6 +61,14 @@ pub fn router(state: AppState) -> Router {
         .route("/chat/rooms/{id}/messages", get(api::chat_messages))
         .route("/chat/messages", post(api::post_chat_message))
         .route(
+            "/chat/messages/{id}",
+            axum::routing::delete(api::delete_chat_message),
+        )
+        .route(
+            "/chat/rooms/{id}/compact",
+            post(api::compact_chat_room),
+        )
+        .route(
             "/chat/uploads",
             post(api::upload_chat_file)
                 .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024)),

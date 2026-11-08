@@ -38,6 +38,13 @@ services:
       BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET: ${BREADBOARD_FORGEJO_OAUTH_CLIENT_SECRET:-}
       BREADBOARD_FORGEJO_WEBHOOK_SECRET: ${BREADBOARD_FORGEJO_WEBHOOK_SECRET:-}
       BREADBOARD_FORGEJO_API_TOKEN: ${BREADBOARD_FORGEJO_API_TOKEN:-}
+      # Room compaction. The default reaches llama.cpp on the Docker host.
+      # Set BREADBOARD_SUMMARY_URL empty to disable compaction.
+      BREADBOARD_SUMMARY_URL: ${BREADBOARD_SUMMARY_URL:-http://host.docker.internal:7301/v1/chat/completions}
+      BREADBOARD_SUMMARY_MODEL: ${BREADBOARD_SUMMARY_MODEL:-Bonsai2-9B-Q2_0}
+      BREADBOARD_SUMMARY_TOKEN: ${BREADBOARD_SUMMARY_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - breadboard-data:/var/lib/breadboard
 

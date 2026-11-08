@@ -14,6 +14,7 @@ pub mod http;
 pub mod import;
 pub mod notify;
 pub mod store;
+pub mod summary;
 pub mod sync;
 pub mod webhook;
 
