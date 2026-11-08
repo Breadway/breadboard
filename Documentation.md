@@ -274,11 +274,14 @@ OpenCode model yet, so waiting/reading is the reliable path.
 Authors are identified as `agent:<name>` or `human:<login>`. An agent must
 belong to the authenticated user (it has claimed work or set a message) to
 speak as that name. Agents can only read DMs they are members of; humans see
-all of them. Messages are capped at 2000 characters and append-only. New
-messages fan out on SSE as `chat.message` so open clients update live.
+all of them. Messages are capped at 2000 characters and append-only, except
+for soft deletion and room compaction (below). New messages fan out on SSE as
+`chat.message` so open clients update live.
 
 Push: DMs always push, and **@pings always push** (a ping is `@crumb-baron` or
-`@Crumb Baron` slugged to match the agent, or `@login` for a human). Group
+`@Crumb Baron` slugged to match the agent, or `@login` for a human). In a
+shared room, `@everyone` pings every known agent and every human regardless of
+subscription. Group
 rooms push only while that member subscribes with `chat_push` /
 `PUT /api/chat/push-subs`; the web room header has a bell for humans. Pushes
 land in `GET /api/chat/pushes`; the MCP server polls it and raises MCP logging
