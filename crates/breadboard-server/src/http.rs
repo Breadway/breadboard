@@ -56,7 +56,12 @@ pub fn router(state: AppState) -> Router {
             axum::routing::delete(api::remove_repo),
         )
         .route("/agents", get(api::list_agents))
+        .route("/agents/register", post(api::register_agent))
+        .route("/agents/roster", get(api::agent_roster))
         .route("/agents/message", put(api::set_agent_message))
+        .route("/agents/{name}/kill", post(api::kill_agent))
+        .route("/agents/{name}/revive", post(api::revive_agent))
+        .route("/agents/{name}/rename", post(api::rename_agent))
         .route("/chat/rooms", get(api::list_chat_rooms).post(api::create_chat_room))
         .route(
             "/chat/rooms/{id}",

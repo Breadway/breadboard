@@ -8,7 +8,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -56,24 +56,11 @@ const client = new BreadboardClient(cfg.server, cfg.token);
 // agent does not have to remember: claim_issue starts a 60s timer, and
 // release_claim (or the process exiting) stops it.
 
-const FUN_ADJECTIVES = [
-  "Toasty", "Crumbly", "Buttery", "Golden", "Flaky", "Zesty", "Plucky",
-  "Snazzy", "Bouncy", "Peppy", "Crusty", "Doughy", "Spry", "Merry",
-  "Brazen", "Nimble", "Frosted", "Saucy", "Hearty", "Sprightly",
-];
-
-const FUN_NOUNS = [
-  "Pretzel", "Baguette", "Crumpet", "Brioche", "Scone", "Bagel",
-  "Focaccia", "Pumpernickel", "Croissant", "Muffin", "Churro", "Bun",
-  "Loaf", "Waffle", "Pita", "Ciabatta", "Biscuit", "Rye", "Pumper",
-  "Roll",
-];
-
 /**
  * The chat-inject plugin runs inside OpenCode and cannot see this process's
  * environment, so the name we speak as is mirrored to a small state file. Set
  * `agent = "..."` in cli.toml (or BREADBOARD_AGENT) to make the identity stable
- * instead of the per-process random name.
+ * instead of the name the server assigns on first registration.
  */
 const AGENT_STATE = join(
   process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
@@ -93,30 +80,59 @@ function rememberAgent(name: string) {
   }
 }
 
-/** One playful name per MCP process, so an agent's claims group together. */
-let autoAgentName: string | undefined;
+/**
+ * One name per MCP process, so an agent's claims group together. The server
+ * owns the curated list: registering without a name assigns one and returns
+ * alternatives, which keeps the client and server in step.
+ */
+let autoAgentName: string | undefined = cfg.agent?.trim().toLowerCase() || undefined;
+let nameAlternatives: string[] = [];
+let registeredAt = 0;
+let registration: Promise<string> | null = null;
+const REGISTER_REFRESH_MS = 60_000;
 
-function pickFunName(): string {
-  const a = FUN_ADJECTIVES[Math.floor(Math.random() * FUN_ADJECTIVES.length)];
-  const n = FUN_NOUNS[Math.floor(Math.random() * FUN_NOUNS.length)];
-  return `${a} ${n}`;
+const SESSION_ID =
+  process.env.OPENCODE_SESSION_ID?.trim() ||
+  process.env.BREADBOARD_SESSION_ID?.trim() ||
+  undefined;
+const HOST = hostname().trim();
+
+if (autoAgentName) rememberAgent(autoAgentName);
+
+/** Register this process and refresh `last_seen`, throttled on the MCP side. */
+async function ensureRegistered(force = false): Promise<string> {
+  const now = Date.now();
+  if (!force && autoAgentName && now - registeredAt < REGISTER_REFRESH_MS) {
+    return autoAgentName;
+  }
+  if (registration) return registration;
+  registration = (async () => {
+    const res = await client.registerAgent({
+      agent_name: autoAgentName,
+      session_id: SESSION_ID,
+      host: HOST || undefined,
+      pid: process.pid,
+      note: "opencode mcp",
+    });
+    autoAgentName = res.agent_name;
+    nameAlternatives = res.alternatives ?? [];
+    registeredAt = Date.now();
+    rememberAgent(autoAgentName);
+    ensureChatPoller(autoAgentName);
+    return autoAgentName;
+  })();
+  try {
+    return await registration;
+  } finally {
+    registration = null;
+  }
 }
 
 function defaultAgentName(): string {
-  autoAgentName ??= cfg.agent ?? pickFunName();
-  rememberAgent(autoAgentName);
+  if (!autoAgentName) {
+    throw new Error("agent is not registered yet; call name_agent or retry");
+  }
   return autoAgentName;
-}
-
-// Publish the identity at startup, before any tool call, so the OpenCode
-// chat-inject plugin can follow this process from the first message.
-autoAgentName = cfg.agent ?? pickFunName();
-rememberAgent(autoAgentName);
-
-function suggestNames(count: number): string[] {
-  const out = new Set<string>();
-  while (out.size < count) out.add(pickFunName());
-  return [...out];
 }
 
 /** Claims owned by the signed-in user under this agent name. */
@@ -186,6 +202,9 @@ const fail = (msg: string) => ({ content: [{ type: "text" as const, text: msg }]
 
 async function run<T>(fn: () => Promise<T>) {
   try {
+    // Every tool call refreshes this session on the roster, so a brand new
+    // OpenCode session appears without naming itself first. Throttled above.
+    await ensureRegistered();
     return ok(await fn());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -194,6 +213,13 @@ async function run<T>(fn: () => Promise<T>) {
     return fail(e instanceof Error ? e.message : String(e));
   }
 }
+
+// Register at startup, before the first tool call, so the chat plugin can map
+// this session from the start. A failed startup registration is retried by
+// the first tool call.
+void ensureRegistered().catch((e) => {
+  console.error(`breadboard registration failed: ${e instanceof Error ? e.message : String(e)}`);
+});
 
 async function resolveEpicId(keyOrId?: string): Promise<number | undefined> {
   if (!keyOrId) return undefined;
@@ -835,8 +861,10 @@ server.tool(
   "name_agent",
   "Name this MCP process before you claim any work. Sets the name later claim and chat calls use " +
     "(so you can omit agent_name), registers your profile in the Agents view, and starts chat " +
-    "polling. Pick something fun and memorable, and reuse it across issues. This also lets the " +
-    "chat plugin map this session, so DMs and mentions reach you before your first claim.",
+    "polling. Pick something fun and memorable, and reuse it across issues. Before claims exist a " +
+    "rename is free; after claims exist the server moves them with the profile or refuses a target " +
+    "already in use. This also lets the chat plugin map this session, so DMs and mentions reach you " +
+    "before your first claim.",
   {
     agent_name: z.string().describe("fun, memorable name, e.g. Toasty Pretzel"),
     message: z
@@ -846,11 +874,18 @@ server.tool(
   },
   ({ agent_name, message }) =>
     run(async () => {
-      const name = agent_name.trim();
+      const name = agent_name.trim().toLowerCase();
       if (!name) throw new Error("agent_name is required");
       const line = message?.trim() || "Ready for work.";
+      // A rename after claims exist moves them and the profile in one server
+      // transaction, or is refused. Before any claims it is free.
+      const current = autoAgentName;
+      if (current && current !== name) {
+        await client.renameAgent(current, name);
+      }
       autoAgentName = name;
-      rememberAgent(name);
+      registeredAt = 0;
+      await ensureRegistered(true);
       ensureChatPoller(name);
       return client.setAgentMessage(name, line);
     }),
@@ -1095,10 +1130,15 @@ server.tool(
 
 server.tool(
   "suggest_agent_names",
-  "Get a handful of fun, memorable agent names to choose from. Names are characters, not hosts: " +
-    "pass your pick to name_agent, then reuse it on every issue so the Agents tab keeps you as one agent.",
-  { count: z.number().min(1).max(20).optional().describe("how many names, default 8") },
-  ({ count }) => ok(suggestNames(count ?? 8)),
+  "Get the server's curated agent name list: this session's assigned name plus a few free " +
+    "alternatives. Names are characters, not hosts: pass your pick to name_agent, then reuse it " +
+    "on every issue so the Agents tab keeps you as one agent.",
+  { count: z.number().min(1).max(20).optional().describe("how many names, default 4") },
+  ({ count }) =>
+    run(async () => {
+      const names = [...new Set([autoAgentName, ...nameAlternatives].filter((n): n is string => Boolean(n)))];
+      return names.slice(0, count ?? 4);
+    }),
 );
 
 server.tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>

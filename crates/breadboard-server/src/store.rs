@@ -4,6 +4,8 @@
 //! builds without a live database). Enums are stored as the snake/kebab-case
 //! strings from `breadboard-core`; timestamps as RFC3339 UTC text.
 
+use std::collections::{HashMap, HashSet};
+
 use anyhow::Context;
 use breadboard_core::{
     Comment, Cycle, Epic, ForgejoRef, Issue, IssueLink, IssueType, LinkKind, Priority, Project,
@@ -12,8 +14,12 @@ use breadboard_core::{
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqlitePool};
 
-use crate::dto::{IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject};
+use crate::dto::{
+    AgentRegister, AgentRegistration, AgentRosterEntry, IssueFilter, IssuePatch, NewCycle, NewEpic,
+    NewIssue, NewProject,
+};
 use crate::error::{AppError, AppResult};
+use crate::names;
 
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
@@ -648,9 +654,8 @@ async fn hydrate_rows(db: &SqlitePool, rows: Vec<IssueRow>) -> AppResult<Vec<Iss
     }
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
 
-    let mut labels_qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(
-        "SELECT issue_id, label FROM issue_labels WHERE issue_id IN (",
-    );
+    let mut labels_qb: sqlx::QueryBuilder<sqlx::Sqlite> =
+        sqlx::QueryBuilder::new("SELECT issue_id, label FROM issue_labels WHERE issue_id IN (");
     {
         let mut separated = labels_qb.separated(", ");
         for id in &ids {
@@ -2321,7 +2326,9 @@ async fn update_claim_row(
             return Err(AppError::bad_request("agent_name must not be empty"));
         }
         if name.len() > 64 {
-            return Err(AppError::bad_request("agent_name must be 64 chars or fewer"));
+            return Err(AppError::bad_request(
+                "agent_name must be 64 chars or fewer",
+            ));
         }
         sqlx::query("UPDATE agent_claims SET agent_name = ?2 WHERE id = ?1")
             .bind(id)
@@ -2346,11 +2353,15 @@ async fn update_claim_row(
     macro_rules! set_nullable {
         ($col:literal, $val:expr) => {
             if let Some(v) = $val {
-                sqlx::query(concat!("UPDATE agent_claims SET ", $col, " = ?2 WHERE id = ?1"))
-                    .bind(id)
-                    .bind(v.clone())
-                    .execute(&mut *tx)
-                    .await?;
+                sqlx::query(concat!(
+                    "UPDATE agent_claims SET ",
+                    $col,
+                    " = ?2 WHERE id = ?1"
+                ))
+                .bind(id)
+                .bind(v.clone())
+                .execute(&mut *tx)
+                .await?;
             }
         };
     }
@@ -2364,12 +2375,11 @@ async fn update_claim_row(
     set_nullable!("head_sha", &input.head_sha);
 
     // Refresh board_status from the live issue + heartbeat in the same tx.
-    let (issue_id, claimed_by, agent_name): (i64, i64, String) = sqlx::query_as(
-        "SELECT issue_id, claimed_by, agent_name FROM agent_claims WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let (issue_id, claimed_by, agent_name): (i64, i64, String) =
+        sqlx::query_as("SELECT issue_id, claimed_by, agent_name FROM agent_claims WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
     let status: String = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
         .bind(issue_id)
         .fetch_one(&mut *tx)
@@ -2385,10 +2395,9 @@ async fn update_claim_row(
     tx.commit().await?;
 
     if let Some(message) = &input.message {
-        let normalized = breadboard_core::dto::normalize_agent_message(
-            message.as_deref().unwrap_or_default(),
-        )
-        .map_err(AppError::BadRequest)?;
+        let normalized =
+            breadboard_core::dto::normalize_agent_message(message.as_deref().unwrap_or_default())
+                .map_err(AppError::BadRequest)?;
         set_agent_message(db, claimed_by, &agent_name, normalized.as_deref()).await?;
     }
 
@@ -2420,14 +2429,12 @@ pub async fn refresh_claim_board_status(
     issue_id: i64,
     status: Status,
 ) -> AppResult<()> {
-    sqlx::query(
-        "UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1",
-    )
-    .bind(issue_id)
-    .bind(status.as_str())
-    .bind(now_rfc3339())
-    .execute(db)
-    .await?;
+    sqlx::query("UPDATE agent_claims SET board_status = ?2, updated_at = ?3 WHERE issue_id = ?1")
+        .bind(issue_id)
+        .bind(status.as_str())
+        .bind(now_rfc3339())
+        .execute(db)
+        .await?;
     Ok(())
 }
 
@@ -2477,6 +2484,567 @@ pub async fn get_agent_message(
     .bind(agent_name.trim().to_lowercase())
     .fetch_optional(db)
     .await?)
+}
+
+// ---------------------------------------------------------------------------
+// agent roster: sessions, kill/revive, rename
+// ---------------------------------------------------------------------------
+
+/// A session with no heartbeat for longer than this is stale on the roster.
+/// The claim grid keeps its own 5-minute threshold; this is only the session
+/// liveness signal the human asked for.
+pub const AGENT_LIVE_SECS: i64 = 120;
+
+#[derive(FromRow)]
+struct AgentSessionRow {
+    agent_name: String,
+    session_id: Option<String>,
+    host: Option<String>,
+    pid: Option<i64>,
+    note: Option<String>,
+    user_id: Option<i64>,
+    login: Option<String>,
+    first_seen: String,
+    last_seen: String,
+    killed: i64,
+    killed_by: Option<i64>,
+    killed_by_login: Option<String>,
+    killed_at: Option<String>,
+}
+
+#[derive(FromRow)]
+struct AgentProfileRow {
+    agent_name: String,
+    message: String,
+    user_id: i64,
+    login: String,
+}
+
+const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.host, s.pid, s.note, \
+    s.user_id, u.login AS login, s.first_seen, s.last_seen, s.killed, s.killed_by, \
+    k.login AS killed_by_login, s.killed_at";
+
+fn agent_session_join() -> String {
+    format!(
+        "SELECT {AGENT_SESSION_COLS} FROM agent_sessions s \
+         LEFT JOIN users u ON u.id = s.user_id \
+         LEFT JOIN users k ON k.id = s.killed_by"
+    )
+}
+
+fn empty_roster_entry(name: &str) -> AgentRosterEntry {
+    AgentRosterEntry {
+        agent_name: name.to_string(),
+        session_id: None,
+        host: None,
+        pid: None,
+        note: None,
+        first_seen: None,
+        last_seen: None,
+        live: false,
+        killed: false,
+        status: "stale".to_string(),
+        message: None,
+        state: None,
+        claim_count: 0,
+        exclusive_count: 0,
+        intent_count: 0,
+        user_id: None,
+        login: None,
+        killed_by: None,
+        killed_by_login: None,
+        killed_at: None,
+    }
+}
+
+fn validate_agent_name(name: &str) -> AppResult<()> {
+    if name.is_empty() {
+        return Err(AppError::bad_request("agent_name must not be empty"));
+    }
+    if name.chars().count() > 64 {
+        return Err(AppError::bad_request(
+            "agent_name must be 64 chars or fewer",
+        ));
+    }
+    Ok(())
+}
+
+/// Names already visible anywhere on the roster, lowercased.
+pub async fn known_agent_names(db: &SqlitePool) -> AppResult<HashSet<String>> {
+    let mut out = HashSet::new();
+    let sessions: Vec<String> = sqlx::query_scalar("SELECT lower(agent_name) FROM agent_sessions")
+        .fetch_all(db)
+        .await?;
+    let profiles: Vec<String> = sqlx::query_scalar("SELECT lower(agent_name) FROM agent_profiles")
+        .fetch_all(db)
+        .await?;
+    let claims: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT lower(agent_name) FROM agent_claims")
+            .fetch_all(db)
+            .await?;
+    out.extend(sessions);
+    out.extend(profiles);
+    out.extend(claims);
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upsert_agent_session(
+    db: &SqlitePool,
+    user_id: i64,
+    name: &str,
+    session_id: Option<&str>,
+    host: Option<&str>,
+    pid: Option<i64>,
+    note: Option<&str>,
+    ts: &str,
+) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO agent_sessions
+            (agent_name, session_id, host, pid, note, user_id, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+         ON CONFLICT(agent_name) DO UPDATE SET
+            session_id = COALESCE(excluded.session_id, agent_sessions.session_id),
+            host       = COALESCE(excluded.host, agent_sessions.host),
+            pid        = COALESCE(excluded.pid, agent_sessions.pid),
+            note       = COALESCE(excluded.note, agent_sessions.note),
+            user_id    = COALESCE(agent_sessions.user_id, excluded.user_id),
+            last_seen  = excluded.last_seen",
+    )
+    .bind(name)
+    .bind(session_id)
+    .bind(host)
+    .bind(pid)
+    .bind(note)
+    .bind(user_id)
+    .bind(ts)
+    .execute(db)
+    .await?;
+    Ok(())
+}
+
+/// Register or refresh one session. No `agent_name` assigns a unique curated
+/// name; the response also carries a few alternatives.
+pub async fn register_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    input: &AgentRegister,
+) -> AppResult<AgentRegistration> {
+    let explicit = input
+        .agent_name
+        .as_deref()
+        .map(names::normalize)
+        .filter(|name| !name.is_empty());
+
+    let (name, mut alternatives) = match explicit {
+        Some(name) => (name, Vec::new()),
+        None => {
+            let known = known_agent_names(db).await?;
+            let picks = names::pick_names(&known, 4);
+            let mut picks = picks.into_iter();
+            let name = picks.next().ok_or_else(|| {
+                AppError::Other(anyhow::anyhow!("no curated agent names are available"))
+            })?;
+            (name, picks.collect())
+        }
+    };
+    validate_agent_name(&name)?;
+
+    let ts = now_rfc3339();
+    upsert_agent_session(
+        db,
+        user_id,
+        &name,
+        input.session_id.as_deref(),
+        input.host.as_deref(),
+        input.pid,
+        input.note.as_deref(),
+        &ts,
+    )
+    .await?;
+
+    if alternatives.is_empty() {
+        let known = known_agent_names(db).await?;
+        alternatives = names::pick_names(&known, 3);
+    }
+
+    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    Ok(AgentRegistration {
+        agent_name: name,
+        alternatives,
+        live: entry.live,
+        killed: entry.killed,
+        session_id: entry.session_id,
+    })
+}
+
+/// Auto-register an unknown name and reject a killed one. Every agent-scoped
+/// write goes through this: the human wants new sessions listed, not refused.
+pub async fn ensure_agent_writable(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+    session_id: Option<&str>,
+) -> AppResult<String> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+
+    let killed: Option<i64> =
+        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    if killed == Some(1) {
+        return Err(AppError::forbidden_msg(format!(
+            "agent '{name}' is killed; revive it before writing"
+        )));
+    }
+
+    upsert_agent_session(
+        db,
+        user_id,
+        &name,
+        session_id,
+        None,
+        None,
+        None,
+        &now_rfc3339(),
+    )
+    .await?;
+    Ok(name)
+}
+
+/// Mark a name killed, release every claim it holds, and report whether this
+/// call performed the transition. Already-killed is a no-op, so kill is
+/// idempotent and preserves the original killer.
+pub async fn kill_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+) -> AppResult<(AgentRosterEntry, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+
+    let existing: Option<i64> =
+        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let already_killed = existing == Some(1);
+    let ts = now_rfc3339();
+
+    match existing {
+        Some(_) if already_killed => {}
+        Some(_) => {
+            sqlx::query(
+                "UPDATE agent_sessions
+                    SET killed = 1, killed_by = ?2, killed_at = ?3
+                  WHERE agent_name = ?1",
+            )
+            .bind(&name)
+            .bind(user_id)
+            .bind(&ts)
+            .execute(db)
+            .await?;
+        }
+        None => {
+            sqlx::query(
+                "INSERT INTO agent_sessions
+                    (agent_name, user_id, first_seen, last_seen, killed, killed_by, killed_at)
+                 VALUES (?1, ?2, ?3, ?3, 1, ?2, ?3)",
+            )
+            .bind(&name)
+            .bind(user_id)
+            .bind(&ts)
+            .execute(db)
+            .await?;
+        }
+    }
+
+    // Killing is name-scoped: every claim under this agent goes, including
+    // intents and claims owned by another user using the same name.
+    sqlx::query("DELETE FROM agent_claims WHERE lower(agent_name) = ?1")
+        .bind(&name)
+        .execute(db)
+        .await?;
+
+    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    Ok((entry, !already_killed))
+}
+
+/// Clear a kill so the name can write again. Idempotent; returns whether the
+/// call changed anything.
+pub async fn revive_agent(
+    db: &SqlitePool,
+    raw_name: &str,
+) -> AppResult<(Option<AgentRosterEntry>, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+
+    let was_killed: Option<i64> =
+        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let changed = was_killed == Some(1);
+    if changed {
+        sqlx::query(
+            "UPDATE agent_sessions
+                SET killed = 0, killed_by = NULL, killed_at = NULL
+              WHERE agent_name = ?1",
+        )
+        .bind(&name)
+        .execute(db)
+        .await?;
+    }
+    Ok((roster_entry(db, &name).await?, changed))
+}
+
+/// Rename an agent. Claims, profile and session row move in one transaction;
+/// a name owned by another user is refused rather than duplicated.
+pub async fn rename_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_old: &str,
+    raw_new: &str,
+) -> AppResult<AgentRosterEntry> {
+    let old = names::normalize(raw_old);
+    let new = names::normalize(raw_new);
+    validate_agent_name(&old)?;
+    validate_agent_name(&new)?;
+    if old == new {
+        return roster_entry(db, &old).await?.ok_or(AppError::NotFound);
+    }
+
+    let known = known_agent_names(db).await?;
+    if !known.contains(&old) {
+        return Err(AppError::NotFound);
+    }
+    if known.contains(&new) {
+        return Err(AppError::Conflict(format!(
+            "agent name '{new}' is already in use"
+        )));
+    }
+
+    let killed: Option<i64> =
+        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&old)
+            .fetch_optional(db)
+            .await?;
+    if killed == Some(1) {
+        return Err(AppError::forbidden_msg(format!(
+            "agent '{old}' is killed; revive it before renaming"
+        )));
+    }
+
+    let foreign_claims: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_claims
+          WHERE lower(agent_name) = ?1 AND claimed_by <> ?2",
+    )
+    .bind(&old)
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    if foreign_claims > 0 {
+        return Err(AppError::forbidden_msg(format!(
+            "agent '{old}' holds claims owned by another user; cannot rename it"
+        )));
+    }
+    let foreign_profiles: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_profiles WHERE agent_name = ?1 AND user_id <> ?2",
+    )
+    .bind(&old)
+    .bind(user_id)
+    .fetch_one(db)
+    .await?;
+    if foreign_profiles > 0 {
+        return Err(AppError::forbidden_msg(format!(
+            "agent '{old}' has a profile owned by another user; cannot rename it"
+        )));
+    }
+    let session_owner: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT user_id FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&old)
+            .fetch_optional(db)
+            .await?;
+    if let Some(Some(owner)) = session_owner {
+        if owner != user_id {
+            return Err(AppError::forbidden_msg(format!(
+                "agent '{old}' is registered by another user; cannot rename it"
+            )));
+        }
+    }
+
+    let mut tx = crate::db::begin_write(db).await?;
+    sqlx::query("UPDATE agent_claims SET agent_name = ?2 WHERE lower(agent_name) = ?1")
+        .bind(&old)
+        .bind(&new)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                AppError::Conflict("another claim already uses that agent name".into())
+            }
+            other => AppError::Db(other),
+        })?;
+    sqlx::query("UPDATE agent_profiles SET agent_name = ?2 WHERE agent_name = ?1")
+        .bind(&old)
+        .bind(&new)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                AppError::Conflict("that agent name already has a profile".into())
+            }
+            other => AppError::Db(other),
+        })?;
+    sqlx::query("UPDATE agent_sessions SET agent_name = ?2 WHERE agent_name = ?1")
+        .bind(&old)
+        .bind(&new)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                AppError::Conflict("that agent name is already registered".into())
+            }
+            other => AppError::Db(other),
+        })?;
+    tx.commit().await?;
+
+    roster_entry(db, &new).await?.ok_or(AppError::NotFound)
+}
+
+/// The union of sessions, profiles and claims, deduplicated by lowercased
+/// agent name. This is what the Agents page renders.
+pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
+    let claims = list_claims(db).await?;
+    let profiles: Vec<AgentProfileRow> = sqlx::query_as(
+        "SELECT lower(p.agent_name) AS agent_name, p.message, p.user_id,
+                u.login AS login
+           FROM agent_profiles p
+           JOIN users u ON u.id = p.user_id
+          ORDER BY p.updated_at ASC",
+    )
+    .fetch_all(db)
+    .await?;
+    let sessions: Vec<AgentSessionRow> =
+        sqlx::query_as(&agent_session_join()).fetch_all(db).await?;
+
+    let mut map: HashMap<String, AgentRosterEntry> = HashMap::new();
+    let mut claim_heartbeat: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let now = Utc::now();
+
+    // Claims first: they give counts and, when there is no session row yet,
+    // the only heartbeat/state the roster can show.
+    for claim in &claims {
+        let key = claim.agent_name.to_lowercase();
+        let entry = map
+            .entry(key.clone())
+            .or_insert_with(|| empty_roster_entry(&key));
+        entry.claim_count += 1;
+        match claim.mode {
+            breadboard_core::ClaimMode::Exclusive => entry.exclusive_count += 1,
+            breadboard_core::ClaimMode::Intent => entry.intent_count += 1,
+        }
+        if entry.user_id.is_none() {
+            entry.user_id = Some(claim.claimed_by);
+            entry.login = Some(claim.claimed_by_login.clone());
+        }
+        if entry.message.is_none() {
+            entry.message = claim.message.clone();
+        }
+        let previous = claim_heartbeat.get(&key).copied();
+        if previous.map(|at| claim.last_heartbeat > at).unwrap_or(true) {
+            claim_heartbeat.insert(key.clone(), claim.last_heartbeat);
+            entry.state = Some(claim.state);
+            entry.note = claim.note.clone();
+            if entry
+                .last_seen
+                .map(|at| claim.last_heartbeat > at)
+                .unwrap_or(true)
+            {
+                entry.last_seen = Some(claim.last_heartbeat);
+            }
+        }
+    }
+
+    // Profiles can exist with no claim at all (the brioche-bridge case).
+    for profile in &profiles {
+        let key = profile.agent_name.to_lowercase();
+        let entry = map
+            .entry(key.clone())
+            .or_insert_with(|| empty_roster_entry(&key));
+        entry.message = Some(profile.message.clone());
+        if entry.user_id.is_none() {
+            entry.user_id = Some(profile.user_id);
+            entry.login = Some(profile.login.clone());
+        }
+        // A profile edit is not a session heartbeat, so it does not make the
+        // row live; profile-only names stay stale until they register.
+    }
+
+    for session in &sessions {
+        let key = session.agent_name.to_lowercase();
+        let entry = map
+            .entry(key.clone())
+            .or_insert_with(|| empty_roster_entry(&key));
+        entry.session_id = session.session_id.clone();
+        entry.host = session.host.clone();
+        entry.pid = session.pid;
+        if session.note.is_some() {
+            entry.note = session.note.clone();
+        }
+        entry.first_seen = Some(parse_ts(&session.first_seen));
+        entry.last_seen = Some(parse_ts(&session.last_seen));
+        entry.killed = session.killed != 0;
+        entry.killed_by = session.killed_by;
+        entry.killed_by_login = session.killed_by_login.clone();
+        entry.killed_at = session.killed_at.as_deref().map(parse_ts);
+        if entry.user_id.is_none() {
+            entry.user_id = session.user_id;
+            entry.login = session.login.clone();
+        }
+    }
+
+    let mut roster: Vec<AgentRosterEntry> = map
+        .into_values()
+        .map(|mut entry| {
+            let live = !entry.killed
+                && entry
+                    .last_seen
+                    .map(|at| (now - at).num_seconds() < AGENT_LIVE_SECS)
+                    .unwrap_or(false);
+            entry.live = live;
+            entry.status = if entry.killed {
+                "killed".to_string()
+            } else if live {
+                "live".to_string()
+            } else {
+                "stale".to_string()
+            };
+            entry
+        })
+        .collect();
+    roster.sort_by(|a, b| {
+        let rank = |e: &AgentRosterEntry| match e.status.as_str() {
+            "live" => 0,
+            "stale" => 1,
+            _ => 2,
+        };
+        rank(a)
+            .cmp(&rank(b))
+            .then_with(|| b.exclusive_count.cmp(&a.exclusive_count))
+            .then_with(|| a.agent_name.cmp(&b.agent_name))
+    });
+    Ok(roster)
+}
+
+pub async fn roster_entry(db: &SqlitePool, name: &str) -> AppResult<Option<AgentRosterEntry>> {
+    let name = names::normalize(name);
+    Ok(agent_roster(db)
+        .await?
+        .into_iter()
+        .find(|entry| entry.agent_name == name))
 }
 
 /// Append a claim lifecycle row to the issue's activity timeline. Heartbeats
@@ -2617,7 +3185,10 @@ async fn attachments_for(
     Ok(out)
 }
 
-async fn hydrate_messages(db: &SqlitePool, rows: Vec<ChatMessageRow>) -> AppResult<Vec<ChatMessage>> {
+async fn hydrate_messages(
+    db: &SqlitePool,
+    rows: Vec<ChatMessageRow>,
+) -> AppResult<Vec<ChatMessage>> {
     let ids: Vec<i64> = rows.iter().map(|r| r.id).collect();
     let mut attachments = attachments_for(db, &ids).await?;
     Ok(rows
@@ -2823,12 +3394,14 @@ pub async fn set_chat_push_sub(
         .execute(db)
         .await?;
     } else {
-        sqlx::query("DELETE FROM chat_push_subs WHERE user_id = ?1 AND member = ?2 AND room_id = ?3")
-            .bind(user_id)
-            .bind(member)
-            .bind(room_id)
-            .execute(db)
-            .await?;
+        sqlx::query(
+            "DELETE FROM chat_push_subs WHERE user_id = ?1 AND member = ?2 AND room_id = ?3",
+        )
+        .bind(user_id)
+        .bind(member)
+        .bind(room_id)
+        .execute(db)
+        .await?;
     }
     Ok(())
 }
@@ -2851,6 +3424,8 @@ async fn agent_owners(db: &SqlitePool, agent_name: &str) -> AppResult<Vec<i64>> 
             SELECT user_id FROM agent_profiles WHERE agent_name = ?1
             UNION
             SELECT claimed_by AS user_id FROM agent_claims WHERE lower(agent_name) = ?1
+            UNION
+            SELECT user_id FROM agent_sessions WHERE agent_name = ?1 AND user_id IS NOT NULL
          ) ORDER BY user_id",
     )
     .bind(&name)
@@ -2933,12 +3508,11 @@ pub async fn create_chat_pushes(
             }
         }
     } else {
-        let subs: Vec<(i64, String)> = sqlx::query_as(
-            "SELECT user_id, member FROM chat_push_subs WHERE room_id = ?1",
-        )
-        .bind(room.id)
-        .fetch_all(db)
-        .await?;
+        let subs: Vec<(i64, String)> =
+            sqlx::query_as("SELECT user_id, member FROM chat_push_subs WHERE room_id = ?1")
+                .bind(room.id)
+                .fetch_all(db)
+                .await?;
         for (user_id, member) in subs {
             if member != author_member {
                 add_recipient(&mut want, member, user_id, ChatPushKind::Room);
@@ -2947,12 +3521,17 @@ pub async fn create_chat_pushes(
 
         // @everyone is a room-wide ping: every known agent and every human,
         // not just the members who opted into room pushes.
-        if mentions(&message.body).iter().any(|token| token == "everyone") {
+        if mentions(&message.body)
+            .iter()
+            .any(|token| token == "everyone")
+        {
             let agents: Vec<(i64, String)> = sqlx::query_as(
                 "SELECT DISTINCT user_id, lower(agent_name) FROM (
                     SELECT user_id, agent_name FROM agent_profiles
                     UNION
                     SELECT claimed_by AS user_id, lower(agent_name) AS agent_name FROM agent_claims
+                    UNION
+                    SELECT user_id, agent_name FROM agent_sessions WHERE user_id IS NOT NULL
                  )",
             )
             .fetch_all(db)
@@ -2983,6 +3562,9 @@ pub async fn create_chat_pushes(
                 UNION
                 SELECT claimed_by AS user_id, lower(agent_name) AS agent_name FROM agent_claims
                  WHERE replace(lower(agent_name), ' ', '-') = ?1
+                UNION
+                SELECT user_id, agent_name FROM agent_sessions
+                 WHERE user_id IS NOT NULL AND replace(lower(agent_name), ' ', '-') = ?1
              )",
         )
         .bind(&token)
@@ -3102,11 +3684,7 @@ pub async fn chat_is_member(db: &SqlitePool, room_id: i64, member: &str) -> AppR
 }
 
 /// Return the DM room for two members, creating it the first time.
-pub async fn find_or_create_dm(
-    db: &SqlitePool,
-    a: &str,
-    b: &str,
-) -> AppResult<ChatRoom> {
+pub async fn find_or_create_dm(db: &SqlitePool, a: &str, b: &str) -> AppResult<ChatRoom> {
     let (a, b) = if a <= b { (a, b) } else { (b, a) };
     let key = format!("{a}|{b}");
     if let Some(id) = sqlx::query_scalar::<_, i64>("SELECT id FROM chat_rooms WHERE dm_key = ?1")
@@ -3242,11 +3820,7 @@ pub async fn get_chat_message(
 }
 
 /// Soft-delete one message and drop any pushes that referenced it.
-pub async fn delete_chat_message(
-    db: &SqlitePool,
-    id: i64,
-    deleted_by: &str,
-) -> AppResult<bool> {
+pub async fn delete_chat_message(db: &SqlitePool, id: i64, deleted_by: &str) -> AppResult<bool> {
     let mut tx = crate::db::begin_write(db).await?;
     let changed = sqlx::query(
         "UPDATE chat_messages SET deleted_at = ?1, deleted_by = ?2
@@ -3351,12 +3925,11 @@ pub async fn insert_chat_upload(
 }
 
 pub async fn get_chat_upload(db: &SqlitePool, id: i64) -> AppResult<StoredUpload> {
-    let row: Option<(i64, String, String, i64, String)> = sqlx::query_as(
-        "SELECT id, filename, mime, size, path FROM chat_uploads WHERE id = ?1",
-    )
-    .bind(id)
-    .fetch_optional(db)
-    .await?;
+    let row: Option<(i64, String, String, i64, String)> =
+        sqlx::query_as("SELECT id, filename, mime, size, path FROM chat_uploads WHERE id = ?1")
+            .bind(id)
+            .fetch_optional(db)
+            .await?;
     let (id, filename, mime, size, path) = row.ok_or(AppError::NotFound)?;
     Ok(StoredUpload {
         upload: breadboard_core::ChatUpload {
@@ -3375,7 +3948,8 @@ pub async fn user_has_agent(db: &SqlitePool, user_id: i64, name: &str) -> AppRes
     let n: i64 = sqlx::query_scalar(
         "SELECT
            (SELECT COUNT(*) FROM agent_profiles WHERE user_id = ?1 AND agent_name = ?2) +
-           (SELECT COUNT(*) FROM agent_claims WHERE claimed_by = ?1 AND lower(agent_name) = ?2)",
+           (SELECT COUNT(*) FROM agent_claims WHERE claimed_by = ?1 AND lower(agent_name) = ?2) +
+           (SELECT COUNT(*) FROM agent_sessions WHERE user_id = ?1 AND agent_name = ?2)",
     )
     .bind(user_id)
     .bind(&name)
@@ -3397,9 +3971,7 @@ pub async fn ensure_seed(db: &SqlitePool) -> anyhow::Result<()> {
         .await
         .context("counting projects")?;
     if count == 0 {
-        tracing::info!(
-            "no projects yet: create one with POST /api/projects before filing issues"
-        );
+        tracing::info!("no projects yet: create one with POST /api/projects before filing issues");
     }
     Ok(())
 }

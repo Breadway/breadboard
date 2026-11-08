@@ -6,6 +6,7 @@ import {
   BreadboardClient,
   STATUSES,
   type AgentClaim,
+  type AgentRosterEntry,
   type AgentState,
   type BoardEvent,
   type ClaimUpdate,
@@ -169,6 +170,9 @@ class Store {
   unread = $state(0);
 
   agents = $state<AgentClaim[]>([]);
+  /** Sessions, profiles and claims, one row per lowercased name. Roster rows
+   *  with no claims still render, as idle sessions. */
+  roster = $state<AgentRosterEntry[]>([]);
   agentLine = $state<string>("");
 
   // Bumped whenever a live event touches an issue, so the open issue panel
@@ -543,11 +547,42 @@ class Store {
 
   async loadAgents() {
     try {
-      const [claims, status] = await Promise.all([api.listAgents(), api.agentStatus()]);
+      const [claims, status, roster] = await Promise.all([
+        api.listAgents(),
+        api.agentStatus(),
+        api.listAgentRoster(),
+      ]);
       this.agents = claims;
       this.agentLine = status.line;
+      this.roster = roster;
     } catch {
       /* ignore */
+    }
+  }
+
+  /** Kill an agent: releases every claim and blocks further writes. */
+  async killAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.killAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.agents = this.agents.filter((a) => a.agent_name.toLowerCase() !== entry.agent_name);
+      this.info(`Killed ${entry.agent_name}; claims released and writes blocked`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't kill ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  async reviveAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.reviveAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.info(`Revived ${entry.agent_name}`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't revive ${name}: ${errMsg(e)}`);
+      return false;
     }
   }
 
@@ -698,6 +733,10 @@ class Store {
       case "agent.released":
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        break;
+      case "agent.killed":
+      case "agent.revived":
+        void this.loadAgents();
         break;
       case "agent.updated": {
         // The event carries the claim, so a heartbeat patches one entry instead

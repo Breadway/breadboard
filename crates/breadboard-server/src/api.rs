@@ -683,6 +683,9 @@ async fn chat_author(
 ) -> AppResult<(String, String, breadboard_core::ChatAuthorKind)> {
     match agent_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => {
+            // A killed agent cannot speak; an unknown name auto-registers so a
+            // fresh session is listed from its first write.
+            store::ensure_agent_writable(&app.db, user.0.id, name, None).await?;
             if !store::user_has_agent(&app.db, user.0.id, name).await? {
                 return Err(crate::error::AppError::forbidden());
             }
@@ -855,6 +858,8 @@ pub async fn list_chat_mentions(
             SELECT agent_name FROM agent_profiles
             UNION
             SELECT agent_name FROM agent_claims
+            UNION
+            SELECT agent_name FROM agent_sessions
          ) ORDER BY 1",
     )
     .fetch_all(&app.db)
@@ -1309,6 +1314,7 @@ pub async fn set_agent_message(
             "agent_name is required",
         ));
     }
+    store::ensure_agent_writable(&app.db, user.0.id, agent_name, None).await?;
     let message = breadboard_core::dto::normalize_agent_message(&body.message)
         .map_err(crate::error::AppError::BadRequest)?;
     store::set_agent_message(&app.db, user.0.id, agent_name, message.as_deref()).await?;
@@ -1323,6 +1329,76 @@ pub async fn list_agents(
     _user: AuthUser,
 ) -> AppResult<Json<Vec<breadboard_core::AgentClaim>>> {
     Ok(Json(store::list_claims(&app.db).await?))
+}
+
+/// Register or refresh this session. Omit `agent_name` for a curated,
+/// server-assigned name; the response carries alternatives either way.
+pub async fn register_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Json(body): Json<breadboard_core::dto::AgentRegister>,
+) -> AppResult<Json<breadboard_core::dto::AgentRegistration>> {
+    Ok(Json(
+        store::register_agent(&app.db, user.0.id, &body).await?,
+    ))
+}
+
+/// Every agent the server knows about, deduplicated by lowercased name.
+pub async fn agent_roster(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<Vec<breadboard_core::dto::AgentRosterEntry>>> {
+    Ok(Json(store::agent_roster(&app.db).await?))
+}
+
+/// Kill a name: release every claim, block writes, record who asked. Repeated
+/// calls are no-ops and keep the original killer.
+pub async fn kill_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, changed) = store::kill_agent(&app.db, user.0.id, &name).await?;
+    if changed {
+        let event = BoardEvent::AgentKilled {
+            agent: entry.agent_name.clone(),
+            killed_by: Some(user.0.id),
+        };
+        app.bus.publish(event.clone());
+        notify::emit_bread(&app, &event);
+    }
+    Ok(Json(entry))
+}
+
+pub async fn revive_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, changed) = store::revive_agent(&app.db, &name).await?;
+    let entry = entry.ok_or(crate::error::AppError::NotFound)?;
+    if changed {
+        let event = BoardEvent::AgentRevived {
+            agent: entry.agent_name.clone(),
+            revived_by: Some(user.0.id),
+        };
+        app.bus.publish(event.clone());
+        notify::emit_bread(&app, &event);
+    }
+    Ok(Json(entry))
+}
+
+/// Rename an agent. Claims and profile move in one transaction; a name owned
+/// by another user or an already-used target is refused.
+pub async fn rename_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+    Json(body): Json<breadboard_core::dto::AgentRename>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    Ok(Json(
+        store::rename_agent(&app.db, user.0.id, &name, &body.new_name).await?,
+    ))
 }
 
 pub async fn agent_status(
@@ -1387,6 +1463,15 @@ pub async fn claim_issue(
             "cannot claim a PR card",
         ));
     }
+    // Killing is name-scoped, so the gate is too. Unknown names auto-register
+    // here instead of being rejected: every session should be listed.
+    store::ensure_agent_writable(
+        &app.db,
+        user.0.id,
+        &body.agent_name,
+        body.session_id.as_deref(),
+    )
+    .await?;
     let mode = body.mode.unwrap_or(ClaimMode::Exclusive);
     let claim = store::insert_claim(&app.db, &issue, user.0.id, &body).await?;
     let audit = store::log_claim_event(
@@ -1553,6 +1638,18 @@ pub async fn heartbeat_claim(
         session,
     )
     .await?;
+    // A killed name cannot heartbeat or rename a claim. Gate the target name
+    // too when this update renames the claim.
+    store::ensure_agent_writable(
+        &app.db,
+        user.0.id,
+        &existing.agent_name,
+        session.or(existing.session_id.as_deref()),
+    )
+    .await?;
+    if let Some(name) = body.agent_name.as_deref() {
+        store::ensure_agent_writable(&app.db, user.0.id, name, None).await?;
+    }
     if let (Some(Some(want_inner)), Some(have)) = (&body.session_id, &existing.session_id) {
         // Outer Some = field present, inner Some = set (not clear). A present
         // session that disagrees with the active claim is a 409, not a hijack.

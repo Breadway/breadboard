@@ -76,6 +76,20 @@ pub enum BoardEvent {
     /// A claim was released. The card returns to its normal colour.
     #[serde(rename = "agent.released")]
     AgentReleased { id: i64, key: String },
+    /// An agent was killed: its claims were released and writes from that
+    /// name are blocked until it is revived.
+    #[serde(rename = "agent.killed")]
+    AgentKilled {
+        agent: String,
+        killed_by: Option<i64>,
+    },
+    /// A killed agent was explicitly revived. It becomes writable again on its
+    /// next heartbeat or registration.
+    #[serde(rename = "agent.revived")]
+    AgentRevived {
+        agent: String,
+        revived_by: Option<i64>,
+    },
     /// A chat message was posted to a room or DM.
     #[serde(rename = "chat.message")]
     ChatMessage { room_id: i64, id: i64 },
@@ -100,6 +114,8 @@ impl BoardEvent {
             BoardEvent::AgentClaimed { .. } => "bread.board.agent.claimed",
             BoardEvent::AgentUpdated { .. } => "bread.board.agent.updated",
             BoardEvent::AgentReleased { .. } => "bread.board.agent.released",
+            BoardEvent::AgentKilled { .. } => "bread.board.agent.killed",
+            BoardEvent::AgentRevived { .. } => "bread.board.agent.revived",
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
             BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
         }
