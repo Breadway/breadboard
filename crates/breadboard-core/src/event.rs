@@ -61,7 +61,8 @@ pub enum BoardEvent {
         session_id: Option<String>,
         state: String,
     },
-    /// A claim heartbeat / field update.
+    /// A claim heartbeat / field update. Carries the full claim so clients can
+    /// patch one entry instead of refetching both agent lists.
     #[serde(rename = "agent.updated")]
     AgentUpdated {
         id: i64,
@@ -70,6 +71,7 @@ pub enum BoardEvent {
         mode: String,
         session_id: Option<String>,
         state: String,
+        claim: Box<crate::AgentClaim>,
     },
     /// A claim was released. The card returns to its normal colour.
     #[serde(rename = "agent.released")]

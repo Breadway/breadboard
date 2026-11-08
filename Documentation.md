@@ -247,7 +247,7 @@ after reconnecting to recover missed changes.
 | `card.assigned` | `bread.board.card.assigned` | `id`, `key`, `assignee_id` |
 | `card.deleted` | `bread.board.card.deleted` | `id`, `key` |
 | `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
-| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
+| `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state`, `claim` (the full claim, so clients patch one entry instead of refetching the agent list) |
 | `agent.released` | `bread.board.agent.released` | `id`, `key` |
 | `chat.message` | `bread.board.chat.message` | `room_id`, `id` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |

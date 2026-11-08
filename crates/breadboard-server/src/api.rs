@@ -1538,6 +1538,7 @@ pub async fn heartbeat_claim(
         mode: claim.mode.as_str().to_string(),
         session_id: claim.session_id.clone(),
         state: claim.state.as_str().to_string(),
+        claim: Box::new(claim.clone()),
     });
     Ok(Json(claim))
 }

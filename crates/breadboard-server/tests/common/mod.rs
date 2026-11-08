@@ -142,13 +142,17 @@ impl EventStream {
     }
 
     pub async fn next_type(&mut self) -> String {
+        let v = self.next_event().await;
+        v["type"].as_str().unwrap().to_string()
+    }
+
+    pub async fn next_event(&mut self) -> serde_json::Value {
         loop {
             if let Some(idx) = self.buf.find("\n\n") {
                 let frame: String = self.buf.drain(..idx + 2).collect();
                 for line in frame.lines() {
                     if let Some(data) = line.strip_prefix("data:") {
-                        let v: serde_json::Value = serde_json::from_str(data.trim()).unwrap();
-                        return v["type"].as_str().unwrap().to_string();
+                        return serde_json::from_str(data.trim()).unwrap();
                     }
                 }
                 continue;
