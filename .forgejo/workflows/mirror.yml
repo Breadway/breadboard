@@ -9,7 +9,7 @@ on:
 jobs:
   mirror:
     if: ${{ vars.BREADBOARD_MIRROR_ENABLED == 'true' }}
-    runs-on: [self-hosted, hestia]
+    runs-on: [self-hosted]
     steps:
       - name: mirror main and release tags
         env:

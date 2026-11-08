@@ -7,7 +7,7 @@ on:
 jobs:
   build:
     if: ${{ vars.BREADBOARD_BAKERY_ENABLED == 'true' }}
-    runs-on: [self-hosted, hestia]
+    runs-on: [self-hosted]
     steps:
       - name: checkout exact revision
         run: |
