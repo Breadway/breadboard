@@ -32,6 +32,9 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub forgejo: Forgejo,
     pub config: Arc<Config>,
+    /// Single-flight guard for reconcile passes: the scheduled loop and the
+    /// manual endpoint share it so two passes never run over the same repos.
+    pub reconcile: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl AppState {
@@ -50,6 +53,7 @@ impl AppState {
             http,
             forgejo,
             config: Arc::new(config),
+            reconcile: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 }
