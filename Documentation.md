@@ -382,7 +382,8 @@ repo with no mapped project are skipped with a warning.
 ## CLI
 
 `breadboard [--server URL] <command>`. Config at
-`$XDG_CONFIG_HOME/breadboard/cli.toml` (`server`, `token`).
+`$XDG_CONFIG_HOME/breadboard/cli.toml` (`server`, `token`, and an optional
+`agent` name).
 
 | Command | Notes |
 | --- | --- |
@@ -440,7 +441,10 @@ See `apps/android/README.md` for wireless debugging and limitations.
 `apps/mcp/`: a stdio MCP server (`@modelcontextprotocol/sdk`) that wraps
 `@breadboard/api-client`, so an MCP client (Claude, …) can read and drive the
 board. Auth from `~/.config/breadboard/cli.toml` or `BREADBOARD_SERVER` /
-`BREADBOARD_TOKEN`. Tools: `whoami`, `list_issues` / `get_issue` / `board`
+`BREADBOARD_TOKEN`. The agent name is `BREADBOARD_AGENT`, then `agent` in
+`cli.toml`, else a random playful name per process; the chosen name is written
+to `~/.config/breadboard/agent.json` at startup so local tooling (the OpenCode
+chat-inject plugin) can follow it. Tools: `whoami`, `list_issues` / `get_issue` / `board`
 (filters: project, status, cycle, epic, assignee_id, mine),
 `create_issue` / `update_issue` / `move_issue` / `delete_issue` /
 `move_issue_project` / `comment`, `activity`,
