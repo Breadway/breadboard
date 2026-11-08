@@ -4,6 +4,7 @@
 import {
   ApiError,
   BreadboardClient,
+  STATUSES,
   type AgentClaim,
   type AgentState,
   type BoardEvent,
@@ -91,6 +92,33 @@ export interface Toast {
   undo?: () => void;
 }
 
+/** Facet sets prepared once per filter change instead of once per issue.
+ *  `claims` is null unless a claim facet is active, which keeps agent
+ *  heartbeats from invalidating issue filtering. */
+interface MatchCtx {
+  projectKeys: Set<string>;
+  projectKeyById: Map<number, string>;
+  /** Cycle constraint; empty when the caller ignores cycles. */
+  cycles: Set<number>;
+  /** Number of cycles in the real filter, for the closed-cycle archive rule. */
+  filterCycleCount: number;
+  closedCycles: Set<number>;
+  epics: Set<number>;
+  statuses: Set<Status>;
+  priorities: Set<Priority>;
+  labels: Set<string>;
+  assignees: Set<number>;
+  agents: Set<string>;
+  agentStates: Set<AgentState>;
+  types: Set<IssueType>;
+  text: string;
+  unassigned: boolean;
+  claimed: Filters["claimed"];
+  claims: Map<number, AgentClaim> | null;
+}
+
+const NO_ISSUES: Issue[] = [];
+
 class Store {
   me = $state<User | null>(null);
   auth = $state<AuthState>("loading");
@@ -129,6 +157,18 @@ class Store {
   /** Every facet is multi-select; facets combine with AND, values within a
    *  facet with OR. */
   filters = $state<Filters>(emptyFilters());
+
+  // Filter state is prepared once per change and shared by every consumer.
+  // Without this, each byStatus()/filtered read re-walked all issues and
+  // rebuilt ten Sets plus the claims map per issue (BB-127).
+  #filterCtx = $derived.by(() => this.#prepareFilters(false));
+  #cycleFilterCtx = $derived.by(() => this.#prepareFilters(true));
+  #filtered = $derived.by(() =>
+    this.issues.filter((i) => this.#matches(i, this.#filterCtx)),
+  );
+  #byStatus = $derived.by(() => this.#groupByStatus());
+  /** Non-reactive cache so untouched columns keep their array identity. */
+  #statusLists: Map<Status, Issue[]> = new Map();
 
   #unsub: (() => void) | null = null;
   #clockTimer: ReturnType<typeof setInterval> | undefined;
@@ -172,60 +212,99 @@ class Store {
     return this.filterCount > 0;
   }
 
-  /** Issues that pass every facet. Claims narrow the set too. */
+  /** Issues that pass every facet. Claims narrow the set too.
+   *  Computed once per filter/data change and shared by every consumer. */
   get filtered(): Issue[] {
-    return this.issues.filter((i) => this.matches(i));
+    return this.#filtered;
   }
 
   /** True when `issue` passes every active facet. `ignoreCycles` lets a cycle
    *  strip scope its own progress while still respecting the other filters. */
   matches(issue: Issue, opts: { ignoreCycles?: boolean } = {}): boolean {
-    const i = issue;
-    const f = this.filters;
-    const projectKeys = new Set(f.projects);
-    const cycles = new Set(f.cycles);
-    const epics = new Set(f.epics);
-    const statuses = new Set(f.statuses);
-    const priorities = new Set(f.priorities);
-    const labels = new Set(f.labels);
-    const assignees = new Set(f.assignees);
-    const agents = new Set(f.agents);
-    const agentStates = new Set(f.agentStates);
-    const types = new Set(f.types);
-    const text = f.text.trim().toLowerCase();
+    return this.#matches(issue, opts.ignoreCycles ? this.#cycleFilterCtx : this.#filterCtx);
+  }
 
+  #prepareFilters(ignoreCycles: boolean): MatchCtx {
+    const f = this.filters;
+    // Only track claims when a claim facet can actually exclude an issue, so
+    // heartbeat updates do not invalidate issue filtering.
+    const wantsClaims = f.claimed !== "" || f.agents.length > 0 || f.agentStates.length > 0;
+    const claims = wantsClaims
+      ? new Map(
+          this.agents
+            .filter((a) => a.mode === "exclusive")
+            .map((a) => [a.issue_id, a] as const),
+        )
+      : null;
+    return {
+      projectKeys: new Set(f.projects),
+      projectKeyById: new Map(this.projects.map((p) => [p.id, p.key] as const)),
+      cycles: ignoreCycles ? new Set<number>() : new Set(f.cycles),
+      filterCycleCount: f.cycles.length,
+      closedCycles: new Set(this.cycles.filter((c) => c.closed).map((c) => c.id)),
+      epics: new Set(f.epics),
+      statuses: new Set(f.statuses),
+      priorities: new Set(f.priorities),
+      labels: new Set(f.labels),
+      assignees: new Set(f.assignees),
+      agents: new Set(f.agents),
+      agentStates: new Set(f.agentStates),
+      types: new Set(f.types),
+      text: f.text.trim().toLowerCase(),
+      unassigned: f.unassigned,
+      claimed: f.claimed,
+      claims,
+    };
+  }
+
+  #matches(i: Issue, c: MatchCtx): boolean {
     // A PR that closes a real issue collapses into that issue's card
     // instead of showing as a second, seemingly-unrelated card; its
     // status surfaces there as a small badge instead (see Card.svelte).
     // Asking for PRs explicitly overrides the collapse so the filter is
     // not silently empty.
-    if (!types.has("pr") && i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
+    if (!c.types.has("pr") && i.type === "pr" && i.links.some((l) => l.kind === "closes")) return false;
     // Once a cycle (release) ships and is closed, its done work archives
     // off the default board/backlog view instead of piling up forever;
     // still there if you explicitly pick that cycle from the filter.
-    if (cycles.size === 0 && i.status === "done" && i.cycle_id) {
-      const cycle = this.cycles.find((c) => c.id === i.cycle_id);
-      if (cycle?.closed) return false;
-    }
-    if (projectKeys.size && !projectKeys.has(this.projectKey(i.project_id))) return false;
-    if (!opts.ignoreCycles && cycles.size && (i.cycle_id == null || !cycles.has(i.cycle_id))) return false;
-    if (epics.size && (i.epic_id == null || !epics.has(i.epic_id))) return false;
-    if (statuses.size && !statuses.has(i.status)) return false;
-    if (priorities.size && !priorities.has(i.priority)) return false;
-    if (labels.size && !i.labels.some((l) => labels.has(l))) return false;
-    if (assignees.size && (i.assignee_id == null || !assignees.has(i.assignee_id))) return false;
-    if (f.unassigned && i.assignee_id != null) return false;
-    if (types.size && !types.has(i.type)) return false;
-    if (text) {
+    if (c.filterCycleCount === 0 && i.status === "done" && i.cycle_id != null && c.closedCycles.has(i.cycle_id)) return false;
+    if (c.projectKeys.size && !c.projectKeys.has(c.projectKeyById.get(i.project_id) ?? "?")) return false;
+    if (c.cycles.size && (i.cycle_id == null || !c.cycles.has(i.cycle_id))) return false;
+    if (c.epics.size && (i.epic_id == null || !c.epics.has(i.epic_id))) return false;
+    if (c.statuses.size && !c.statuses.has(i.status)) return false;
+    if (c.priorities.size && !c.priorities.has(i.priority)) return false;
+    if (c.labels.size && !i.labels.some((l) => c.labels.has(l))) return false;
+    if (c.assignees.size && (i.assignee_id == null || !c.assignees.has(i.assignee_id))) return false;
+    if (c.unassigned && i.assignee_id != null) return false;
+    if (c.types.size && !c.types.has(i.type)) return false;
+    if (c.text) {
       const hay = `${i.key} ${i.title} ${i.body} ${i.labels.join(" ")}`.toLowerCase();
-      if (!hay.includes(text)) return false;
+      if (!hay.includes(c.text)) return false;
     }
-    const claim = this.claimsByIssue.get(i.id);
-    if (f.claimed === "claimed" && !claim) return false;
-    if (f.claimed === "unclaimed" && claim) return false;
-    if (agents.size && (!claim || !agents.has(claim.agent_name))) return false;
-    if (agentStates.size && (!claim || !agentStates.has(claim.state))) return false;
+    if (c.claims) {
+      const claim = c.claims.get(i.id);
+      if (c.claimed === "claimed" && !claim) return false;
+      if (c.claimed === "unclaimed" && claim) return false;
+      if (c.agents.size && (!claim || !c.agents.has(claim.agent_name))) return false;
+      if (c.agentStates.size && (!claim || !c.agentStates.has(claim.state))) return false;
+    }
     return true;
+  }
+
+  #groupByStatus(): Map<Status, Issue[]> {
+    const grouped = new Map<Status, Issue[]>();
+    for (const status of STATUSES) grouped.set(status, []);
+    for (const i of this.#filtered) grouped.get(i.status)?.push(i);
+    const previous = this.#statusLists;
+    for (const [status, list] of grouped) {
+      list.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+      const old = previous.get(status);
+      if (old && old.length === list.length && old.every((v, idx) => v === list[idx])) {
+        grouped.set(status, old);
+      }
+    }
+    this.#statusLists = grouped;
+    return grouped;
   }
 
   toggleFilter<K extends "projects" | "cycles" | "epics" | "statuses" | "priorities" | "labels" | "assignees" | "agents" | "agentStates" | "types">(
@@ -259,10 +338,10 @@ class Store {
     this.toggleFilter("assignees", this.me.id);
   }
 
+  /** Column contents for one status, sorted most-recently-updated first.
+   *  Grouped once per change and shared across the five columns. */
   byStatus(status: Status): Issue[] {
-    return this.filtered
-      .filter((i) => i.status === status)
-      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    return this.#byStatus.get(status) ?? NO_ISSUES;
   }
 
   projectKey(id: number): string {
