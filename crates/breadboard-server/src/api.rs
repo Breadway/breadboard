@@ -605,7 +605,10 @@ fn claim_is_stale(claim: &breadboard_core::AgentClaim) -> bool {
 
 /// Counts for exclusive claims only: an intent is a reservation, not work.
 fn exclusive(claims: &[breadboard_core::AgentClaim]) -> Vec<&breadboard_core::AgentClaim> {
-    claims.iter().filter(|c| c.mode == ClaimMode::Exclusive).collect()
+    claims
+        .iter()
+        .filter(|c| c.mode == ClaimMode::Exclusive)
+        .collect()
 }
 
 fn agent_line(claims: &[breadboard_core::AgentClaim]) -> String {
@@ -697,7 +700,10 @@ async fn chat_author(
     }
 }
 
-async fn resolve_chat_room(app: &AppState, room: Option<&str>) -> AppResult<breadboard_core::ChatRoom> {
+async fn resolve_chat_room(
+    app: &AppState,
+    room: Option<&str>,
+) -> AppResult<breadboard_core::ChatRoom> {
     match room.map(str::trim).filter(|s| !s.is_empty()) {
         None => store::chat_room_by_name(&app.db, "lobby")
             .await?
@@ -710,7 +716,6 @@ async fn resolve_chat_room(app: &AppState, room: Option<&str>) -> AppResult<brea
             .ok_or(crate::error::AppError::NotFound),
     }
 }
-
 
 #[derive(Deserialize)]
 pub struct PushQuery {
@@ -771,7 +776,9 @@ pub async fn get_chat_push_subs(
     Query(q): Query<PushQuery>,
 ) -> AppResult<Json<Vec<i64>>> {
     let (member, _) = chat_member_for(&app, &user, q.agent.as_deref()).await?;
-    Ok(Json(store::chat_push_subs(&app.db, user.0.id, &member).await?))
+    Ok(Json(
+        store::chat_push_subs(&app.db, user.0.id, &member).await?,
+    ))
 }
 
 pub async fn set_chat_push_sub(
@@ -879,9 +886,7 @@ pub async fn delete_chat_room(
     Path(id): Path<i64>,
 ) -> AppResult<StatusCode> {
     let room = store::get_chat_room(&app.db, id).await?;
-    if room.kind == breadboard_core::ChatRoomKind::Room
-        && room.name.as_deref() == Some("lobby")
-    {
+    if room.kind == breadboard_core::ChatRoomKind::Room && room.name.as_deref() == Some("lobby") {
         return Err(crate::error::AppError::bad_request(
             "the lobby cannot be deleted",
         ));
@@ -922,9 +927,58 @@ pub async fn chat_messages(
     )
     .await?;
     if let Some(last) = messages.last() {
-        store::chat_mark_read(&app.db, room.id, &reader, last.id).await?;
+        record_chat_read(&app, room.id, &reader, last.id);
     }
     Ok(Json(messages))
+}
+
+/// Queue a read receipt without blocking the fetch that triggered it.
+///
+/// Read receipts are best-effort. Waiting for the write made switching rooms
+/// wait on SQLite's busy timeout whenever the disk was busy, which showed up
+/// as multi-second room switches and occasional `database is locked` errors.
+/// The write now runs in the background, and a fetch that has not advanced
+/// past the recorded id does not queue another one. A failed write forgets
+/// the id so a later fetch tries again.
+fn record_chat_read(app: &AppState, room_id: i64, reader: &str, message_id: i64) {
+    if message_id <= 0 {
+        return;
+    }
+
+    let key = (room_id, reader.to_string());
+    {
+        let mut marks = match app.read_marks.lock() {
+            Ok(marks) => marks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if marks
+            .get(&key)
+            .is_some_and(|recorded| *recorded >= message_id)
+        {
+            return;
+        }
+        marks.insert(key, message_id);
+    }
+
+    let db = app.db.clone();
+    let marks = app.read_marks.clone();
+    let reader = reader.to_string();
+    tokio::spawn(async move {
+        if let Err(error) = store::chat_mark_read(&db, room_id, &reader, message_id).await {
+            tracing::warn!(%error, room_id, "chat read receipt failed");
+            let key = (room_id, reader);
+            let mut marks = match marks.lock() {
+                Ok(marks) => marks,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if marks
+                .get(&key)
+                .is_some_and(|recorded| *recorded <= message_id)
+            {
+                marks.remove(&key);
+            }
+        }
+    });
 }
 
 pub async fn delete_chat_message(
@@ -992,8 +1046,7 @@ pub async fn open_dm(
     user: AuthUser,
     Json(body): Json<breadboard_core::dto::OpenDm>,
 ) -> AppResult<Json<breadboard_core::ChatRoom>> {
-    let (author, _, _) =
-        chat_author(&app, &user, body.agent_name.as_deref()).await?;
+    let (author, _, _) = chat_author(&app, &user, body.agent_name.as_deref()).await?;
     let peer = store::agent_member(&body.with);
     if peer == author {
         return Err(crate::error::AppError::bad_request(
@@ -1001,11 +1054,14 @@ pub async fn open_dm(
         ));
     }
     if peer == store::agent_member("") {
-        return Err(crate::error::AppError::bad_request("agent name is required"));
+        return Err(crate::error::AppError::bad_request(
+            "agent name is required",
+        ));
     }
-    Ok(Json(store::find_or_create_dm(&app.db, &author, &peer).await?))
+    Ok(Json(
+        store::find_or_create_dm(&app.db, &author, &peer).await?,
+    ))
 }
-
 
 // --- chat uploads -----------------------------------------------------------
 
@@ -1026,7 +1082,10 @@ fn safe_display_name(name: &str) -> String {
 }
 
 fn guess_mime(filename: &str, provided: Option<&str>) -> String {
-    if let Some(m) = provided.map(str::trim).filter(|m| !m.is_empty() && *m != "application/octet-stream") {
+    if let Some(m) = provided
+        .map(str::trim)
+        .filter(|m| !m.is_empty() && *m != "application/octet-stream")
+    {
         return m.to_string();
     }
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
@@ -1171,9 +1230,8 @@ pub async fn get_chat_upload(
         let name = safe_display_name(&stored.upload.filename);
         builder = builder.header(
             header::CONTENT_DISPOSITION,
-            HeaderValue::from_str(&format!("attachment; filename=\"{name}\"")).map_err(|_| {
-                AppError::bad_request("invalid filename")
-            })?,
+            HeaderValue::from_str(&format!("attachment; filename=\"{name}\""))
+                .map_err(|_| AppError::bad_request("invalid filename"))?,
         );
     }
     builder
@@ -1199,9 +1257,7 @@ pub async fn post_chat_message(
     let room = if let Some(to) = body.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let peer = store::agent_member(to);
         if peer == author {
-            return Err(crate::error::AppError::bad_request(
-                "cannot DM yourself",
-            ));
+            return Err(crate::error::AppError::bad_request("cannot DM yourself"));
         }
         store::find_or_create_dm(&app.db, &author, &peer).await?
     } else {
@@ -1249,7 +1305,9 @@ pub async fn set_agent_message(
 ) -> AppResult<Json<serde_json::Value>> {
     let agent_name = body.agent_name.trim();
     if agent_name.is_empty() {
-        return Err(crate::error::AppError::bad_request("agent_name is required"));
+        return Err(crate::error::AppError::bad_request(
+            "agent_name is required",
+        ));
     }
     let message = breadboard_core::dto::normalize_agent_message(&body.message)
         .map_err(crate::error::AppError::BadRequest)?;
@@ -1443,7 +1501,10 @@ async fn resolve_own_claim(
             .then_with(|| b.last_heartbeat.cmp(&a.last_heartbeat))
     });
     if let Some(session) = session_id {
-        if let Some(matched) = claims.iter().find(|c| c.session_id.as_deref() == Some(session)) {
+        if let Some(matched) = claims
+            .iter()
+            .find(|c| c.session_id.as_deref() == Some(session))
+        {
             return Ok(matched.clone());
         }
     }
@@ -1482,10 +1543,7 @@ pub async fn heartbeat_claim(
             ));
         }
     }
-    let session = body
-        .session_id
-        .as_ref()
-        .and_then(|v| v.as_deref());
+    let session = body.session_id.as_ref().and_then(|v| v.as_deref());
     let existing = resolve_own_claim(
         &app,
         issue.id,
