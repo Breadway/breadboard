@@ -29,6 +29,7 @@
   let subs = $state<number[]>([]);
   let narrow = $state(false);
   let roomsOpen = $state(true);
+  let reloadTimer: ReturnType<typeof setTimeout> | undefined;
 
   const selected = $derived(rooms.find((r) => r.id === selectedId));
   const shared = $derived(
@@ -248,17 +249,42 @@
     }
   }
 
-  async function loadMessages(id: number | null) {
+  async function loadMessages(id: number | null, after?: number) {
     if (id == null) {
       messages = [];
       return;
     }
     try {
-      const next = await api.listChatMessages(id, { limit: 300 });
-      if (selectedId === id) messages = next;
+      const next = await api.listChatMessages(
+        id,
+        after == null ? { limit: 300 } : { after, limit: 300 },
+      );
+      if (selectedId !== id) return;
+      if (after == null) {
+        messages = next;
+      } else if (next.length) {
+        // Incremental fetch: append only what this client has not seen yet.
+        const seen = new Set(messages.map((m) => m.id));
+        const fresh = next.filter((m) => !seen.has(m.id));
+        if (fresh.length) messages = [...messages, ...fresh];
+      }
     } catch {
       /* ignore */
     }
+  }
+
+  /** Coalesce SSE bursts into one room-list refresh and, when the event was
+   *  for the open room, one incremental message fetch. */
+  function scheduleReload() {
+    clearTimeout(reloadTimer);
+    reloadTimer = setTimeout(() => {
+      if (selectedId != null && store.chatRoom === selectedId) {
+        const last = messages[messages.length - 1]?.id;
+        void loadMessages(selectedId, last).then(() => loadRooms());
+      } else {
+        void loadRooms();
+      }
+    }, 250);
   }
 
   function pick(id: number) {
@@ -304,6 +330,7 @@
     if ((!body && !pending.length) || selectedId == null || sending) return;
     sending = true;
     try {
+      const last = messages[messages.length - 1]?.id;
       await api.postChatMessage({
         room: String(selectedId),
         body,
@@ -312,7 +339,8 @@
       draft = "";
       pending = [];
       mentionState = null;
-      await Promise.all([loadMessages(selectedId), loadRooms()]);
+      // Fetch just the new tail; the SSE echo is deduped by id.
+      await Promise.all([loadMessages(selectedId, last), loadRooms()]);
     } catch (e) {
       store.flash(`Couldn't send: ${errMsg(e)}`);
     } finally {
@@ -367,21 +395,24 @@
     mq.addEventListener("change", apply);
     void loadSubs();
     void loadRooms(true).then(() => loadMessages(selectedId));
+    // SSE is the live path; this is only a fallback for a dropped stream.
     const t = setInterval(() => {
+      if (document.hidden) return;
       void loadRooms();
-      void loadMessages(selectedId);
-    }, 5_000);
+      const last = messages[messages.length - 1]?.id;
+      void loadMessages(selectedId, last);
+    }, 30_000);
     return () => {
       clearInterval(t);
+      clearTimeout(reloadTimer);
       mq.removeEventListener("change", apply);
     };
   });
 
-  // SSE nudge: a message landed somewhere.
+  // SSE nudge: throttle, and only touch the messages of the open room.
   $effect(() => {
     void store.chatTick;
-    void loadRooms();
-    void loadMessages(selectedId);
+    scheduleReload();
   });
 
   // Keep the newest message in view.
