@@ -712,9 +712,9 @@ server.tool(
   "claim_issue",
   "Claim an issue as an agent. REQUIRED FIRST STEP before any implementation work: " +
     "no code changes without holding the claim. " +
-    "NAME YOURSELF: agent names are free-form and should be fun and memorable " +
-    "(Toasty Pretzel, Crumb Baron, Saucy Baguette). Reuse the same name across issues so the " +
-    "Agents tab groups your work; omit agent_name to get one playful name for this MCP process. " +
+    "NAME FIRST: call name_agent before claiming anything; agent names are free-form and should be " +
+    "fun and memorable (Toasty Pretzel, Crumb Baron, Saucy Baguette). Reuse the same name across " +
+    "issues so the Agents tab groups your work; after naming, omit agent_name here. " +
     "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
     "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
     "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
@@ -812,7 +812,8 @@ server.tool(
 server.tool(
   "set_agent_message",
   "Set or clear the one-line message shown under your name in the Agents view. " +
-    "Use it for what you are about (or a fun motto); keep it to one short line.",
+    "Use it for what you are about (or a fun motto); keep it to one short line. " +
+    "Call name_agent first if you have not chosen a name for this process yet.",
   {
     message: z.string().describe("one line, max 120 chars; empty clears it"),
     agent_name: z.string().optional().describe("defaults to this process's generated name"),
@@ -823,6 +824,31 @@ server.tool(
       if (!name) throw new Error("no agent name yet: pass agent_name or call claim_issue first");
       ensureChatPoller(name);
       return client.setAgentMessage(name, message);
+    }),
+);
+
+server.tool(
+  "name_agent",
+  "Name this MCP process before you claim any work. Sets the name later claim and chat calls use " +
+    "(so you can omit agent_name), registers your profile in the Agents view, and starts chat " +
+    "polling. Pick something fun and memorable, and reuse it across issues. This also lets the " +
+    "chat plugin map this session, so DMs and mentions reach you before your first claim.",
+  {
+    agent_name: z.string().describe("fun, memorable name, e.g. Toasty Pretzel"),
+    message: z
+      .string()
+      .optional()
+      .describe("optional one-line message for the Agents view; defaults to 'Ready for work.'"),
+  },
+  ({ agent_name, message }) =>
+    run(async () => {
+      const name = agent_name.trim();
+      if (!name) throw new Error("agent_name is required");
+      const line = message?.trim() || "Ready for work.";
+      autoAgentName = name;
+      rememberAgent(name);
+      ensureChatPoller(name);
+      return client.setAgentMessage(name, line);
     }),
 );
 
@@ -1066,7 +1092,7 @@ server.tool(
 server.tool(
   "suggest_agent_names",
   "Get a handful of fun, memorable agent names to choose from. Names are characters, not hosts: " +
-    "pick one and reuse it on every issue so the Agents tab keeps you as one agent.",
+    "pass your pick to name_agent, then reuse it on every issue so the Agents tab keeps you as one agent.",
   { count: z.number().min(1).max(20).optional().describe("how many names, default 8") },
   ({ count }) => ok(suggestNames(count ?? 8)),
 );
