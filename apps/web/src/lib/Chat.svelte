@@ -13,6 +13,7 @@
   let compacting = $state(false);
   let deletingRoom = $state<number | null>(null);
   let mentions = $state<ChatMention[]>([]);
+  let mentionsLoading = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
   let mentionState = $state<{ start: number; query: string } | null>(null);
   let mentionIndex = $state(0);
@@ -49,7 +50,7 @@
       list.push({ name: "everyone", slug: "everyone", kind: "room" });
     }
     list.push(...mentions);
-    return list.filter((m) => m.slug.startsWith(current.query)).slice(0, 8);
+    return list.filter((m) => m.slug.startsWith(current.query)).slice(0, 10);
   });
 
   function memberDisplay(member: string): string {
@@ -122,11 +123,24 @@
     return out;
   }
 
+  function fallbackMentions(): ChatMention[] {
+    return knownAgents.map((name) => ({
+      name,
+      slug: name.replace(/\s+/g, "-").toLowerCase(),
+      kind: "agent" as const,
+    }));
+  }
+
   async function loadMentions() {
+    if (mentionsLoading) return;
+    mentionsLoading = true;
     try {
-      mentions = await api.chatMentions();
+      const list = await api.chatMentions();
+      mentions = list.length ? list : fallbackMentions();
     } catch {
-      /* autocomplete is optional */
+      mentions = fallbackMentions();
+    } finally {
+      mentionsLoading = false;
     }
   }
 
@@ -150,6 +164,7 @@
     }
     mentionState = { start: at, query: query.toLowerCase() };
     mentionIndex = 0;
+    if (!mentions.length) void loadMentions();
   }
 
   function chooseMention(item: ChatMention) {
