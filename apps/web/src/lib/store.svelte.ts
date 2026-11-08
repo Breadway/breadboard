@@ -107,6 +107,8 @@ class Store {
   clock = $state(Date.now());
   /** Bumped when any chat message arrives over SSE. */
   chatTick = $state(0);
+  /** Room of the most recent chat event, so the open view can ignore other rooms. */
+  chatRoom = $state<number | null>(null);
   /** Total unread chat messages for the signed-in human. */
   chatUnread = $state(0);
 
@@ -134,6 +136,7 @@ class Store {
   #clockTimer: ReturnType<typeof setInterval> | undefined;
   #lastChatPush = 0;
   #chatPushReady = false;
+  #chatPushTimer: ReturnType<typeof setTimeout> | undefined;
   #everLive = false;
   #retry: ReturnType<typeof setTimeout> | undefined;
   #retryDelay = 1000;
@@ -358,6 +361,7 @@ class Store {
   /** Browser notification for chat DMs/pings (and subscribed rooms). */
   async notifyChatPushes() {
     if (!this.#chatPushReady) return;
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
     try {
       const pushes = await api.listChatPushes(undefined, this.#lastChatPush, 50);
       if (!pushes.length) return;
@@ -570,10 +574,12 @@ class Store {
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         break;
       case "chat.message":
+        this.chatRoom = ev.room_id;
         this.chatTick++;
-        void this.notifyChatPushes();
+        this.#scheduleChatPushes();
         break;
       case "chat.room.deleted":
+        this.chatRoom = null;
         this.chatTick++;
         break;
       case "card.deleted":
@@ -608,6 +614,13 @@ class Store {
     const idx = this.issues.findIndex((i) => i.id === issue.id);
     if (idx === -1) this.issues = [...this.issues, issue];
     else this.issues[idx] = issue;
+  }
+
+  /** Coalesce a burst of chat events into one push check. */
+  #scheduleChatPushes() {
+    if (!this.#chatPushReady) return;
+    clearTimeout(this.#chatPushTimer);
+    this.#chatPushTimer = setTimeout(() => void this.notifyChatPushes(), 500);
   }
 
   flash(msg: string, kind: Toast["kind"] = "error", undo?: () => void) {
