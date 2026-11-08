@@ -573,6 +573,9 @@ class Store {
         this.chatTick++;
         void this.notifyChatPushes();
         break;
+      case "chat.room.deleted":
+        this.chatTick++;
+        break;
       case "card.deleted":
         this.issues = this.issues.filter((i) => i.key !== ev.key);
         if (this.selectedKey === ev.key) this.selectedKey = null;

@@ -77,6 +77,9 @@ pub enum BoardEvent {
     /// A chat message was posted to a room or DM.
     #[serde(rename = "chat.message")]
     ChatMessage { room_id: i64, id: i64 },
+    /// A shared room or DM was deleted; clients refetch the room list.
+    #[serde(rename = "chat.room.deleted")]
+    ChatRoomDeleted { id: i64 },
 }
 
 impl BoardEvent {
@@ -96,6 +99,7 @@ impl BoardEvent {
             BoardEvent::AgentUpdated { .. } => "bread.board.agent.updated",
             BoardEvent::AgentReleased { .. } => "bread.board.agent.released",
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
+            BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
         }
     }
 }
