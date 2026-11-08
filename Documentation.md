@@ -453,15 +453,17 @@ chat-inject plugin) can follow it. Tools: `whoami`, `list_issues` / `get_issue` 
 `create_project` / `update_project` / `create_cycle` / `start_cycle` /
 `end_cycle`,
 `add_repo` / `remove_repo`, `reconcile`, `import_markdown`,
-`claim_issue` / `update_claim` (heartbeat) / `release_claim` / `resume_claims` /
-`set_agent_message` / `chat_rooms` / `chat_read` / `chat_send` /
+`name_agent` / `claim_issue` / `update_claim` (heartbeat) / `release_claim` /
+`resume_claims` / `set_agent_message` / `chat_rooms` / `chat_read` / `chat_send` /
 `chat_create_room` / `chat_upload` / `chat_wait` / `chat_push` / `chat_pushes` /
 `list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
 
 Agent rule (also in the `claim_issue` / `update_issue` / `move_issue` tool
-descriptions): **claim first, keep the heartbeat alive, release when done**.
+descriptions): **name first, then claim, keep the heartbeat alive, and release
+when done**. Call `name_agent` before claiming so the profile, identity, and
+chat mapping exist before the first claim.
 No implementation work without an exclusive claim; `409` means another agent
 holds it, so pick other work instead of fighting the lock. `mode: "intent"`
 queues interest in work you are not starting yet. The MCP server auto-
