@@ -904,11 +904,17 @@ pub async fn writeback_comment(state: &AppState, issue: &Issue, comment_id: i64,
     }
 }
 
-/// One reconcile pass over every enabled repo.
+/// One reconcile pass over every enabled repo. Passes are single-flight: a
+/// trigger that arrives while another pass runs is skipped instead of starting
+/// a second walk over the same repos.
 pub async fn reconcile_once(state: &AppState) -> anyhow::Result<()> {
     if !state.forgejo.is_configured() {
         return Ok(());
     }
+    let Ok(_pass) = state.reconcile.try_lock() else {
+        tracing::info!("reconcile pass already running; skipping this trigger");
+        return Ok(());
+    };
     let repos = store::enabled_repos(&state.db).await?;
     for (repo, last_synced) in repos {
         let started = Utc::now().to_rfc3339();
@@ -950,7 +956,13 @@ pub async fn reconcile_once(state: &AppState) -> anyhow::Result<()> {
 pub fn spawn_reconcile(state: AppState) {
     let interval_mins = state.config.forgejo.reconcile_interval_mins.max(1);
     tokio::spawn(async move {
+        // Let startup traffic settle: a restart should not immediately walk
+        // every repo while clients are loading the board for the first time.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_mins * 60));
+        // A pass that overruns the interval must not fire the missed ticks back
+        // to back; wait a full interval after it finishes instead.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tick.tick().await;
             if let Err(e) = reconcile_once(&state).await {

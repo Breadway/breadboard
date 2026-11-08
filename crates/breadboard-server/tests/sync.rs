@@ -1149,3 +1149,57 @@ fn label(name: &str) -> breadboard_server::forgejo::FgLabel {
         name: name.to_string(),
     }
 }
+
+/// The scheduled loop and the manual endpoint share one single-flight guard: a
+/// second pass triggered while one is running must not walk the same repos.
+#[tokio::test]
+async fn reconcile_passes_do_not_overlap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Clone)]
+    struct Fake {
+        lists: Arc<AtomicUsize>,
+    }
+
+    async fn list_issues(
+        axum::extract::State(fake): axum::extract::State<Fake>,
+    ) -> axum::Json<Vec<serde_json::Value>> {
+        fake.lists.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        axum::Json(Vec::new())
+    }
+
+    let fake = Fake {
+        lists: Arc::new(AtomicUsize::new(0)),
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = axum::Router::new()
+        .route(
+            "/api/v1/repos/Breadway/test/issues",
+            axum::routing::get(list_issues),
+        )
+        .with_state(fake.clone());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    let app =
+        common::spawn_with_forgejo(Some((format!("http://{addr}"), "fake-token".into()))).await;
+    store::upsert_repo(&app.db, "Breadway/test", true)
+        .await
+        .unwrap();
+
+    let (a, b) = tokio::join!(
+        sync::reconcile_once(&app.state),
+        sync::reconcile_once(&app.state)
+    );
+    assert!(a.is_ok());
+    assert!(b.is_ok());
+    assert_eq!(
+        fake.lists.load(Ordering::SeqCst),
+        1,
+        "the second pass is skipped while the first holds the lock"
+    );
+}
