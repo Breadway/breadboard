@@ -177,7 +177,13 @@ async fn claim_events_flow_over_sse() {
         .send()
         .await
         .unwrap();
-    assert_eq!(events.next_type().await, "agent.updated");
+    let updated = events.next_event().await;
+    assert_eq!(updated["type"], "agent.updated");
+    // The heartbeat event carries the claim so clients patch one entry rather
+    // than refetching /api/agents and /api/agents/status.
+    assert_eq!(updated["claim"]["key"], key.as_str());
+    assert_eq!(updated["claim"]["state"], "verifying");
+    assert!(updated["claim"]["last_heartbeat"].is_string());
 
     c.delete(format!("{base}/api/issues/{key}/claim"))
         .header("authorization", &auth)

@@ -85,6 +85,27 @@ export function ago(iso: string, now = Date.now()): string {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+/** Fields a human can see on a card tint, the Agents view or the issue drawer.
+ *  A bare heartbeat only moves last_heartbeat/updated_at, which the 30s clock
+ *  already repaints from. */
+function claimVisibleChange(a: AgentClaim, b: AgentClaim): boolean {
+  return (
+    a.agent_name !== b.agent_name ||
+    a.mode !== b.mode ||
+    a.state !== b.state ||
+    a.note !== b.note ||
+    a.branch !== b.branch ||
+    a.worktree !== b.worktree ||
+    a.repo !== b.repo ||
+    a.pr_url !== b.pr_url ||
+    a.pr_number !== b.pr_number ||
+    a.head_sha !== b.head_sha ||
+    a.board_status !== b.board_status ||
+    a.issue_status !== b.issue_status ||
+    a.session_id !== b.session_id
+  );
+}
+
 export interface Toast {
   id: number;
   msg: string;
@@ -643,11 +664,33 @@ class Store {
         break;
       }
       case "agent.claimed":
-      case "agent.updated":
       case "agent.released":
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         break;
+      case "agent.updated": {
+        // The event carries the claim, so a heartbeat patches one entry instead
+        // of refetching both agent lists for every heartbeat (BB-128).
+        const claim = ev.claim;
+        if (!claim) {
+          void this.loadAgents();
+          this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+          break;
+        }
+        const idx = this.agents.findIndex((a) => a.id === claim.id);
+        if (idx === -1) {
+          this.agents = [...this.agents, claim];
+          this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+          break;
+        }
+        // Only refetch the open drawer's comments/activity when something it
+        // shows changed; a bare heartbeat just moves last_heartbeat.
+        if (claimVisibleChange(this.agents[idx], claim)) {
+          this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        }
+        this.agents[idx] = claim;
+        break;
+      }
       case "chat.message":
         this.chatTick++;
         void this.notifyChatPushes();

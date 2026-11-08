@@ -383,7 +383,7 @@ export type BoardEvent =
     }
   | { type: "notified"; user_id: number }
   | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
-  | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
+  | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string; claim: AgentClaim }
   | { type: "agent.released"; id: number; key: string }
   | { type: "chat.message"; room_id: number; id: number }
   | { type: "chat.room.deleted"; id: number };
