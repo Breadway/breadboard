@@ -365,6 +365,50 @@ export interface AgentStatusSummary {
   claims: AgentClaim[];
 }
 
+/** `POST /api/agents/register`. Omit `agent_name` to ask the server for a
+ *  curated name. */
+export interface AgentRegister {
+  agent_name?: string;
+  session_id?: string;
+  host?: string;
+  pid?: number;
+  note?: string;
+}
+
+export interface AgentRegistration {
+  agent_name: string;
+  /** Two or three other free curated names. */
+  alternatives: string[];
+  live: boolean;
+  killed: boolean;
+  session_id?: string | null;
+}
+
+/** One roster row: the union of sessions, profiles and claims by lowercased
+ *  name. A roster entry may have zero claims. */
+export interface AgentRosterEntry {
+  agent_name: string;
+  session_id?: string | null;
+  host?: string | null;
+  pid?: number | null;
+  note?: string | null;
+  first_seen?: string | null;
+  last_seen?: string | null;
+  live: boolean;
+  killed: boolean;
+  status: "live" | "stale" | "killed";
+  message?: string | null;
+  state?: AgentState | null;
+  claim_count: number;
+  exclusive_count: number;
+  intent_count: number;
+  user_id?: number | null;
+  login?: string | null;
+  killed_by?: number | null;
+  killed_by_login?: string | null;
+  killed_at?: string | null;
+}
+
 // Mirrors breadboard_core::event::BoardEvent (serde tag = "type").
 export type BoardEvent =
   | { type: "card.created"; id: number; key: string }
@@ -388,6 +432,8 @@ export type BoardEvent =
   | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string; claim: AgentClaim }
   | { type: "agent.released"; id: number; key: string }
+  | { type: "agent.killed"; agent: string; killed_by: number | null }
+  | { type: "agent.revived"; agent: string; revived_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
   | { type: "chat.room.deleted"; id: number };
 
@@ -525,6 +571,17 @@ export class BreadboardClient {
 
   listAgents = () => this.req<AgentClaim[]>("GET", "/api/agents");
   agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");
+  listAgentRoster = () => this.req<AgentRosterEntry[]>("GET", "/api/agents/roster");
+  registerAgent = (body: AgentRegister = {}) =>
+    this.req<AgentRegistration>("POST", "/api/agents/register", body);
+  killAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/kill`);
+  reviveAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/revive`);
+  renameAgent = (name: string, new_name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/rename`, {
+      new_name,
+    });
   claimIssue = (key: string, claim: ClaimUpsert) =>
     this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
   heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>

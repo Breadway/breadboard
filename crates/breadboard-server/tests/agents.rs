@@ -4,6 +4,15 @@ mod common;
 use common as tu;
 use serde_json::{json, Value};
 
+fn roster_row<'a>(roster: &'a Value, name: &str) -> &'a Value {
+    roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent_name"] == name)
+        .unwrap_or_else(|| panic!("roster row {name} not found in {roster}"))
+}
+
 async fn create_issue(c: &reqwest::Client, base: &str, auth: &str, title: &str) -> Value {
     c.post(format!("{base}/api/issues"))
         .header("authorization", auth)
@@ -26,7 +35,11 @@ async fn ensure_project(c: &reqwest::Client, base: &str, auth: &str) {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "project setup failed: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "project setup failed: {}",
+        resp.status()
+    );
 }
 
 #[tokio::test]
@@ -391,7 +404,12 @@ async fn heartbeat_pr_url_comments_once() {
     let comments = detail["comments"].as_array().unwrap();
     let pr_comments: Vec<&Value> = comments
         .iter()
-        .filter(|c| c["body"].as_str().unwrap_or("").contains("https://git.example/pulls/7"))
+        .filter(|c| {
+            c["body"]
+                .as_str()
+                .unwrap_or("")
+                .contains("https://git.example/pulls/7")
+        })
         .collect();
     assert_eq!(pr_comments.len(), 1, "commented exactly once");
 
@@ -534,7 +552,11 @@ async fn claim_security_and_resolution() {
         .send()
         .await
         .unwrap();
-    assert_eq!(heartbeat.status(), 200, "one claim => no disambiguation needed");
+    assert_eq!(
+        heartbeat.status(),
+        200,
+        "one claim => no disambiguation needed"
+    );
     let agents: Value = c
         .get(format!("{base}/api/agents"))
         .header("authorization", &auth)
@@ -595,7 +617,10 @@ async fn completion_follows_board_done() {
 
     let claim = &status["claims"][0];
     assert_eq!(claim["board_status"], "done");
-    assert_ne!(claim["state"], "done", "the lifecycle state is still the agent's");
+    assert_ne!(
+        claim["state"], "done",
+        "the lifecycle state is still the agent's"
+    );
 }
 
 /// An agent can carry a one-line message, set at claim time or later, and
@@ -621,7 +646,10 @@ async fn agent_message_roundtrip() {
         .json()
         .await
         .unwrap();
-    assert_eq!(claim["message"], "Shipping the sync fix", "message is normalised");
+    assert_eq!(
+        claim["message"], "Shipping the sync fix",
+        "message is normalised"
+    );
 
     let agents: Value = c
         .get(format!("{base}/api/agents"))
@@ -638,7 +666,9 @@ async fn agent_message_roundtrip() {
     let updated: Value = c
         .put(format!("{base}/api/agents/message"))
         .header("authorization", &auth)
-        .json(&json!({ "agent_name": "bouncy bagel", "message": "Now verifying on the live stack" }))
+        .json(
+            &json!({ "agent_name": "bouncy bagel", "message": "Now verifying on the live stack" }),
+        )
         .send()
         .await
         .unwrap()
@@ -681,4 +711,432 @@ async fn agent_message_roundtrip() {
         .await
         .unwrap();
     assert!(agents[0]["message"].is_null());
+}
+
+/// The roster is the union of sessions, profiles and claims: a profile-only
+/// agent with no claims still appears, live/stale follows the 120 s heartbeat,
+/// and mixed-case registrations dedupe to one lowercased row.
+#[tokio::test]
+async fn roster_unions_sessions_profiles_and_claims() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "roster item").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    // The brioche-bridge case: a registered session with zero claims.
+    let reg: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "brioche-bridge",
+            "session_id": "ses_e45b3c0cffehLdDqi1zIPhaBM",
+            "host": "hestia",
+            "pid": 4242,
+            "note": "chat bridge"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reg["agent_name"], "brioche-bridge");
+    assert_eq!(reg["killed"], false);
+
+    // A profile with no session and no claim (historical agent).
+    sqlx::query(
+        "INSERT INTO agent_profiles (user_id, agent_name, message, updated_at)
+         VALUES (1, 'profile-only', 'I only have a profile', ?1)",
+    )
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // A claimer with a session id, sent in mixed case.
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "Crumb-Marshal",
+            "session_id": "ses_crumb",
+            "state": "implementing"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    let brioche = roster_row(&roster, "brioche-bridge");
+    assert_eq!(brioche["claim_count"], 0);
+    assert_eq!(brioche["exclusive_count"], 0);
+    assert_eq!(brioche["intent_count"], 0);
+    assert_eq!(brioche["session_id"], "ses_e45b3c0cffehLdDqi1zIPhaBM");
+    assert_eq!(brioche["host"], "hestia");
+    assert_eq!(brioche["pid"], 4242);
+    assert_eq!(brioche["live"], true);
+    assert_eq!(brioche["status"], "live");
+
+    let profile = roster_row(&roster, "profile-only");
+    assert_eq!(profile["claim_count"], 0);
+    assert_eq!(profile["message"], "I only have a profile");
+    assert_eq!(profile["status"], "stale");
+    assert_eq!(profile["live"], false);
+
+    let crumb = roster_row(&roster, "crumb-marshal");
+    assert_eq!(crumb["claim_count"], 1);
+    assert_eq!(crumb["exclusive_count"], 1);
+    assert_eq!(crumb["session_id"], "ses_crumb");
+    assert_eq!(crumb["state"], "implementing");
+    assert_eq!(crumb["live"], true);
+
+    // Deduplicated by lowercased name even when another row uses mixed case.
+    let count = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["agent_name"] == "crumb-marshal")
+        .count();
+    assert_eq!(count, 1);
+
+    // A heartbeat older than 120 s flips live -> stale.
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'brioche-bridge'")
+        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let brioche = roster_row(&roster, "brioche-bridge");
+    assert_eq!(brioche["live"], false);
+    assert_eq!(brioche["status"], "stale");
+    assert_eq!(brioche["session_id"], "ses_e45b3c0cffehLdDqi1zIPhaBM");
+}
+
+/// Registering without a name assigns a unique curated name and returns
+/// alternatives, so a caller can pick without rerolling.
+#[tokio::test]
+async fn register_assigns_curated_names_with_alternatives() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let first: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "session_id": "ses_auto_1" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let name = first["agent_name"].as_str().unwrap().to_string();
+    assert_eq!(name, name.to_lowercase());
+    assert!(name.contains('-'), "{name} should be a curated pair");
+    let alternatives: Vec<String> = first["alternatives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+    assert!((2..=3).contains(&alternatives.len()), "{alternatives:?}");
+    assert!(!alternatives.contains(&name));
+    let unique: std::collections::HashSet<_> = alternatives.iter().collect();
+    assert_eq!(unique.len(), alternatives.len());
+
+    let second: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "session_id": "ses_auto_2" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_ne!(second["agent_name"], name.as_str());
+
+    // An explicit name is preserved (lowercased) and the response still offers
+    // alternatives.
+    let explicit: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "Sourdough-Sentinel", "session_id": "ses_explicit" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(explicit["agent_name"], "sourdough-sentinel");
+    assert!(!explicit["alternatives"].as_array().unwrap().is_empty());
+}
+
+/// Kill releases every claim, blocks writes, is idempotent, and revives.
+#[tokio::test]
+async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "kill me").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "victim",
+            "session_id": "ses_victim",
+            "message": "about to be killed"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let killed: Value = c
+        .post(format!("{base}/api/agents/victim/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(killed["killed"], true);
+    assert_eq!(killed["status"], "killed");
+    assert_eq!(killed["killed_by_login"], "tester");
+    assert_eq!(killed["claim_count"], 0);
+
+    // Claims are gone.
+    let claims: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claims.as_array().unwrap().len(), 0);
+
+    // Second kill is a no-op and keeps the original killer.
+    let again: Value = c
+        .post(format!("{base}/api/agents/victim/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["killed"], true);
+    assert_eq!(again["killed_by_login"], "tester");
+    assert_eq!(again["killed_at"], killed["killed_at"]);
+
+    // The next agent-scoped writes are refused with a clear message.
+    let blocked_claim = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "victim" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_claim.status(), 403);
+    let body: Value = blocked_claim.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("killed"), "{body}");
+
+    let blocked_message = c
+        .put(format!("{base}/api/agents/message"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "victim", "message": "still here" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked_message.status(), 403);
+
+    // Registration still refreshes the row, but does not revive it.
+    let reg: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "victim", "session_id": "ses_victim" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reg["killed"], true);
+
+    // Revive is idempotent and the name can claim again.
+    for _ in 0..2 {
+        let revived: Value = c
+            .post(format!("{base}/api/agents/victim/revive"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(revived["killed"], false);
+    }
+    let reclaimed = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "victim" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reclaimed.status(), 201);
+}
+
+/// A rename before claims is free; after claims it moves the claims, profile
+/// and session row in one transaction and never leaves the old name behind.
+#[tokio::test]
+async fn rename_moves_claims_and_profile_or_refuses() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "rename item").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    // Free rename while the agent has no claims.
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "free-name", "session_id": "ses_free" }))
+        .send()
+        .await
+        .unwrap();
+    let freed: Value = c
+        .post(format!("{base}/api/agents/free-name/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "freed-name" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(freed["agent_name"], "freed-name");
+    assert_eq!(freed["session_id"], "ses_free");
+
+    // Claim, profile and session under the old name.
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "old-name",
+            "session_id": "ses_old",
+            "message": "old profile line",
+            "state": "implementing"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let renamed: Value = c
+        .post(format!("{base}/api/agents/old-name/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "new-name" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(renamed["agent_name"], "new-name");
+    assert_eq!(renamed["claim_count"], 1);
+    assert_eq!(renamed["session_id"], "ses_old");
+    assert_eq!(renamed["message"], "old profile line");
+
+    // The claims moved and the profile followed; no orphan under the old name.
+    let claims: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claims[0]["agent_name"], "new-name");
+    assert_eq!(claims[0]["message"], "old profile line");
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["agent_name"] != "old-name"),
+        "{roster}"
+    );
+
+    // A target already in use is a conflict.
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "taken-name" }))
+        .send()
+        .await
+        .unwrap();
+    let conflict = c
+        .post(format!("{base}/api/agents/new-name/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "taken-name" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(conflict.status(), 409);
+}
+
+/// Killing publishes `agent.killed` on the SSE stream.
+#[tokio::test]
+async fn kill_publishes_event() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
+    c.post(format!("{base}/api/agents/event-target/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let event = events.next_event().await;
+    assert_eq!(event["type"], "agent.killed");
+    assert_eq!(event["agent"], "event-target");
 }

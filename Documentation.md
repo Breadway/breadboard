@@ -23,11 +23,16 @@ claimed/unclaimed, issue type, and free text. Facets combine with AND, values
 inside one facet with OR, so any number can be active at once. Active filters
 show as removable chips in the top bar.
 
-The **Agents** view is a grid of agent cards: one card per `(user, agent
-name)`, with the agent's optional one-line message under its name, and a
-rounded tile per issue coloured by board status and a dashed
-tile for queued intents. Clicking a card opens a popup with that agent's full
-claim list, completion ring, states, heartbeats and release actions.
+The **Agents** view is a roster, not just a claim list: one card per
+lowercased agent name, built from registered sessions, `agent_profiles` and
+`agent_claims`. A session that has called a breadboard tool appears even with
+zero claims, as an idle session. The card keeps the optional one-line message,
+a rounded tile per issue coloured by board status and a dashed tile for queued
+intents. Clicking a card opens a popup with the full session id (selectable and
+copyable), host, pid, last-seen, the claim list, completion ring, states and
+release actions. A kill button confirms that it releases every claim and
+blocks writes until the agent is revived. The header counts live sessions
+(heartbeat inside 120 seconds) separately from claim holders.
 
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
@@ -73,9 +78,25 @@ heartbeats and resumes the existing claim instead of returning `409`. After a
 restart, an agent can call the MCP `resume_claims` tool to heartbeat everything
 it owns and re-arm keepalives.
 
-Agent names are free-form and meant to be fun and memorable (Toasty Pretzel,
-Crumb Baron). Reuse the same name across issues; identity is `(user, agent
-name)`, so a stable name is what makes the Agents tab group that agent's work.
+Agent names are free-form, case-insensitive and meant to be fun and memorable.
+The server keeps a curated list in the voice of the board (`crumb-marshal`,
+`crusty-falcon`, `rye-ranger`, `sourdough-sentinel`, `toasty-ciabatta`,
+`zesty-pretzel`, `brioche-bridge`, `doughminator`), with each first and second
+part chosen as a natural pair. Registering without a name assigns a unique one
+from that list and returns two or three alternatives; `apps/mcp` registers
+without a name, so the server list is the single source of truth.
+
+Reuse the same name across issues; the roster deduplicates by lowercased name.
+An agent can rename itself with `name_agent`. While it holds no claims the
+rename is free; once it holds claims the server moves the claims, profile and
+session row in one transaction or refuses with a clear conflict. An old name
+never keeps orphaned claims.
+
+A killed name is blocked from every agent-scoped write (claims, heartbeats,
+messages and agent chat) until it is explicitly revived. Registration is not a
+write gate: a killed session can still refresh its row, but it remains killed.
+Unknown names auto-register on their first write, because every session should
+be listed rather than refused.
 
 - An **exclusive claim is accountability** for one issue. Keep it with the
   agent that will actually finish that issue.
@@ -188,6 +209,11 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/chat/uploads/{id}` | authenticated download. Safe images (png/jpeg/gif/webp) render inline; everything else is served as an attachment with `nosniff` |
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
+| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. Returns `{ agent_name, alternatives[], live, killed, session_id }`; registration never revives a killed name. `200` |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed` |
+| `POST` | `/api/agents/{name}/kill` | mark the lowercased name killed, release every claim it holds (exclusive and intent), record the caller in `killed_by`, and emit `agent.killed`. Idempotent: a second call keeps the original killer and still returns the roster row. `200` |
+| `POST` | `/api/agents/{name}/revive` | clear a kill so the name can write again; emits `agent.revived`. Idempotent. `404` when the name was never registered |
+| `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -249,6 +275,8 @@ after reconnecting to recover missed changes.
 | `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
 | `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state`, `claim` (the full claim, so clients patch one entry instead of refetching the agent list) |
 | `agent.released` | `bread.board.agent.released` | `id`, `key` |
+| `agent.killed` | `bread.board.agent.killed` | `agent`, `killed_by` |
+| `agent.revived` | `bread.board.agent.revived` | `agent`, `revived_by` |
 | `chat.message` | `bread.board.chat.message` | `room_id`, `id` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |

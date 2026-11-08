@@ -12,6 +12,7 @@ pub mod error;
 pub mod forgejo;
 pub mod http;
 pub mod import;
+pub mod names;
 pub mod notify;
 pub mod store;
 pub mod summary;

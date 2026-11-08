@@ -107,11 +107,52 @@ async fn lobby_accepts_humans_and_agents() {
         .unwrap();
     assert_eq!(msgs.as_array().unwrap().len(), 2);
 
-    // An agent that does not belong to this user cannot speak.
+    // An unknown name auto-registers on its first touch, so a new session is
+    // listed instead of being refused.
+    let fresh = c
+        .post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "not registered yet", "body": "hi" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), 201);
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["agent_name"] == "not registered yet" && row["claim_count"] == 0));
+
+    // A name registered by another user cannot be spoken as.
+    let other: i64 = sqlx::query_scalar(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (99, 'other', 'Other') RETURNING id",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    let ts = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO agent_sessions (agent_name, user_id, first_seen, last_seen)
+         VALUES ('owned-elsewhere', ?1, ?2, ?2)",
+    )
+    .bind(other)
+    .bind(&ts)
+    .execute(&app.db)
+    .await
+    .unwrap();
     let forged = c
         .post(format!("{base}/api/chat/messages"))
         .header("authorization", &auth)
-        .json(&json!({ "agent_name": "not mine", "body": "hi" }))
+        .json(&json!({ "agent_name": "owned-elsewhere", "body": "hi" }))
         .send()
         .await
         .unwrap();

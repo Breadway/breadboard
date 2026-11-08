@@ -1,7 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { fade, fly } from "svelte/transition";
-  import { STATUSES, safeHttpUrl } from "@breadboard/api-client";
+  import {
+    STATUSES,
+    safeHttpUrl,
+    type AgentClaim,
+    type AgentState,
+  } from "@breadboard/api-client";
   import { ago, claimStale, store, statusName } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import Ring from "./ui/Ring.svelte";
@@ -12,6 +17,7 @@
   let now = $state(Date.now());
   let staleOnly = $state(false);
   let openAgentId = $state<string | null>(null);
+  let copied = $state<string | null>(null);
   let panelEl: HTMLElement | undefined = $state();
 
   onMount(() => {
@@ -28,6 +34,7 @@
   const queued = $derived(claims.filter((c) => c.mode === "intent"));
   const staleCount = $derived(work.filter((c) => claimStale(c.last_heartbeat, now)).length);
   const liveCount = $derived(work.length - staleCount);
+  const liveSessions = $derived(store.roster.filter((r) => r.live).length);
 
   const tallies = $derived.by(() => {
     const t = { active: 0, review: 0, verifying: 0, blocked: 0, done: 0 };
@@ -44,29 +51,40 @@
   interface Group {
     id: string;
     name: string;
-    login: string;
+    login: string | null;
     message: string | null;
-    claims: typeof claims;
-    work: typeof claims;
-    intents: typeof claims;
+    claims: AgentClaim[];
+    work: AgentClaim[];
+    intents: AgentClaim[];
     done: number;
     live: number;
     stale: number;
-    lastHeartbeat: string;
+    lastHeartbeat: string | null;
+    sessionId: string | null;
+    host: string | null;
+    pid: number | null;
+    presence: "live" | "stale" | "killed";
+    killed: boolean;
+    killedBy: string | null;
+    killedAt: string | null;
+    note: string | null;
+    state: AgentState | null;
+    lastSeen: string | null;
   }
 
-  // Stats come from every claim the agent holds; the stale view only decides
-  // which agent cards are shown.
+  // The roster is the union of sessions, profiles and claims, so a name with
+  // no claim still gets a card: that is the idle-session case the human asked
+  // for. The claim grid itself is unchanged.
   const allGroups = $derived.by(() => {
     const map = new Map<string, Group>();
-    for (const c of claims) {
-      const id = `${c.claimed_by_login}:${c.agent_name}`;
+    const ensure = (name: string): Group => {
+      const id = name.trim().toLowerCase();
       let g = map.get(id);
       if (!g) {
         g = {
           id,
-          name: c.agent_name,
-          login: c.claimed_by_login,
+          name: id,
+          login: null,
           message: null,
           claims: [],
           work: [],
@@ -74,11 +92,27 @@
           done: 0,
           live: 0,
           stale: 0,
-          lastHeartbeat: c.last_heartbeat,
+          lastHeartbeat: null,
+          sessionId: null,
+          host: null,
+          pid: null,
+          presence: "stale",
+          killed: false,
+          killedBy: null,
+          killedAt: null,
+          note: null,
+          state: null,
+          lastSeen: null,
         };
         map.set(id, g);
       }
+      return g;
+    };
+
+    for (const c of claims) {
+      const g = ensure(c.agent_name);
       g.claims.push(c);
+      g.login ??= c.claimed_by_login;
       g.message ??= c.message;
       if (c.mode === "intent") g.intents.push(c);
       else {
@@ -87,22 +121,52 @@
         if (claimStale(c.last_heartbeat, now)) g.stale++;
         else g.live++;
       }
-      if (c.last_heartbeat > g.lastHeartbeat) g.lastHeartbeat = c.last_heartbeat;
+      if (!g.lastHeartbeat || c.last_heartbeat > g.lastHeartbeat) {
+        g.lastHeartbeat = c.last_heartbeat;
+        g.state = c.state;
+        g.note = c.note;
+      }
     }
+
+    for (const r of store.roster) {
+      const g = ensure(r.agent_name);
+      g.login ??= r.login ?? null;
+      g.message = r.message ?? g.message;
+      g.sessionId = r.session_id ?? g.sessionId;
+      g.host = r.host ?? g.host;
+      g.pid = r.pid ?? g.pid;
+      g.presence = r.status;
+      g.killed = r.killed;
+      g.killedBy = r.killed_by_login ?? null;
+      g.killedAt = r.killed_at ?? null;
+      g.note = g.note ?? r.note ?? null;
+      g.state = g.state ?? r.state ?? null;
+      g.lastSeen = r.last_seen ?? g.lastSeen;
+      if (r.last_seen && (!g.lastHeartbeat || r.last_seen > g.lastHeartbeat)) {
+        g.lastHeartbeat = r.last_seen;
+      }
+    }
+
     for (const g of map.values()) {
       g.claims.sort((a, b) => {
         const byStatus = STATUSES.indexOf(a.board_status) - STATUSES.indexOf(b.board_status);
         return byStatus !== 0 ? byStatus : a.key.localeCompare(b.key, undefined, { numeric: true });
       });
     }
+    const rank = (g: Group) => (g.killed ? 2 : g.presence === "live" ? 0 : 1);
     return [...map.values()].sort(
       (a, b) =>
+        rank(a) - rank(b) ||
         b.live - a.live ||
         b.work.length - a.work.length ||
         b.intents.length - a.intents.length ||
         a.name.localeCompare(b.name),
     );
   });
+
+  const claimHolders = $derived(allGroups.filter((g) => g.work.length > 0).length);
+  const idleSessions = $derived(allGroups.filter((g) => g.work.length === 0).length);
+  const killedCount = $derived(allGroups.filter((g) => g.killed).length);
 
   const groups = $derived(staleOnly ? allGroups.filter((g) => g.stale > 0) : allGroups);
   const selected = $derived(allGroups.find((g) => g.id === openAgentId));
@@ -122,6 +186,28 @@
 
   function shortKey(key: string): string {
     return key.split("-").pop() ?? key;
+  }
+
+  async function copySession(id: string | null) {
+    if (!id) return;
+    try {
+      await navigator.clipboard.writeText(id);
+      copied = id;
+      setTimeout(() => (copied = null), 1500);
+    } catch {
+      /* selection still works without the clipboard API */
+    }
+  }
+
+  async function killGroup(g: Group) {
+    const ok = window.confirm(
+      `Kill ${g.name}?\n\nThis releases every claim it holds and blocks it from writing until it is revived.`,
+    );
+    if (ok) await store.killAgent(g.name);
+  }
+
+  async function reviveGroup(g: Group) {
+    await store.reviveAgent(g.name);
   }
 
   $effect(() => {
@@ -208,12 +294,12 @@
     </div>
 
     <div class="stats">
+      <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live sessions</span></div>
+      <div class="stat"><b>{claimHolders}</b><span>claim holders</span></div>
       <div class="stat"><b>{tallies.active}</b><span>active</span></div>
       <div class="stat"><b>{tallies.review}</b><span>review</span></div>
-      <div class="stat"><b>{tallies.verifying}</b><span>verifying</span></div>
       <div class="stat" class:bad={tallies.blocked > 0}><b>{tallies.blocked}</b><span>blocked</span></div>
-      <div class="stat" class:bad={staleCount > 0}><b>{staleCount}</b><span>stale</span></div>
-      <div class="stat" class:queued={queued.length > 0}><b>{queued.length}</b><span>queued</span></div>
+      <div class="stat" class:bad={killedCount > 0}><b>{killedCount}</b><span>killed</span></div>
     </div>
   </header>
 
@@ -233,7 +319,7 @@
       <span class="lg"><i class="dot intent-dot"></i>queued</span>
     </span>
     <span class="grow"></span>
-    <span class="live-note">{liveCount} heartbeating</span>
+    <span class="live-note">{liveSessions} live sessions · {liveCount} claims heartbeating · {idleSessions} idle</span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
 
@@ -254,13 +340,14 @@
   {:else}
     <div class="grid">
       {#each groups as g (g.id)}
-        {@const ownerDiffers = g.login !== store.me?.login}
+        {@const ownerDiffers = g.login != null && g.login !== store.me?.login}
         <button
           class="agent-card"
           class:stale={g.stale > 0}
+          class:killed={g.killed}
           style="--agent:{agentColor(g.name)}"
           onclick={() => openAgent(g)}
-          aria-label="Open {g.name}, {g.work.length} issues"
+          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}"
         >
           <header class="acheck">
             <span class="avatar" aria-hidden="true">
@@ -271,26 +358,37 @@
               {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
               {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
             </div>
-            {#if g.stale > 0}
+            {#if g.killed}
+              <span class="killed-badge" title="Writes blocked until revived">killed</span>
+            {:else if g.stale > 0}
               <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
                 <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
                 {g.stale}
               </span>
+            {:else if g.presence === "stale"}
+              <span class="idle-badge" title="No recent heartbeat">stale</span>
             {/if}
             {#if g.intents.length}<span class="queued-badge" title="Queued intents">{g.intents.length} queued</span>{/if}
           </header>
 
-          <div class="tiles" aria-hidden="true">
-            {#each g.claims as c (c.id)}
-              {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
-              <span
-                class="tile t-{c.board_status}"
-                class:intent={c.mode === "intent"}
-                class:stale
-                title="{c.key} · {c.issue_title} · {c.board_status}{c.mode === 'intent' ? ' (queued)' : ''}{stale ? ' · stale' : ''}"
-              >{shortKey(c.key)}</span>
-            {/each}
-          </div>
+          {#if g.claims.length}
+            <div class="tiles" aria-hidden="true">
+              {#each g.claims as c (c.id)}
+                {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
+                <span
+                  class="tile t-{c.board_status}"
+                  class:intent={c.mode === "intent"}
+                  class:stale
+                  title="{c.key} · {c.issue_title} · {c.board_status}{c.mode === 'intent' ? ' (queued)' : ''}{stale ? ' · stale' : ''}"
+                >{shortKey(c.key)}</span>
+              {/each}
+            </div>
+          {:else}
+            <div class="idle-line">
+              <span class="idle-dot" class:live={g.presence === "live"}></span>
+              idle session{g.sessionId ? ` · ${g.sessionId}` : ""}
+            </div>
+          {/if}
 
           <footer class="afoot">
             <span class="counts">{g.work.length} issue{g.work.length === 1 ? "" : "s"}</span>
@@ -301,9 +399,11 @@
                 <b>{g.done}</b><span class="cslash">/</span>{g.work.length} done
               </span>
             {:else}
-              <span class="completion muted">queued only</span>
+              <span class="completion muted">{g.intents.length ? "queued only" : "idle session"}</span>
             {/if}
-            <span class="gtick" title="Last heartbeat {g.lastHeartbeat}">{ago(g.lastHeartbeat, now)}</span>
+            <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
+              {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
+            </span>
           </footer>
         </button>
       {/each}
@@ -330,14 +430,16 @@
         <div class="mid">
           <div class="mname">
             {selected.name}
-            {#if selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
+            {#if selected.login != null && selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
+            {#if selected.killed}<span class="killed-badge">killed</span>{/if}
           </div>
           {#if selected.message}<p class="mmessage">{selected.message}</p>{/if}
           <div class="msub">
-            {selected.live} live
-            {#if selected.stale}· <span class="bad">{selected.stale} stale</span>{/if}
+            {selected.presence}
+            {#if selected.work.length}· {selected.work.length} exclusive{/if}
             {#if selected.intents.length}· {selected.intents.length} queued{/if}
-            · last pulse {ago(selected.lastHeartbeat, now)} ago
+            {#if selected.stale}· <span class="bad">{selected.stale} stale claims</span>{/if}
+            · {selected.lastSeen ? `last seen ${ago(selected.lastSeen, now)}` : "no session heartbeat"}
           </div>
         </div>
         {#if selected.work.length}
@@ -346,15 +448,50 @@
             <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
           </span>
         {/if}
+        {#if selected.killed}
+          <button class="btn sm" onclick={() => void reviveGroup(selected)}>Revive</button>
+        {:else}
+          <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
+        {/if}
         <button class="close" aria-label="Close" onclick={closeAgent}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
         </button>
       </header>
 
+      <div class="session">
+        <div class="srow">
+          <span class="slabel">session</span>
+          {#if selected.sessionId}
+            <code class="sid" title="Select and copy">{selected.sessionId}</code>
+            <button class="btn ghost sm" onclick={() => void copySession(selected.sessionId)}>
+              {copied === selected.sessionId ? "Copied" : "Copy"}
+            </button>
+          {:else}
+            <span class="muted">not captured yet</span>
+          {/if}
+        </div>
+        <div class="srow">
+          <span class="slabel">host</span><span>{selected.host ?? "unknown"}</span>
+          <span class="slabel">pid</span><span>{selected.pid ?? "unknown"}</span>
+          <span class="slabel">last seen</span>
+          <span>{selected.lastSeen ? ago(selected.lastSeen, now) : "never"}</span>
+        </div>
+        {#if selected.killed}
+          <div class="killed-note">
+            Writes are blocked{selected.killedBy ? `; killed by ${selected.killedBy}` : ""}{selected.killedAt ? ` ${ago(selected.killedAt, now)}` : ""}.
+            Revive before this agent writes again.
+          </div>
+        {/if}
+      </div>
+
       <div class="mbody">
-        {#each selected.claims as c (c.id)}
-          {@render claimRow(c)}
-        {/each}
+        {#if selected.claims.length}
+          {#each selected.claims as c (c.id)}
+            {@render claimRow(c)}
+          {/each}
+        {:else}
+          <div class="no-claims">No claims. This is an idle session on the roster.</div>
+        {/if}
       </div>
     </div>
   </div>
@@ -473,13 +610,9 @@
   .stat.bad b {
     color: var(--danger);
   }
-  .stat.queued {
-    border-color: color-mix(in srgb, var(--status-review) 35%, transparent);
+  .stat.live b {
+    color: var(--ok);
   }
-  .stat.queued b {
-    color: var(--status-review);
-  }
-
   /* --- bar ----------------------------------------------------------- */
   .bar {
     display: flex;
@@ -581,6 +714,10 @@
   .agent-card.stale {
     border-color: color-mix(in srgb, var(--danger) 32%, var(--line));
   }
+  .agent-card.killed {
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+    background: color-mix(in srgb, var(--danger) 4%, var(--surface));
+  }
   .acheck {
     display: flex;
     align-items: center;
@@ -645,6 +782,8 @@
     overflow-wrap: anywhere;
   }
   .stale-badge,
+  .killed-badge,
+  .idle-badge,
   .queued-badge {
     margin-left: auto;
     display: inline-flex;
@@ -661,11 +800,22 @@
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 11%, transparent);
   }
+  .killed-badge {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  }
+  .idle-badge {
+    color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 7%, transparent);
+  }
   .queued-badge {
     color: var(--status-review);
     background: color-mix(in srgb, var(--status-review) 12%, transparent);
   }
-  .stale-badge + .queued-badge {
+  .stale-badge + .queued-badge,
+  .killed-badge + .queued-badge,
+  .idle-badge + .queued-badge {
     margin-left: 0;
   }
 
@@ -673,6 +823,28 @@
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
+  }
+  .idle-line {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    font: 400 10.5px/1.4 var(--font-mono);
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .idle-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex: none;
+    background: var(--ink-3);
+  }
+  .idle-dot.live {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 15%, transparent);
   }
   .tile {
     width: 32px;
@@ -807,6 +979,50 @@
   .close svg {
     width: 14px;
     height: 14px;
+  }
+  .session {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--line);
+    background: color-mix(in srgb, var(--ink) 2.5%, transparent);
+    font: 400 10.5px/1.55 var(--font-mono);
+    color: var(--ink-dim);
+  }
+  .srow {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .slabel {
+    font: 600 9px/1 var(--font-mono);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .sid {
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--raise);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    user-select: all;
+    overflow-wrap: anywhere;
+  }
+  .muted {
+    color: var(--ink-3);
+  }
+  .killed-note {
+    color: var(--danger);
+    font-size: 11px;
+  }
+  .no-claims {
+    padding: 22px 16px;
+    text-align: center;
+    font-size: 12.5px;
+    color: var(--ink-3);
   }
   .mbody {
     overflow-y: auto;

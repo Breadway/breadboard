@@ -15,6 +15,8 @@ pub enum AppError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    #[error("{0}")]
+    ForbiddenMsg(String),
     #[error("conflict: {0}")]
     Conflict(String),
     #[error("upstream: {0}")]
@@ -34,6 +36,9 @@ impl AppError {
     pub fn forbidden() -> Self {
         AppError::Forbidden
     }
+    pub fn forbidden_msg(msg: impl Into<String>) -> Self {
+        AppError::ForbiddenMsg(msg.into())
+    }
 }
 
 impl IntoResponse for AppError {
@@ -43,6 +48,7 @@ impl IntoResponse for AppError {
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m.clone()),
             AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized".to_string()),
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
+            AppError::ForbiddenMsg(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Db(sqlx::Error::RowNotFound) => {

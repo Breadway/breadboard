@@ -127,6 +127,14 @@ fn all_event_names() -> Vec<&'static str> {
             id: 0,
             key: String::new(),
         },
+        AgentKilled {
+            agent: String::new(),
+            killed_by: None,
+        },
+        AgentRevived {
+            agent: String::new(),
+            revived_by: None,
+        },
         ChatMessage { room_id: 0, id: 0 },
         CycleStarted {
             id: 0,

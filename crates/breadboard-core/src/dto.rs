@@ -460,6 +460,84 @@ pub struct AgentStatusSummary {
     pub claims: Vec<crate::AgentClaim>,
 }
 
+/// `POST /api/agents/register` body. Omit `agent_name` to have the server
+/// assign a unique curated name; include it to register or refresh under a
+/// name the caller chose.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentRegister {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `POST /api/agents/register` response. `alternatives` carries two or three
+/// other free curated names so a caller can pick without rerolling blindly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRegistration {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
+    pub live: bool,
+    pub killed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+/// `POST /api/agents/{name}/rename` body.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRename {
+    pub new_name: String,
+}
+
+/// One row of `GET /api/agents/roster`: the union of live sessions,
+/// agent profiles and claims, deduplicated by lowercased agent name.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRosterEntry {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
+    /// True only for a heartbeat inside the last 120 seconds on a name that is
+    /// not killed.
+    pub live: bool,
+    pub killed: bool,
+    /// `live`, `stale` or `killed`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::AgentState>,
+    pub claim_count: i64,
+    pub exclusive_count: i64,
+    pub intent_count: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_by_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub killed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IssueFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
