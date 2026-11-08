@@ -1,5 +1,6 @@
 //! SQLite pool setup. WAL + foreign keys on, migrations embedded from `migrations/`.
 
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
@@ -78,4 +79,62 @@ pub async fn connect(database_url: &str) -> anyhow::Result<Db> {
     );
 
     Ok(pool)
+}
+
+/// Passive checkpoint cadence. SQLite's own autocheckpoint skips a commit when
+/// another connection holds a read snapshot, so a busy pool can leave the log
+/// above the threshold indefinitely (BB-131).
+const WAL_CHECKPOINT_SECS: u64 = 300;
+/// Daily quiet-point truncate and `PRAGMA optimize`.
+const WAL_TRUNCATE_EVERY: u32 = 288;
+
+/// Run a passive checkpoint every 5 minutes and truncate plus `optimize` once
+/// a day. Sizes are logged so the behaviour is observable in production rather
+/// than assumed. A checkpoint is cheap when there is nothing to move.
+pub fn spawn_wal_maintenance(pool: Db, database_path: PathBuf) {
+    tokio::spawn(async move {
+        let mut tick =
+            tokio::time::interval(std::time::Duration::from_secs(WAL_CHECKPOINT_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut passes: u32 = 0;
+        loop {
+            tick.tick().await;
+            passes = passes.wrapping_add(1);
+            let truncate = passes.is_multiple_of(WAL_TRUNCATE_EVERY);
+            if let Err(error) = checkpoint(&pool, &database_path, truncate).await {
+                tracing::warn!(error = %error, "wal checkpoint failed");
+            }
+        }
+    });
+}
+
+/// Checkpoint the WAL now. `truncate` waits for readers (use at a quiet
+/// point); the passive form never blocks a reader.
+pub async fn checkpoint(pool: &Db, database_path: &Path, truncate: bool) -> anyhow::Result<()> {
+    let mode = if truncate { "TRUNCATE" } else { "PASSIVE" };
+    if truncate {
+        // `optimize` can write; run it before the truncate so the log ends empty.
+        sqlx::query("PRAGMA optimize").execute(pool).await?;
+    }
+    let (busy, log_pages, moved): (i64, i64, i64) =
+        sqlx::query_as(&format!("PRAGMA wal_checkpoint({mode})"))
+            .fetch_one(pool)
+            .await?;
+    tracing::info!(
+        mode,
+        busy,
+        log_pages,
+        moved,
+        wal_bytes = wal_bytes(database_path),
+        "wal checkpoint"
+    );
+    Ok(())
+}
+
+fn wal_bytes(database_path: &Path) -> u64 {
+    let mut path = database_path.as_os_str().to_owned();
+    path.push("-wal");
+    std::fs::metadata(PathBuf::from(path))
+        .map(|m| m.len())
+        .unwrap_or(0)
 }

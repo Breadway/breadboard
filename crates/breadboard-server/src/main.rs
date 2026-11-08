@@ -36,6 +36,7 @@ async fn main() -> anyhow::Result<()> {
     let db = db::connect(&config.database_url())
         .await
         .context("opening database")?;
+    db::spawn_wal_maintenance(db.clone(), config.database_path.clone());
     tracing::info!(
         elapsed_ms = elapsed_ms(started),
         "startup stage: database ready"
