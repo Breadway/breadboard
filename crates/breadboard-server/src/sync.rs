@@ -11,6 +11,8 @@
 use anyhow::Context;
 use breadboard_core::{BoardEvent, Issue, IssueType, Project, Status, SyncSource};
 use chrono::{DateTime, Utc};
+use std::collections::HashSet;
+use std::sync::{Mutex, OnceLock};
 
 use crate::dto::IssuePatch;
 use crate::error::AppResult;
@@ -699,6 +701,87 @@ pub async fn writeback_new_issue_result(state: &AppState, issue: Issue) -> (Issu
     }
 }
 
+/// Whether this issue has a remote to write to. Callers use it to tell the
+/// client that a background writeback is pending instead of waiting for Forgejo.
+pub async fn writeback_needed(state: &AppState, issue: &Issue) -> bool {
+    if !state.forgejo.is_configured() {
+        return false;
+    }
+    let repo = match &issue.forgejo_ref {
+        Some(fref) => fref.repo.clone(),
+        None => match store::get_project(&state.db, issue.project_id).await {
+            Ok(project) => match project.forgejo_repo {
+                Some(repo) => repo,
+                None => return false,
+            },
+            Err(_) => return false,
+        },
+    };
+    matches!(store::repo_enabled(&state.db, &repo).await, Ok(true))
+}
+
+/// Guard so the request-path spawn and the reconcile retry cannot write back
+/// the same card at once and create two remote issues.
+fn writeback_in_flight() -> &'static Mutex<HashSet<i64>> {
+    static IN_FLIGHT: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+    IN_FLIGHT.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+async fn writeback_pending_issue(state: &AppState, issue: Issue) {
+    if !writeback_in_flight().lock().unwrap().insert(issue.id) {
+        return;
+    }
+    let key = issue.key.clone();
+    let (linked, error) = writeback_new_issue_result(state, issue).await;
+    writeback_in_flight().lock().unwrap().remove(&linked.id);
+    if let Some(error) = error {
+        tracing::warn!(key = %key, error = %error, "forgejo writeback still pending; the reconcile loop will retry");
+        return;
+    }
+    if linked.forgejo_ref.is_some() {
+        state.bus.publish(BoardEvent::CardUpdated {
+            id: linked.id,
+            key: linked.key.clone(),
+        });
+        tracing::info!(key = %linked.key, "created on forgejo (background writeback)");
+    }
+}
+
+/// Push a newly created local card to Forgejo without blocking the request.
+pub fn spawn_writeback_new_issue(state: &AppState, issue: Issue) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        writeback_pending_issue(&state, issue).await;
+    });
+}
+
+/// Push an edit to Forgejo without blocking the request.
+pub fn spawn_writeback(state: &AppState, before: Issue, after: Issue) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        writeback(&state, &before, &after).await;
+    });
+}
+
+/// Retry cards whose create writeback failed or never ran. Called from the
+/// reconcile loop so a remote failure is recovered without the caller holding
+/// a request open or retrying by hand.
+pub async fn retry_pending_writebacks(state: &AppState) {
+    if !state.forgejo.is_configured() {
+        return;
+    }
+    let issues = match store::list_unlinked_for_writeback(&state.db, 50).await {
+        Ok(issues) => issues,
+        Err(error) => {
+            tracing::warn!(error = %error, "listing pending writebacks failed");
+            return;
+        }
+    };
+    for issue in issues {
+        writeback_pending_issue(state, issue).await;
+    }
+}
+
 /// Link a local card to a remote issue that already exists and, when the card
 /// is `Done`, close that remote issue. Every retry path uses this so a retry
 /// that only restores the link cannot leave local and remote state divergent.
@@ -849,6 +932,8 @@ pub async fn reconcile_once(state: &AppState) -> anyhow::Result<()> {
             Err(e) => tracing::warn!(%repo, error = %e, "reconcile fetch failed"),
         }
     }
+    // Retry local cards whose create writeback never completed.
+    retry_pending_writebacks(state).await;
     Ok(())
 }
 

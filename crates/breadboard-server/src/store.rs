@@ -1560,6 +1560,30 @@ pub async fn repo_enabled(db: &SqlitePool, repo: &str) -> AppResult<bool> {
     Ok(v == Some(1))
 }
 
+/// Local issues in mapped, enabled repos that never got their Forgejo link.
+/// The reconcile loop retries these so a failed create writeback is durable
+/// without a separate queue table (BB-132).
+pub async fn list_unlinked_for_writeback(db: &SqlitePool, limit: i64) -> AppResult<Vec<Issue>> {
+    let cols = "i.id, i.key, i.project_id, i.title, i.body, i.status, i.priority, i.type, \
+        i.estimate, i.assignee_id, i.reporter_id, i.epic_id, i.cycle_id, i.forgejo_repo, \
+        i.forgejo_number, i.milestone, i.created_at, i.updated_at";
+    let rows: Vec<IssueRow> = sqlx::query_as(&format!(
+        "SELECT {cols} FROM issues i \
+         JOIN projects p ON p.id = i.project_id \
+         JOIN repo_sync_state r ON r.forgejo_repo = p.forgejo_repo \
+         WHERE i.forgejo_repo IS NULL AND p.forgejo_repo IS NOT NULL AND r.enabled = 1 \
+         ORDER BY i.updated_at ASC LIMIT ?1"
+    ))
+    .bind(limit)
+    .fetch_all(db)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(hydrate(db, row).await?);
+    }
+    Ok(out)
+}
+
 pub async fn set_repo_synced_at(db: &SqlitePool, repo: &str, ts: &str) -> AppResult<()> {
     sqlx::query("UPDATE repo_sync_state SET last_synced_at = ?2 WHERE forgejo_repo = ?1")
         .bind(repo)
