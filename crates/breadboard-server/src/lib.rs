@@ -32,9 +32,6 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub forgejo: Forgejo,
     pub config: Arc<Config>,
-    /// Card ids with a create writeback in flight, so the request-path spawn
-    /// and the reconcile retry cannot push the same card twice.
-    pub writeback_in_flight: Arc<std::sync::Mutex<std::collections::HashSet<i64>>>,
 }
 
 impl AppState {
@@ -53,7 +50,6 @@ impl AppState {
             http,
             forgejo,
             config: Arc::new(config),
-            writeback_in_flight: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         })
     }
 }
