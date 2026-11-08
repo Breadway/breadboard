@@ -813,6 +813,67 @@ pub async fn create_chat_room(
     Ok((StatusCode::CREATED, Json(room)))
 }
 
+#[derive(serde::Serialize)]
+pub struct ChatMention {
+    pub name: String,
+    pub slug: String,
+    pub kind: String,
+}
+
+pub async fn list_chat_mentions(
+    State(app): State<AppState>,
+    _user: AuthUser,
+) -> AppResult<Json<Vec<ChatMention>>> {
+    let agents: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT lower(agent_name) FROM (
+            SELECT agent_name FROM agent_profiles
+            UNION
+            SELECT agent_name FROM agent_claims
+         ) ORDER BY 1",
+    )
+    .fetch_all(&app.db)
+    .await?;
+    let humans: Vec<String> = sqlx::query_scalar("SELECT login FROM users ORDER BY login")
+        .fetch_all(&app.db)
+        .await?;
+    let mut out: Vec<ChatMention> = agents
+        .into_iter()
+        .map(|name| ChatMention {
+            slug: name.replace(' ', "-"),
+            name,
+            kind: "agent".to_string(),
+        })
+        .collect();
+    out.extend(humans.into_iter().map(|login| ChatMention {
+        slug: login.clone(),
+        name: login,
+        kind: "human".to_string(),
+    }));
+    out.sort_by(|a, b| (a.kind.as_str(), &a.slug).cmp(&(b.kind.as_str(), &b.slug)));
+    out.dedup_by(|a, b| a.slug == b.slug);
+    Ok(Json(out))
+}
+
+pub async fn delete_chat_room(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    let room = store::get_chat_room(&app.db, id).await?;
+    if room.kind == breadboard_core::ChatRoomKind::Room
+        && room.name.as_deref() == Some("lobby")
+    {
+        return Err(crate::error::AppError::bad_request(
+            "the lobby cannot be deleted",
+        ));
+    }
+    if !store::delete_chat_room(&app.db, id).await? {
+        return Err(crate::error::AppError::NotFound);
+    }
+    app.bus.publish(BoardEvent::ChatRoomDeleted { id });
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn chat_messages(
     State(app): State<AppState>,
     user: AuthUser,

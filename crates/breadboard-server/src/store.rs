@@ -2610,6 +2610,15 @@ pub async fn chat_room_by_name(db: &SqlitePool, name: &str) -> AppResult<Option<
     }
 }
 
+pub async fn delete_chat_room(db: &SqlitePool, id: i64) -> AppResult<bool> {
+    let changed = sqlx::query("DELETE FROM chat_rooms WHERE id = ?1")
+        .bind(id)
+        .execute(db)
+        .await?
+        .rows_affected();
+    Ok(changed > 0)
+}
+
 pub async fn create_chat_room(
     db: &SqlitePool,
     name: &str,

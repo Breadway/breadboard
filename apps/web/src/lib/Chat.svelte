@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { api, errMsg, store } from "./store.svelte";
-  import type { ChatMessage, ChatRoom, ChatUpload } from "@breadboard/api-client";
+  import type { ChatMention, ChatMessage, ChatRoom, ChatUpload } from "@breadboard/api-client";
   import { agentColor } from "./ui/colors";
 
   let rooms = $state<ChatRoom[]>([]);
@@ -11,6 +11,11 @@
   let sending = $state(false);
   let deleting = $state<number | null>(null);
   let compacting = $state(false);
+  let deletingRoom = $state<number | null>(null);
+  let mentions = $state<ChatMention[]>([]);
+  let inputEl: HTMLInputElement | undefined = $state();
+  let mentionState = $state<{ start: number; query: string } | null>(null);
+  let mentionIndex = $state(0);
   let pending = $state<ChatUpload[]>([]);
   let uploading = $state(false);
   let fileEl: HTMLInputElement | undefined = $state();
@@ -36,6 +41,16 @@
       .sort((a, b) => (b.last_message?.created_at ?? "").localeCompare(a.last_message?.created_at ?? "")),
   );
   const knownAgents = $derived([...new Set(store.agents.map((a) => a.agent_name))].sort());
+  const mentionItems = $derived.by(() => {
+    const current = mentionState;
+    if (!current || !selected) return [];
+    const list: ChatMention[] = [];
+    if (selected.kind === "room") {
+      list.push({ name: "everyone", slug: "everyone", kind: "room" });
+    }
+    list.push(...mentions);
+    return list.filter((m) => m.slug.startsWith(current.query)).slice(0, 8);
+  });
 
   function memberDisplay(member: string): string {
     const i = member.indexOf(":");
@@ -82,6 +97,107 @@
       store.flash(`Couldn't compact: ${errMsg(e)}`);
     } finally {
       compacting = false;
+    }
+  }
+
+  function mentionParts(body: string) {
+    const out: Array<{ text: string; mention: boolean; everyone: boolean }> = [];
+    const re = /@([A-Za-z0-9_-]+)/g;
+    let last = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(body))) {
+      if (match.index > last) {
+        out.push({ text: body.slice(last, match.index), mention: false, everyone: false });
+      }
+      out.push({
+        text: match[0],
+        mention: true,
+        everyone: match[1].toLowerCase() === "everyone",
+      });
+      last = match.index + match[0].length;
+    }
+    if (last < body.length) {
+      out.push({ text: body.slice(last), mention: false, everyone: false });
+    }
+    return out;
+  }
+
+  async function loadMentions() {
+    try {
+      mentions = await api.chatMentions();
+    } catch {
+      /* autocomplete is optional */
+    }
+  }
+
+  function updateMention() {
+    if (!inputEl) return;
+    const caret = inputEl.selectionStart ?? draft.length;
+    const before = draft.slice(0, caret);
+    const at = before.lastIndexOf("@");
+    if (at === -1) {
+      mentionState = null;
+      return;
+    }
+    const query = before.slice(at + 1);
+    if (!/^[A-Za-z0-9_-]*$/.test(query)) {
+      mentionState = null;
+      return;
+    }
+    if (at > 0 && !/\s/.test(before[at - 1])) {
+      mentionState = null;
+      return;
+    }
+    mentionState = { start: at, query: query.toLowerCase() };
+    mentionIndex = 0;
+  }
+
+  function chooseMention(item: ChatMention) {
+    if (!mentionState) return;
+    const caret = inputEl?.selectionStart ?? draft.length;
+    const next =
+      draft.slice(0, mentionState.start) + "@" + item.slug + " " + draft.slice(caret);
+    const position = mentionState.start + item.slug.length + 2;
+    draft = next;
+    mentionState = null;
+    void tick().then(() => {
+      inputEl?.focus();
+      inputEl?.setSelectionRange(position, position);
+    });
+  }
+
+  function onComposerKey(event: KeyboardEvent) {
+    if (!mentionState || !mentionItems.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      mentionIndex = (mentionIndex + 1) % mentionItems.length;
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      mentionIndex = (mentionIndex - 1 + mentionItems.length) % mentionItems.length;
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      const item = mentionItems[Math.min(mentionIndex, mentionItems.length - 1)];
+      if (item) chooseMention(item);
+    } else if (event.key === "Escape") {
+      mentionState = null;
+    }
+  }
+
+  async function deleteRoom() {
+    if (!selected || deletingRoom != null) return;
+    const target = selected;
+    if (target.kind === "room" && target.name === "lobby") return;
+    const label = target.kind === "dm" ? "this DM for both members" : `#${target.name} for everyone`;
+    if (!confirm(`Delete ${label}? The messages are removed too.`)) return;
+    deletingRoom = target.id;
+    try {
+      await api.deleteChatRoom(target.id);
+      await loadRooms();
+      store.info("Room deleted");
+    } catch (e) {
+      store.flash(`Couldn't delete room: ${errMsg(e)}`);
+    } finally {
+      deletingRoom = null;
     }
   }
 
@@ -180,6 +296,7 @@
       });
       draft = "";
       pending = [];
+      mentionState = null;
       await Promise.all([loadMessages(selectedId), loadRooms()]);
     } catch (e) {
       store.flash(`Couldn't send: ${errMsg(e)}`);
@@ -338,6 +455,15 @@
             {subs.includes(selected.id) ? "push on" : "push off"}
           </button>
         {/if}
+        {#if !(selected.kind === "room" && selected.name === "lobby")}
+          <button
+            class="danger"
+            disabled={deletingRoom === selected.id}
+            onclick={() => void deleteRoom()}
+          >
+            {deletingRoom === selected.id ? "deleting..." : "delete"}
+          </button>
+        {/if}
         <span class="members" title="Members">
           {selected.kind === "dm" ? "DM" : `${shared.length ? "shared" : ""} room`}
         </span>
@@ -367,7 +493,15 @@
                 {#if m.author_kind === "human"}<span class="tag">human</span>{/if}
               </span>
               <div class="content">
-                {#if m.body}<span class="body">{m.body}</span>{/if}
+                {#if m.body}
+                  <span class="body">
+                    {#each mentionParts(m.body) as part}
+                      {#if part.mention}
+                        <span class="mention" class:everyone={part.everyone}>{part.text}</span>
+                      {:else}{part.text}{/if}
+                    {/each}
+                  </span>
+                {/if}
                 {#if m.attachments.length}
                   <div class="atts">
                     {#each m.attachments as a (a.id)}
@@ -437,13 +571,33 @@
           aria-label="Attach files"
           onclick={() => fileEl?.click()}
         >+</button>
-        <input
-          class="field"
-          placeholder={selected.kind === "room" ? `Message #${selected.name}` : "Message the DM"}
-          bind:value={draft}
-          aria-label="Message"
-          autocomplete="off"
-        />
+        <div class="fieldwrap">
+          <input
+            class="field"
+            placeholder={selected.kind === "room" ? `Message #${selected.name}` : "Message the DM"}
+            bind:value={draft}
+            bind:this={inputEl}
+            oninput={updateMention}
+            onkeydown={onComposerKey}
+            onblur={() => setTimeout(() => (mentionState = null), 150)}
+            aria-label="Message"
+            autocomplete="off"
+          />
+          {#if mentionState && mentionItems.length}
+            <div class="mentions" role="listbox" aria-label="Mention suggestions">
+              {#each mentionItems as item, i}
+                <button
+                  type="button"
+                  class:on={i === mentionIndex}
+                  onmousedown={(e) => { e.preventDefault(); chooseMention(item); }}
+                >
+                  <span class="mat">@{item.slug}</span>
+                  <span class="mkind">{item.kind}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
         <button class="btn primary" type="submit" disabled={sending || (!draft.trim() && !pending.length)}>Send</button>
       </form>
     {:else}
@@ -898,6 +1052,84 @@
     font-size: 12.5px;
     line-height: 1.55;
     color: var(--ink-2);
+  }
+  .fieldwrap {
+    position: relative;
+    flex: 1;
+    display: flex;
+    min-width: 0;
+  }
+  .fieldwrap .field {
+    flex: 1;
+  }
+  .mentions {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 20;
+    padding: 4px;
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--line-2);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.18);
+  }
+  .mentions button {
+    display: flex;
+    width: 100%;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: 5px;
+    background: none;
+    color: var(--ink-2);
+    font-size: 12px;
+    text-align: left;
+  }
+  .mentions button.on,
+  .mentions button:hover {
+    background: var(--raise);
+    color: var(--ink);
+  }
+  .mat {
+    font-family: var(--font-mono);
+    color: var(--accent);
+  }
+  .mkind {
+    font-size: 9px;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .mention {
+    padding: 0 3px;
+    border-radius: 4px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent);
+    font-weight: 600;
+  }
+  .mention.everyone {
+    color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent);
+  }
+  .danger {
+    height: 24px;
+    padding: 0 8px;
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    background: none;
+    color: var(--ink-3);
+    font: 500 10.5px/1 var(--font-mono);
+  }
+  .danger:hover:not(:disabled) {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .danger:disabled {
+    opacity: 0.6;
   }
   @media (max-width: 860px) {
     .msgdel {

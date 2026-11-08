@@ -307,6 +307,12 @@ export interface ChatUpload {
 
 export type ChatMessageKind = "message" | "summary";
 
+export interface ChatMention {
+  name: string;
+  slug: string;
+  kind: "agent" | "human" | "room";
+}
+
 export interface ChatMessage {
   id: number;
   room_id: number;
@@ -379,7 +385,8 @@ export type BoardEvent =
   | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.released"; id: number; key: string }
-  | { type: "chat.message"; room_id: number; id: number };
+  | { type: "chat.message"; room_id: number; id: number }
+  | { type: "chat.room.deleted"; id: number };
 
 export class ApiError extends Error {
   constructor(
@@ -525,6 +532,8 @@ export class BreadboardClient {
     const qs = q.toString();
     return this.req<ChatMessage[]>("GET", `/api/chat/rooms/${room}/messages${qs ? `?${qs}` : ""}`);
   };
+  chatMentions = () => this.req<ChatMention[]>("GET", "/api/chat/mentions");
+  deleteChatRoom = (id: number) => this.req<void>("DELETE", `/api/chat/rooms/${id}`);
   deleteChatMessage = (id: number, agent?: string) =>
     this.req<void>(
       "DELETE",

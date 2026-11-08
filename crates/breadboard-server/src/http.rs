@@ -58,6 +58,11 @@ pub fn router(state: AppState) -> Router {
         .route("/agents", get(api::list_agents))
         .route("/agents/message", put(api::set_agent_message))
         .route("/chat/rooms", get(api::list_chat_rooms).post(api::create_chat_room))
+        .route(
+            "/chat/rooms/{id}",
+            axum::routing::delete(api::delete_chat_room),
+        )
+        .route("/chat/mentions", get(api::list_chat_mentions))
         .route("/chat/rooms/{id}/messages", get(api::chat_messages))
         .route("/chat/messages", post(api::post_chat_message))
         .route(
