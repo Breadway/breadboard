@@ -8,7 +8,9 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use anyhow::Context;
-use breadboard_server::{auth, config::Config, db, http, notify, store, sync, usage, AppState};
+use breadboard_server::{
+    auth, config::Config, db, http, notify, reviews, store, sync, usage, AppState,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -58,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
         "startup stage: app state built"
     );
 
+    if let Err(error) = breadboard_server::artifacts::purge_expired(&state).await {
+        tracing::warn!(%error, "artifact expiry on startup failed");
+    }
+    breadboard_server::artifacts::spawn_expiry_sweep(state.clone());
+
     if state.forgejo.is_configured() {
         sync::spawn_reconcile(state.clone());
         tracing::info!(
@@ -75,6 +82,12 @@ async fn main() -> anyhow::Result<()> {
             "daily digest job started"
         );
     }
+
+    reviews::spawn_escalation(state.clone());
+    tracing::info!(
+        threshold_mins = reviews::REVIEW_ESCALATION_SECS / 60,
+        "review escalation loop started"
+    );
 
     if state.config.usage.opencode_db.is_some() {
         usage::spawn_importer(state.clone());

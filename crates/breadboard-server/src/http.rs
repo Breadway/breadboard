@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, auth, device, usage, webhook, AppState};
+use crate::{api, artifacts, auth, device, reviews, usage, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -50,6 +50,30 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/project", put(api::move_issue_project))
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
+        .route(
+            "/issues/{key}/reviews",
+            get(reviews::list_issue_reviews).post(reviews::create_review_request),
+        )
+        .route("/reviews", get(reviews::list_reviews))
+        .route(
+            "/reviews/{id}",
+            patch(reviews::update_review_request).delete(reviews::withdraw_review_request),
+        )
+        // --- issue artifacts (BB-160) ------------------------------------
+        .route(
+            "/issues/{key}/artifacts",
+            get(artifacts::list).post(artifacts::upload).layer(
+                axum::extract::DefaultBodyLimit::max(artifacts::MAX_BODY_BYTES),
+            ),
+        )
+        .route(
+            "/issues/{key}/artifacts/base64",
+            post(artifacts::upload_base64).layer(axum::extract::DefaultBodyLimit::max(
+                artifacts::MAX_BASE64_BODY_BYTES,
+            )),
+        )
+        .route("/artifacts/{id}", get(artifacts::download))
+        // -----------------------------------------------------------------
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route(
             "/repos/{owner}/{name}",

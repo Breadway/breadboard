@@ -117,11 +117,53 @@ export interface ActivityEntry {
   at: string;
 }
 
+export type ReviewState = "requested" | "accepted" | "changes_requested" | "approved";
+export type ReviewerKind = "human" | "agent";
+
+/** One reviewer on one issue/PR pair. Humans and agents share the record. */
+export interface ReviewRequest {
+  id: number;
+  issue_id: number;
+  issue_key: string;
+  issue_title: string;
+  issue_status: Status;
+  pr_url: string | null;
+  pr_number: number | null;
+  pr_repo: string | null;
+  requested_by: number | null;
+  requested_by_login: string | null;
+  reviewer_id: number | null;
+  reviewer: string;
+  reviewer_kind: ReviewerKind;
+  state: ReviewState;
+  note: string | null;
+  requested_at: string;
+  updated_at: string;
+  responded_at: string | null;
+  escalated_at: string | null;
+}
+
+export interface NewReviewRequest {
+  reviewer: string;
+  reviewer_kind?: ReviewerKind;
+  pr_url?: string;
+  pr_number?: number;
+  pr_repo?: string;
+  note?: string;
+}
+
+export interface ReviewRequestPatch {
+  state?: ReviewState;
+  note?: string;
+  agent_name?: string;
+}
+
 export type NotificationKind =
   | "assigned"
   | "mention"
   | "cycle_started"
   | "cycle_ended"
+  | "review"
   | "digest";
 
 export interface Notification {
@@ -306,6 +348,47 @@ export interface ChatUpload {
   filename: string;
   mime: string;
   size: number;
+}
+
+export type ArtifactKind = "bench" | "screenshot" | "ci-log" | "diff" | "trace" | "other";
+
+export const ARTIFACT_KINDS: ArtifactKind[] = [
+  "bench",
+  "screenshot",
+  "ci-log",
+  "diff",
+  "trace",
+  "other",
+];
+
+/** Immutable evidence attached to an issue. */
+export interface IssueArtifact {
+  id: number;
+  issue_id: number;
+  kind: ArtifactKind;
+  /** Optional comment this evidence belongs to. */
+  comment_id: number | null;
+  /** Optional review request key or URL. */
+  review_ref: string | null;
+  filename: string;
+  mime: string;
+  size: number;
+  /** Agent name, or `human:<login>` for a web upload. */
+  uploader_agent: string;
+  session_id: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface NewIssueArtifact {
+  filename: string;
+  kind: ArtifactKind;
+  data_base64: string;
+  mime?: string;
+  comment_id?: number | null;
+  review_ref?: string | null;
+  agent_name?: string;
+  session_id?: string;
 }
 
 export type ChatMessageKind = "message" | "summary";
@@ -527,7 +610,16 @@ export type BoardEvent =
   | { type: "agent.hidden"; agent: string; hidden_by: number | null }
   | { type: "agent.unhidden"; agent: string; unhidden_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
-  | { type: "chat.room.deleted"; id: number };
+  | { type: "chat.room.deleted"; id: number }
+  | {
+      type: "review.updated";
+      id: number;
+      issue_id: number;
+      key: string;
+      reviewer: string;
+      state: string;
+      escalated: boolean;
+    };
 
 export class ApiError extends Error {
   constructor(
@@ -660,6 +752,60 @@ export class BreadboardClient {
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
   getActivity = (key: string) =>
     this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
+
+  listIssueReviews = (key: string) =>
+    this.req<ReviewRequest[]>("GET", `/api/issues/${key}/reviews`);
+  listReviews = (opts: { reviewer?: string; outstanding?: boolean; issue?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.reviewer) q.set("reviewer", opts.reviewer);
+    if (opts.outstanding) q.set("outstanding", "true");
+    if (opts.issue) q.set("issue", opts.issue);
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return this.req<ReviewRequest[]>("GET", `/api/reviews${qs ? `?${qs}` : ""}`);
+  };
+  requestReview = (key: string, request: NewReviewRequest) =>
+    this.req<ReviewRequest>("POST", `/api/issues/${key}/reviews`, request);
+  updateReview = (id: number, patch: ReviewRequestPatch) =>
+    this.req<ReviewRequest>("PATCH", `/api/reviews/${id}`, patch);
+  withdrawReview = (id: number) =>
+    this.req<void>("DELETE", `/api/reviews/${id}`);
+  listIssueArtifacts = (key: string) =>
+    this.req<IssueArtifact[]>("GET", `/api/issues/${key}/artifacts`);
+  /** Multipart upload from the browser (session cookie). */
+  uploadIssueArtifact = async (
+    key: string,
+    file: File,
+    opts: {
+      kind: ArtifactKind;
+      comment_id?: number | null;
+      review_ref?: string | null;
+      agent_name?: string;
+      session_id?: string;
+    },
+  ): Promise<IssueArtifact> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", opts.kind);
+    if (opts.comment_id != null) fd.append("comment_id", String(opts.comment_id));
+    if (opts.review_ref) fd.append("review_ref", opts.review_ref);
+    if (opts.agent_name) fd.append("agent_name", opts.agent_name);
+    if (opts.session_id) fd.append("session_id", opts.session_id);
+    const headers: Record<string, string> = {};
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await fetch(`${this.baseUrl}/api/issues/${key}/artifacts`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: fd,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => res.statusText));
+    return (await res.json()) as IssueArtifact;
+  };
+  /** Base64 upload for MCP/CLI clients. */
+  uploadIssueArtifactBase64 = (key: string, artifact: NewIssueArtifact) =>
+    this.req<IssueArtifact>("POST", `/api/issues/${key}/artifacts/base64`, artifact);
+  artifactUrl = (id: number) => `${this.baseUrl}/api/artifacts/${id}`;
 
   listAgents = () => this.req<AgentClaim[]>("GET", "/api/agents");
   agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");

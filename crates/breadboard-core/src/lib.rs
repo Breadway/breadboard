@@ -311,6 +311,8 @@ pub enum NotificationKind {
     Mention,
     CycleStarted,
     CycleEnded,
+    /// A review request was filed against you, or its outcome affects you.
+    Review,
     /// The daily summary of unread items, for users who opted into a digest
     /// instead of per-event pings.
     Digest,
@@ -323,6 +325,7 @@ impl NotificationKind {
             NotificationKind::Mention => "mention",
             NotificationKind::CycleStarted => "cycle_started",
             NotificationKind::CycleEnded => "cycle_ended",
+            NotificationKind::Review => "review",
             NotificationKind::Digest => "digest",
         }
     }
@@ -333,6 +336,7 @@ impl NotificationKind {
             "mention" => Some(NotificationKind::Mention),
             "cycle_started" => Some(NotificationKind::CycleStarted),
             "cycle_ended" => Some(NotificationKind::CycleEnded),
+            "review" => Some(NotificationKind::Review),
             "digest" => Some(NotificationKind::Digest),
             _ => None,
         }
@@ -431,6 +435,80 @@ pub struct ChatUpload {
     pub filename: String,
     pub mime: String,
     pub size: i64,
+}
+
+/// The kind of evidence an artifact carries. Stored as the same strings in
+/// SQLite; `ci-log` keeps the hyphen so URLs and JSON read naturally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    Bench,
+    Screenshot,
+    CiLog,
+    Diff,
+    Trace,
+    Other,
+}
+
+impl ArtifactKind {
+    pub const ALL: [ArtifactKind; 6] = [
+        ArtifactKind::Bench,
+        ArtifactKind::Screenshot,
+        ArtifactKind::CiLog,
+        ArtifactKind::Diff,
+        ArtifactKind::Trace,
+        ArtifactKind::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactKind::Bench => "bench",
+            ArtifactKind::Screenshot => "screenshot",
+            ArtifactKind::CiLog => "ci-log",
+            ArtifactKind::Diff => "diff",
+            ArtifactKind::Trace => "trace",
+            ArtifactKind::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// Images render inline; everything else is shown in the text viewer or
+    /// offered as a download.
+    pub fn is_image(self) -> bool {
+        matches!(self, ArtifactKind::Screenshot)
+    }
+
+    /// Logs, diffs and traces are text evidence and get the viewer.
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            ArtifactKind::CiLog | ArtifactKind::Diff | ArtifactKind::Trace
+        )
+    }
+}
+
+/// One immutable piece of evidence attached to an issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueArtifact {
+    pub id: i64,
+    pub issue_id: i64,
+    pub kind: ArtifactKind,
+    /// Optional comment this evidence belongs to.
+    pub comment_id: Option<i64>,
+    /// Optional review request reference (a key or URL). Kept as text so it
+    /// stays valid when review requests become their own record.
+    pub review_ref: Option<String>,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    /// Agent name that produced it, or `human:<login>` for a web upload.
+    pub uploader_agent: String,
+    pub session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -615,4 +693,96 @@ pub struct AgentClaim {
     pub claimed_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
+}
+
+/// Lifecycle of a review request. `changes_requested` records an outcome but
+/// is still outstanding: only `approved` lets the issue be marked done.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    Requested,
+    Accepted,
+    ChangesRequested,
+    Approved,
+}
+
+impl ReviewState {
+    pub const ALL: [ReviewState; 4] = [
+        ReviewState::Requested,
+        ReviewState::Accepted,
+        ReviewState::ChangesRequested,
+        ReviewState::Approved,
+    ];
+
+    /// Whether this state still blocks the issue from being marked done.
+    pub fn is_outstanding(self) -> bool {
+        !matches!(self, ReviewState::Approved)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewState::Requested => "requested",
+            ReviewState::Accepted => "accepted",
+            ReviewState::ChangesRequested => "changes_requested",
+            ReviewState::Approved => "approved",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.as_str() == s)
+    }
+}
+
+/// Whether the reviewer acts as a human user or as a named agent. Both kinds
+/// share the same records; the kind only selects the notification path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewerKind {
+    Human,
+    Agent,
+}
+
+impl ReviewerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReviewerKind::Human => "human",
+            ReviewerKind::Agent => "agent",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "human" => Some(ReviewerKind::Human),
+            "agent" => Some(ReviewerKind::Agent),
+            _ => None,
+        }
+    }
+}
+
+/// A review request: one reviewer on one issue/PR pair. The joined issue
+/// fields let a reviewer queue and the requester's issue panel render without
+/// a second lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewRequest {
+    pub id: i64,
+    pub issue_id: i64,
+    pub issue_key: String,
+    pub issue_title: String,
+    pub issue_status: Status,
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
+    pub pr_repo: Option<String>,
+    pub requested_by: Option<i64>,
+    pub requested_by_login: Option<String>,
+    pub reviewer_id: Option<i64>,
+    pub reviewer: String,
+    pub reviewer_kind: ReviewerKind,
+    pub state: ReviewState,
+    pub note: Option<String>,
+    pub requested_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub responded_at: Option<DateTime<Utc>>,
+    /// Set once when the request sat unresolved past the escalation
+    /// threshold. Cleared on a state change.
+    pub escalated_at: Option<DateTime<Utc>>,
 }

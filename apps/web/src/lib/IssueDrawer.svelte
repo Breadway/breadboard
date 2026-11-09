@@ -19,7 +19,9 @@
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
   import UsageStats from "./UsageStats.svelte";
+  import Artifacts from "./Artifacts.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
+  import ReviewPanel from "./ReviewPanel.svelte";
 
   // The issue's fields come straight from the store, so a drag on the board,
   // a live event from someone else, or a refused save (which leaves the store
@@ -568,6 +570,8 @@
           {/if}
         </section>
 
+        <ReviewPanel issueKey={issue.key} />
+
         <UsageStats issueKey={issue.key} compact />
 
         {#if selectedEpic?.description?.trim()}
@@ -634,6 +638,8 @@
             <button class="empty-desc" onclick={startBody}>Add a description…</button>
           {/if}
         </section>
+
+        <Artifacts issueKey={issue.key} {comments} />
 
         <section class="sec">
           <h3>Activity</h3>

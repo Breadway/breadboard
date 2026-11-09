@@ -2,6 +2,7 @@
 //! embedded mode can build the router without the binary.
 
 pub mod api;
+pub mod artifacts;
 pub mod auth;
 pub mod bus;
 pub mod config;
@@ -14,6 +15,7 @@ pub mod http;
 pub mod import;
 pub mod names;
 pub mod notify;
+pub mod reviews;
 pub mod store;
 pub mod summary;
 pub mod sync;
