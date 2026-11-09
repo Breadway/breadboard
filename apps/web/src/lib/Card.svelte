@@ -78,7 +78,7 @@
     {/if}
     <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
-  <div class="title">{issue.title}</div>
+  <div class="title" title={issue.title}>{issue.title}</div>
   {#if issue.labels.length || closingPrs.length || issue.estimate != null || issue.assignee_id || issue.forgejo_ref}
     <div class="bot">
       {#each issue.labels.slice(0, MAX_LABELS) as label (label)}
@@ -232,6 +232,11 @@
     line-height: 1.38;
     overflow-wrap: anywhere;
     text-wrap: pretty;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    line-clamp: 3;
+    overflow: hidden;
   }
   .bot {
     display: flex;

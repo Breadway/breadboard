@@ -576,7 +576,7 @@
           {#each issue.links as l (l.kind + l.target_id)}
             {@const t = store.findIssue(l.target_id)}
             <div class="rel">
-              <button class="rel-main" onclick={() => t && (store.selectedKey = t.key)} disabled={!t}>
+              <button class="rel-main" title={t ? `${t.key}: ${t.title}` : `#${l.target_id}`} onclick={() => t && (store.selectedKey = t.key)} disabled={!t}>
                 <span class="rk k-{l.kind}">{linkLabels[l.kind] ?? l.kind}</span>
                 {#if t}<StatusGlyph status={t.status} />{/if}
                 <span class="key">{t?.key ?? `#${l.target_id}`}</span>

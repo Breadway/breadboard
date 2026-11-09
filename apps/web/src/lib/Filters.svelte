@@ -237,7 +237,7 @@
               <button class="opt" class:on={store.isFiltered("epics", e.id)} onclick={() => toggleEpic(e.id)}>
                 <span class="box"></span>
                 <span class="ek">{e.key}</span>
-                <span class="lbl ell">{e.title}</span>
+                <span class="lbl ell" title={e.title}>{e.title}</span>
               </button>
             {/each}
           </section>
