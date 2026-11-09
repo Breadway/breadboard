@@ -145,10 +145,7 @@ async fn migration_0028_resolves_duplicate_live_names_without_losing_claims() {
     .unwrap();
     assert_eq!(
         claims,
-        vec![
-            (1, "ses_old".to_string()),
-            (2, "ses_new".to_string())
-        ],
+        vec![(1, "ses_old".to_string()), (2, "ses_new".to_string())],
         "no claim may be dropped or reattributed"
     );
 

@@ -114,8 +114,20 @@ async fn stale_name_is_reclaimable_after_the_live_window() {
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);
 
+    ensure_project(&c, &base, &auth).await;
+    let issue = create_issue(&c, &base, &auth, "stale name claim").await;
+    let key = issue["key"].as_str().unwrap().to_string();
+
     let first = register(&c, &base, &auth, "sleepy-name", "ses_asleep").await;
     assert!(first.status().is_success());
+    let claimed = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "sleepy-name", "session_id": "ses_asleep" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(), 201);
 
     sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'sleepy-name'")
         .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
@@ -130,6 +142,25 @@ async fn stale_name_is_reclaimable_after_the_live_window() {
 
     let row = roster_row(&c, &base, &auth, "sleepy-name").await;
     assert_eq!(row["session_id"], "ses_awake");
+    assert_eq!(row["claim_count"], 1);
+
+    // Reclaiming the name does not move or drop the dead session's claim.
+    let claims: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let claim = claims
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|claim| claim["key"] == key)
+        .unwrap();
+    assert_eq!(claim["session_id"], "ses_asleep");
 }
 
 #[tokio::test]
