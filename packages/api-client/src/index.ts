@@ -448,7 +448,7 @@ export interface AgentRegistration {
   /** Two or three other free curated names. */
   alternatives: string[];
   live: boolean;
-  killed: boolean;
+  paused: boolean;
   session_id?: string | null;
   parent_session_id?: string | null;
   orchestrator?: string | null;
@@ -466,8 +466,8 @@ export interface AgentRosterEntry {
   first_seen?: string | null;
   last_seen?: string | null;
   live: boolean;
-  killed: boolean;
-  status: "live" | "stale" | "killed";
+  paused: boolean;
+  status: "live" | "stale" | "paused";
   message?: string | null;
   state?: AgentState | null;
   claim_count: number;
@@ -475,9 +475,9 @@ export interface AgentRosterEntry {
   intent_count: number;
   user_id?: number | null;
   login?: string | null;
-  killed_by?: number | null;
-  killed_by_login?: string | null;
-  killed_at?: string | null;
+  paused_by?: number | null;
+  paused_by_login?: string | null;
+  paused_at?: string | null;
   /** Hidden from the default Agents view. Claims and chat identity remain. */
   hidden: boolean;
   hidden_by?: number | null;
@@ -488,6 +488,14 @@ export interface AgentRosterEntry {
   /** Resolved orchestrator name, when the parent session is registered. */
   orchestrator?: string | null;
   orchestrator_session_id?: string | null;
+}
+
+/** Kill response: the name is removed, so there is no roster entry. */
+export interface AgentRemoval {
+  agent_name: string;
+  removed: boolean;
+  claims_released: number;
+  profile_removed: boolean;
 }
 
 // Mirrors breadboard_core::event::BoardEvent (serde tag = "type").
@@ -513,8 +521,9 @@ export type BoardEvent =
   | { type: "agent.claimed"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string }
   | { type: "agent.updated"; id: number; key: string; agent: string; mode: string; session_id: string | null; state: string; claim: AgentClaim }
   | { type: "agent.released"; id: number; key: string }
-  | { type: "agent.killed"; agent: string; killed_by: number | null }
-  | { type: "agent.revived"; agent: string; revived_by: number | null }
+  | { type: "agent.removed"; agent: string; removed_by: number | null; claims_released: number }
+  | { type: "agent.paused"; agent: string; paused_by: number | null }
+  | { type: "agent.resumed"; agent: string; resumed_by: number | null }
   | { type: "agent.hidden"; agent: string; hidden_by: number | null }
   | { type: "agent.unhidden"; agent: string; unhidden_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
@@ -658,9 +667,11 @@ export class BreadboardClient {
   registerAgent = (body: AgentRegister = {}) =>
     this.req<AgentRegistration>("POST", "/api/agents/register", body);
   killAgent = (name: string) =>
-    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/kill`);
-  reviveAgent = (name: string) =>
-    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/revive`);
+    this.req<AgentRemoval>("POST", `/api/agents/${encodeURIComponent(name)}/kill`);
+  pauseAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/pause`);
+  resumeAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/resume`);
   hideAgent = (name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/hide`);
   unhideAgent = (name: string) =>
