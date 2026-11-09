@@ -38,7 +38,17 @@ Agents can be hidden from the default view without deleting them. Hidden is a
 server-side per-name flag: claims, chat identity and history stay intact, and
 every device sees the same state. The header shows how many agents are shown
 and how many are hidden, including how many hidden agents still hold claims.
-The "Show hidden" toggle reveals them, each with an Unhide control. Cards use
+The "Show hidden" toggle reveals them, each with an Unhide control.
+
+A registered session can carry its OpenCode `parent_session_id`. The roster
+resolves that to an orchestrator name; the subagent card shows an `under
+<orchestrator>` chip that focuses the orchestrator and its direct subagents.
+An unresolved parent keeps the raw session id on the chip instead of dropping
+the link. An orchestrator card shows how many of its direct subagents are
+live. Hiding or killing a subagent affects only that card, never the
+orchestrator. The link fields never participate in sorting.
+
+Cards use
 CSS multi-column masonry (`columns: 248px`, `break-inside: avoid`) so a tall
 card does not leave a dead column, while DOM order stays stable across
 heartbeat updates.
@@ -218,8 +228,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/chat/uploads/{id}` | authenticated download. Safe images (png/jpeg/gif/webp) render inline; everything else is served as an attachment with `nosniff` |
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
-| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. Returns `{ agent_name, alternatives[], live, killed, session_id }`; registration never revives a killed name. `200` |
-| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at, hidden, hidden_by, hidden_by_login, hidden_at }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed`. Hidden rows are still returned so clients can count and reveal them |
+| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name the server resolves to its registered session when `parent_session_id` is absent. Returns `{ agent_name, alternatives[], live, killed, session_id, parent_session_id, orchestrator, orchestrator_session_id }`; registration never revives a killed name. `200` |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed`. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id |
 | `POST` | `/api/agents/{name}/kill` | mark the lowercased name killed, release every claim it holds (exclusive and intent), record the caller in `killed_by`, and emit `agent.killed`. Idempotent: a second call keeps the original killer and still returns the roster row. `200` |
 | `POST` | `/api/agents/{name}/revive` | clear a kill so the name can write again; emits `agent.revived`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |

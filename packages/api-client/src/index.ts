@@ -373,6 +373,10 @@ export interface AgentRegister {
   host?: string;
   pid?: number;
   note?: string;
+  /** OpenCode parent session id; the chat plugin reports this. */
+  parent_session_id?: string;
+  /** Optional orchestrator name; resolved to its session when known. */
+  orchestrator?: string;
 }
 
 export interface AgentRegistration {
@@ -382,6 +386,9 @@ export interface AgentRegistration {
   live: boolean;
   killed: boolean;
   session_id?: string | null;
+  parent_session_id?: string | null;
+  orchestrator?: string | null;
+  orchestrator_session_id?: string | null;
 }
 
 /** One roster row: the union of sessions, profiles and claims by lowercased
@@ -412,6 +419,11 @@ export interface AgentRosterEntry {
   hidden_by?: number | null;
   hidden_by_login?: string | null;
   hidden_at?: string | null;
+  /** The session that spawned this agent, as reported by the chat plugin. */
+  parent_session_id?: string | null;
+  /** Resolved orchestrator name, when the parent session is registered. */
+  orchestrator?: string | null;
+  orchestrator_session_id?: string | null;
 }
 
 // Mirrors breadboard_core::event::BoardEvent (serde tag = "type").

@@ -475,6 +475,14 @@ pub struct AgentRegister {
     pub pid: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// OpenCode parent session id. The breadboard-chat plugin is the reliable
+    /// reporter; the roster resolves it to an orchestrator name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// Optional orchestrator name. When `parent_session_id` is absent, the
+    /// server resolves a known name to its registered session id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<String>,
 }
 
 /// `POST /api/agents/register` response. `alternatives` carries two or three
@@ -488,6 +496,12 @@ pub struct AgentRegistration {
     pub killed: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator_session_id: Option<String>,
 }
 
 /// `POST /api/agents/{name}/rename` body.
@@ -544,6 +558,16 @@ pub struct AgentRosterEntry {
     pub hidden_by_login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The session that spawned this agent, as reported by the plugin.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<String>,
+    /// Resolved orchestrator agent name, when the parent session is registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<String>,
+    /// The orchestrator's session id (the same value as parent_session_id when
+    /// resolution succeeded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

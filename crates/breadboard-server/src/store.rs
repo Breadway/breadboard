@@ -2499,6 +2499,7 @@ pub const AGENT_LIVE_SECS: i64 = 120;
 struct AgentSessionRow {
     agent_name: String,
     session_id: Option<String>,
+    parent_session_id: Option<String>,
     host: Option<String>,
     pid: Option<i64>,
     note: Option<String>,
@@ -2528,8 +2529,8 @@ struct AgentHiddenRow {
     hidden_at: String,
 }
 
-const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.host, s.pid, s.note, \
-    s.user_id, u.login AS login, s.first_seen, s.last_seen, s.killed, s.killed_by, \
+const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.parent_session_id, s.host, s.pid, \
+    s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.killed, s.killed_by, \
     k.login AS killed_by_login, s.killed_at";
 
 fn agent_session_join() -> String {
@@ -2566,6 +2567,9 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         hidden_by: None,
         hidden_by_login: None,
         hidden_at: None,
+        parent_session_id: None,
+        orchestrator: None,
+        orchestrator_session_id: None,
     }
 }
 
@@ -2606,6 +2610,7 @@ async fn upsert_agent_session(
     user_id: i64,
     name: &str,
     session_id: Option<&str>,
+    parent_session_id: Option<&str>,
     host: Option<&str>,
     pid: Option<i64>,
     note: Option<&str>,
@@ -2613,18 +2618,21 @@ async fn upsert_agent_session(
 ) -> AppResult<()> {
     sqlx::query(
         "INSERT INTO agent_sessions
-            (agent_name, session_id, host, pid, note, user_id, first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            (agent_name, session_id, parent_session_id, host, pid, note, user_id,
+             first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
          ON CONFLICT(agent_name) DO UPDATE SET
-            session_id = COALESCE(excluded.session_id, agent_sessions.session_id),
-            host       = COALESCE(excluded.host, agent_sessions.host),
-            pid        = COALESCE(excluded.pid, agent_sessions.pid),
-            note       = COALESCE(excluded.note, agent_sessions.note),
-            user_id    = COALESCE(agent_sessions.user_id, excluded.user_id),
-            last_seen  = excluded.last_seen",
+            session_id         = COALESCE(excluded.session_id, agent_sessions.session_id),
+            parent_session_id  = COALESCE(excluded.parent_session_id, agent_sessions.parent_session_id),
+            host               = COALESCE(excluded.host, agent_sessions.host),
+            pid                = COALESCE(excluded.pid, agent_sessions.pid),
+            note               = COALESCE(excluded.note, agent_sessions.note),
+            user_id            = COALESCE(agent_sessions.user_id, excluded.user_id),
+            last_seen          = excluded.last_seen",
     )
     .bind(name)
     .bind(session_id)
+    .bind(parent_session_id)
     .bind(host)
     .bind(pid)
     .bind(note)
@@ -2662,12 +2670,41 @@ pub async fn register_agent(
     };
     validate_agent_name(&name)?;
 
+    // Prefer the exact parent session id from the plugin. If only an
+    // orchestrator name is known, resolve that name to its registered session;
+    // an unknown name is ignored rather than failing registration.
+    let parent_session_id = match input
+        .parent_session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(id.to_string()),
+        None => match input
+            .orchestrator
+            .as_deref()
+            .map(names::normalize)
+            .filter(|name| !name.is_empty())
+        {
+            Some(orchestrator) => sqlx::query_scalar(
+                "SELECT session_id FROM agent_sessions
+                  WHERE agent_name = ?1 AND session_id IS NOT NULL",
+            )
+            .bind(&orchestrator)
+            .fetch_optional(db)
+            .await?
+            .flatten(),
+            None => None,
+        },
+    };
+
     let ts = now_rfc3339();
     upsert_agent_session(
         db,
         user_id,
         &name,
         input.session_id.as_deref(),
+        parent_session_id.as_deref(),
         input.host.as_deref(),
         input.pid,
         input.note.as_deref(),
@@ -2687,6 +2724,9 @@ pub async fn register_agent(
         live: entry.live,
         killed: entry.killed,
         session_id: entry.session_id,
+        parent_session_id: entry.parent_session_id,
+        orchestrator: entry.orchestrator,
+        orchestrator_session_id: entry.orchestrator_session_id,
     })
 }
 
@@ -2717,6 +2757,7 @@ pub async fn ensure_agent_writable(
         user_id,
         &name,
         session_id,
+        None,
         None,
         None,
         None,
@@ -3068,6 +3109,7 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
             .entry(key.clone())
             .or_insert_with(|| empty_roster_entry(&key));
         entry.session_id = session.session_id.clone();
+        entry.parent_session_id = session.parent_session_id.clone();
         entry.host = session.host.clone();
         entry.pid = session.pid;
         if session.note.is_some() {
@@ -3115,6 +3157,29 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
             entry
         })
         .collect();
+    // Resolve parent session ids to orchestrator names after the union is
+    // built. An unregistered parent keeps only the raw id, so the UI can show
+    // it instead of dropping the link. This never participates in sorting.
+    let by_session: HashMap<String, String> = roster
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .session_id
+                .as_ref()
+                .map(|session| (session.clone(), entry.agent_name.clone()))
+        })
+        .collect();
+    for entry in &mut roster {
+        if let Some(parent) = entry.parent_session_id.clone() {
+            if let Some(orchestrator) = by_session.get(&parent) {
+                if orchestrator != &entry.agent_name {
+                    entry.orchestrator = Some(orchestrator.clone());
+                    entry.orchestrator_session_id = Some(parent);
+                }
+            }
+        }
+    }
+
     // Heartbeats flip live/stale constantly. Keep the server order stable by
     // sorting only on claim counts and name, with killed names last, so the
     // masonry layout does not reshuffle every 15 seconds.
