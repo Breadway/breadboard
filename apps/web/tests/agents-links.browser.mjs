@@ -223,6 +223,93 @@ try {
     assert.deepEqual(order2, order1, `${width}: card order is stable across refresh and heartbeat`);
     assert.equal(chip2, chip1, `${width}: orchestrator chip is stable`);
   }
+  // Deep link from an agent's activity feed crosses rooms and must land on the
+  // linked message, not on the newest one. The target is 60 messages from the
+  // bottom, so a bottom-scroll override would push it out of view.
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.getByRole("button", { name: "Agents" }).click();
+  await page.waitForSelector(".agent-card");
+  const deepAgent = `deep-link-${stamp}`;
+  await page.evaluate(
+    async ({ deepAgent }) => {
+      await fetch("/api/agents/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent_name: deepAgent, host: "test" }),
+      });
+    },
+    { deepAgent },
+  );
+  const chatFixture = await page.evaluate(
+    async ({ stamp, deepAgent }) => {
+      const api = async (method, path, body) => {
+        const response = await fetch(path, {
+          method,
+          headers: { "content-type": "application/json" },
+          body: body === undefined ? undefined : JSON.stringify(body),
+        });
+        if (!response.ok) throw new Error(`${method} ${path}: ${response.status}`);
+        return response.status === 204 ? undefined : response.json();
+      };
+      const roomA = await api("POST", "/api/chat/rooms", {
+        name: `switch-from-${stamp}`,
+        description: "deep-link fixture origin",
+      });
+      const roomB = await api("POST", "/api/chat/rooms", {
+        name: `switch-to-${stamp}`,
+        description: "deep-link fixture target",
+      });
+      const target = await api("POST", "/api/chat/messages", {
+        agent_name: deepAgent,
+        room: String(roomB.id),
+        body: `linked message ${stamp}`,
+      });
+      for (let i = 0; i < 60; i++) {
+        await api("POST", "/api/chat/messages", {
+          room: String(roomB.id),
+          body: `trailing message ${i} ${stamp}`,
+        });
+      }
+      return { roomA, roomB, targetId: target.id };
+    },
+    { stamp, deepAgent },
+  );
+
+  // Start in a different room so the click has to switch rooms.
+  await page.getByRole("button", { name: "Chat" }).click();
+  await page.locator(".rooms button.room", { hasText: chatFixture.roomA.name }).click();
+  await page.waitForSelector(`text=#${chatFixture.roomA.name}`);
+
+  await page.getByRole("button", { name: "Agents" }).click();
+  await page.waitForSelector(`[data-agent="${deepAgent}"]`);
+  await page.locator(`[data-agent="${deepAgent}"]`).click();
+  const chatLink = page.locator(".activity .elinks button.linklike", { hasText: "message" });
+  await chatLink.waitFor({ state: "visible" });
+  const chipLabels = (await page.locator(".activity .chip").allTextContents()).map((s) => s.trim());
+  assert.ok(!chipLabels.includes("CI"), `ci_result chip is hidden until it has a source: ${chipLabels}`);
+  assert.ok(!chipLabels.includes("handoff"), `handoff chip is hidden until it has a source: ${chipLabels}`);
+  assert.ok(chipLabels.includes("paused"), `paused chip is shown: ${chipLabels}`);
+  assert.ok(chipLabels.includes("removed"), `removed chip is shown: ${chipLabels}`);
+  await chatLink.click();
+  await page.waitForSelector(`text=#${chatFixture.roomB.name}`);
+  await page.waitForSelector(`#bb-msg-${chatFixture.targetId}`);
+  await page.waitForTimeout(900); // smooth scroll settle
+
+  const deepLink = await page.evaluate(({ targetId }) => {
+    const scroller = document.querySelector(".messages");
+    const element = document.getElementById(`bb-msg-${targetId}`);
+    const scrollerRect = scroller.getBoundingClientRect();
+    const elementRect = element.getBoundingClientRect();
+    return {
+      visible: elementRect.top >= scrollerRect.top - 1 && elementRect.bottom <= scrollerRect.bottom + 1,
+      atBottom:
+        Math.abs(scroller.scrollTop + scroller.clientHeight - scroller.scrollHeight) < 4,
+      scrollTop: Math.round(scroller.scrollTop),
+    };
+  }, chatFixture);
+  assert.ok(deepLink.visible, `chat deep link should land on the linked message: ${JSON.stringify(deepLink)}`);
+  assert.ok(!deepLink.atBottom, `chat deep link must not be overridden by the bottom scroll: ${JSON.stringify(deepLink)}`);
+
   console.log("agents orchestrator-link browser regressions: passed", fixture.project);
 } finally {
   await browser.close();

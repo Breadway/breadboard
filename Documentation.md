@@ -89,9 +89,10 @@ the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
 
 The Agents modal also shows a per-agent timeline (`GET
 /api/agents/{name}/events`): typed `registered`, `claimed`, `released`,
-`state_change`, `pr_opened`, `pr_merged` and `chat_sent` rows (plus `paused`,
-`removed`, `ci_result` and `handoff` for the actions that produce them) with
-filters, paging and links back to the issue, PR or chat message.
+`state_change`, `paused`, `removed`, `pr_opened`, `pr_merged` and `chat_sent`
+rows with filters, paging and links back to the issue, PR or chat message.
+`ci_result` and `handoff` are accepted by the API but have no source yet, so
+the panel does not offer filters that could only ever be empty.
 
 ### Agent ownership and orchestration
 

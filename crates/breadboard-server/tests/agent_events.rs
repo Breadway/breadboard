@@ -356,6 +356,78 @@ async fn observed_merge_writes_pr_merged_for_each_claimant() {
 }
 
 #[tokio::test]
+async fn pause_resume_and_remove_write_one_lifecycle_event_each() {
+    let app = common::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    ensure_project(&c, &base, &auth).await;
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "lifecycle-agent", "host": "hestia" }))
+        .send()
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let issue = create_issue(&c, &base, &auth).await;
+        let key = issue["key"].as_str().unwrap();
+        let claimed = c
+            .post(format!("{base}/api/issues/{key}/claim"))
+            .header("authorization", &auth)
+            .json(&json!({ "agent_name": "lifecycle-agent" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(claimed.status(), reqwest::StatusCode::CREATED);
+    }
+
+    let paused = c
+        .post(format!("{base}/api/agents/lifecycle-agent/pause"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert!(paused.status().is_success());
+    let paused_events = get_events(&c, &base, &auth, "lifecycle-agent", "kind=paused").await;
+    assert_eq!(kinds(&paused_events), vec!["paused"]);
+    assert_eq!(paused_events["events"][0]["actor"], "tester");
+
+    let resumed = c
+        .post(format!("{base}/api/agents/lifecycle-agent/resume"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert!(resumed.status().is_success());
+    let resume_events =
+        get_events(&c, &base, &auth, "lifecycle-agent", "kind=state_change").await;
+    assert_eq!(kinds(&resume_events), vec!["state_change"]);
+    assert_eq!(resume_events["events"][0]["summary"], "Resumed after a pause");
+
+    let removed = c
+        .post(format!("{base}/api/agents/lifecycle-agent/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert!(removed.status().is_success());
+    let body: Value = removed.json().await.unwrap();
+    assert_eq!(body["claims_released"], 2);
+
+    let removed_events = get_events(&c, &base, &auth, "lifecycle-agent", "kind=removed").await;
+    assert_eq!(kinds(&removed_events), vec!["removed"]);
+    let event = &removed_events["events"][0];
+    assert_eq!(event["summary"], "Removed; 2 claim(s) released");
+    assert_eq!(event["detail"], "profile kept");
+    assert_eq!(event["actor"], "tester");
+
+    // A mass removal is one action: no per-claim released rows.
+    let released = get_events(&c, &base, &auth, "lifecycle-agent", "kind=released").await;
+    assert!(released["events"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn retention_prunes_only_rows_older_than_the_window() {
     let app = common::spawn().await;
 

@@ -44,6 +44,13 @@
     handoff: "handoff",
   };
 
+  // ci_result and handoff have no emit source yet; a chip that can only ever
+  // be empty is misleading, so keep them out of the filter UI. The API still
+  // accepts every kind. paused and removed are emitted by pause/remove.
+  const CHIP_KINDS = AGENT_EVENT_KINDS.filter(
+    (k) => k !== "ci_result" && k !== "handoff",
+  );
+
   let kind = $state<AgentEventKind | "all">("all");
   let range = $state<Range>("24h");
   let events = $state<AgentEvent[]>([]);
@@ -127,7 +134,7 @@
     <div class="filters">
       <div class="kinds" role="group" aria-label="Filter by event kind">
         <button class="chip" class:on={kind === "all"} onclick={() => (kind = "all")}>all</button>
-        {#each AGENT_EVENT_KINDS as k (k)}
+        {#each CHIP_KINDS as k (k)}
           <button class="chip" class:on={kind === k} onclick={() => (kind = k)}>
             {KIND_LABELS[k]}
           </button>
