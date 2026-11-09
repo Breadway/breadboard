@@ -34,6 +34,11 @@
   // fetch that started before the room existed. Plain, not reactive.
   let pendingPick: number | null = null;
   let pendingPickAt = 0;
+  // Room-list responses are applied latest-request-wins. A GET captured before
+  // a DM was created can resolve after the pick's own fetch; its sequence is
+  // older, so it must not replace `rooms` and reset the header to the lobby.
+  let roomRequestSeq = 0;
+  let appliedRoomSeq = 0;
   // Plain (not reactive) on purpose: flipping it must not retrigger the
   // bottom-scroll effect. A deep link sets it while it waits for the target
   // room's messages to load and scroll into view.
@@ -245,8 +250,14 @@
   }
 
   async function loadRooms() {
+    const seq = ++roomRequestSeq;
     try {
       const next = await store.loadChatRooms();
+      // Latest-request-wins: a response that started before a newer one
+      // already applied (for example the snapshot taken before a DM existed)
+      // is stale even if it resolves last.
+      if (seq < appliedRoomSeq) return;
+      appliedRoomSeq = seq;
       rooms = next;
       // Never steal an explicit pick. The initial load and a deep link can
       // race; an already selected room that still exists must win.
@@ -310,9 +321,10 @@
     if (narrow) roomsOpen = false;
     await loadRooms();
     // The initial room load may have resolved during the await above; the
-    // explicit pick is authoritative when the room exists.
+    // explicit pick is authoritative when the room exists. pendingPick is
+    // cleared only by loadRooms once a list containing the room applies, so a
+    // response from before the room existed cannot unlock the lobby fallback.
     if (!rooms.some((r) => r.id === id)) return;
-    pendingPick = null;
     selectedId = id;
     // Keep the address bar on the copyable /chat?dm=<agent> link.
     store.updateChatUrl(store.chatDmAgent(rooms.find((r) => r.id === id)), true);

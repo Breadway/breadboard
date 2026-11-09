@@ -191,6 +191,85 @@ try {
     "the cold deep link created the DM",
   );
 
+  // Race regression: hold the first room-list snapshot (taken before the DM
+  // exists), let openDm and pick finish, then release it. The stale response
+  // must not replace the applied list or move the header back to #lobby.
+  const raceAgent = `courier-race-${stamp}`;
+  await page.evaluate(
+    async ({ agent }) => {
+      const response = await fetch("/api/agents/register", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agent_name: agent, session_id: `ses_${agent}`, host: "test" }),
+      });
+      if (!response.ok) throw new Error(`register: ${response.status}`);
+    },
+    { agent: raceAgent },
+  );
+
+  let heldRoute;
+  let heldSnapshot;
+  let roomsCalls = 0;
+  let releaseFirst;
+  const firstRequestHeld = new Promise((resolve) => (releaseFirst = resolve));
+  await page.route("**/api/chat/rooms", async (route) => {
+    if (roomsCalls++ === 0) {
+      // Fetch now, before the DM exists, then keep the response parked.
+      const response = await route.fetch();
+      heldSnapshot = {
+        status: response.status(),
+        headers: response.headers(),
+        body: await response.body(),
+      };
+      heldRoute = route;
+      releaseFirst();
+      return;
+    }
+    await route.continue();
+  });
+  // Do not create the DM until the stale snapshot has been captured.
+  await page.route("**/api/chat/dm", async (route) => {
+    await firstRequestHeld;
+    await route.continue();
+  });
+
+  await page.goto(`${base}/chat?dm=${encodeURIComponent(raceAgent)}`);
+  await page.waitForSelector(".chat");
+  await page.waitForFunction(
+    (name) => document.querySelector(".mhead h2")?.textContent?.includes(name),
+    raceAgent,
+  );
+
+  const snapshotRooms = JSON.parse(heldSnapshot.body.toString());
+  assert.ok(
+    !snapshotRooms.some(
+      (r) =>
+        r.kind === "dm" &&
+        r.members.some((m) => m.toLowerCase() === `agent:${raceAgent}`),
+    ),
+    "the held room list predates the DM",
+  );
+
+  // Release the stale snapshot after pick has completed.
+  await heldRoute.fulfill({
+    status: heldSnapshot.status,
+    headers: heldSnapshot.headers,
+    body: heldSnapshot.body,
+  });
+  await page.waitForTimeout(500);
+
+  const racedHeader = await page.locator(".mhead h2").innerText();
+  assert.match(racedHeader, new RegExp(raceAgent), "a stale room list must not change the DM header");
+  assert.ok(!racedHeader.includes("lobby"), "a stale room list must not show the lobby");
+  const racedUrl = new URL(page.url());
+  assert.equal(racedUrl.pathname, "/chat", "the URL still uses the chat path");
+  assert.equal(racedUrl.searchParams.get("dm"), raceAgent, "the URL still names the agent");
+  const racedSelected = await page.locator(".rooms .room.dm.on .rname").innerText();
+  assert.match(racedSelected, new RegExp(raceAgent), "the DM stays selected after the stale response");
+
+  await page.unroute("**/api/chat/rooms");
+  await page.unroute("**/api/chat/dm");
+
   console.log("agent DM deep-link browser regressions: passed", fixture.room.id);
 } finally {
   await browser.close();
