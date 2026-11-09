@@ -6,7 +6,7 @@
 //   BREADBOARD_SERVER / BREADBOARD_TOKEN env vars
 //   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -311,7 +311,23 @@ function stopChatPoller() {
   pollerAgent = undefined;
 }
 
+/// The breadboard-chat plugin already injects pushes into the session. Running
+/// this poller too wakes the same agent twice per push, which showed up as one
+/// agent posting several replies to a single @everyone. Skip it when the plugin
+/// is installed, unless the operator forces it on with BREADBOARD_CHAT_POLLER=1.
+function chatPollerEnabled(): boolean {
+  const mode = (process.env.BREADBOARD_CHAT_POLLER ?? "").trim().toLowerCase()
+  if (["0", "off", "false", "no"].includes(mode)) return false
+  if (["1", "on", "true", "yes"].includes(mode)) return true
+  const configDir = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
+  return !existsSync(join(configDir, "opencode", "plugins", "breadboard-chat"))
+}
+
 function ensureChatPoller(explicit?: string) {
+  if (!chatPollerEnabled()) {
+    stopChatPoller()
+    return
+  }
   const name = explicit?.trim() || autoAgentName;
   if (!name) return;
   if (chatPoller && pollerAgent === name) return;
