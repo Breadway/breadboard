@@ -219,11 +219,8 @@ const ok = (data: unknown) => ({
 });
 const fail = (msg: string) => ({ content: [{ type: "text" as const, text: msg }], isError: true });
 
-async function run<T>(fn: () => Promise<T>) {
+async function attempt<T>(fn: () => Promise<T>) {
   try {
-    // Every tool call refreshes this session on the roster, so a brand new
-    // OpenCode session appears without naming itself first. Throttled above.
-    await ensureRegistered();
     return ok(await fn());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -231,6 +228,17 @@ async function run<T>(fn: () => Promise<T>) {
     }
     return fail(e instanceof Error ? e.message : String(e));
   }
+}
+
+async function run<T>(fn: () => Promise<T>) {
+  // Every tool call refreshes this session on the roster, so a brand new
+  // OpenCode session appears without naming itself first. Throttled above.
+  // name_agent uses attempt() instead: a process holding a refused name must
+  // still be able to rename itself before registering.
+  return attempt(async () => {
+    await ensureRegistered();
+    return fn();
+  });
 }
 
 // Register at startup, before the first tool call, so the chat plugin can map
@@ -977,7 +985,7 @@ server.tool(
       .describe("optional one-line message for the Agents view; defaults to 'Ready for work.'"),
   },
   ({ agent_name, message }) =>
-    run(async () => {
+    attempt(async () => {
       const name = agent_name.trim().toLowerCase();
       if (!name) throw new Error("agent_name is required");
       const line = message?.trim() || "Ready for work.";
