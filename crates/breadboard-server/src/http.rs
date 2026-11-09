@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, auth, device, webhook, AppState};
+use crate::{api, artifacts, auth, device, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -50,6 +50,21 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/project", put(api::move_issue_project))
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
+        // --- issue artifacts (BB-160) ------------------------------------
+        .route(
+            "/issues/{key}/artifacts",
+            get(artifacts::list).post(artifacts::upload).layer(
+                axum::extract::DefaultBodyLimit::max(artifacts::MAX_BODY_BYTES),
+            ),
+        )
+        .route(
+            "/issues/{key}/artifacts/base64",
+            post(artifacts::upload_base64).layer(axum::extract::DefaultBodyLimit::max(
+                artifacts::MAX_BASE64_BODY_BYTES,
+            )),
+        )
+        .route("/artifacts/{id}", get(artifacts::download))
+        // -----------------------------------------------------------------
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route(
             "/repos/{owner}/{name}",
@@ -60,11 +75,15 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/roster", get(api::agent_roster))
         .route("/agents/message", put(api::set_agent_message))
         .route("/agents/{name}/kill", post(api::kill_agent))
-        .route("/agents/{name}/revive", post(api::revive_agent))
+        .route("/agents/{name}/pause", post(api::pause_agent))
+        .route("/agents/{name}/resume", post(api::resume_agent))
         .route("/agents/{name}/hide", post(api::hide_agent))
         .route("/agents/{name}/unhide", post(api::unhide_agent))
         .route("/agents/{name}/rename", post(api::rename_agent))
-        .route("/chat/rooms", get(api::list_chat_rooms).post(api::create_chat_room))
+        .route(
+            "/chat/rooms",
+            get(api::list_chat_rooms).post(api::create_chat_room),
+        )
         .route(
             "/chat/rooms/{id}",
             axum::routing::delete(api::delete_chat_room),
@@ -76,10 +95,7 @@ pub fn router(state: AppState) -> Router {
             "/chat/messages/{id}",
             axum::routing::delete(api::delete_chat_message),
         )
-        .route(
-            "/chat/rooms/{id}/compact",
-            post(api::compact_chat_room),
-        )
+        .route("/chat/rooms/{id}/compact", post(api::compact_chat_room))
         .route(
             "/chat/uploads",
             post(api::upload_chat_file)

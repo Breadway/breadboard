@@ -65,10 +65,10 @@
     sessionId: string | null;
     host: string | null;
     pid: number | null;
-    presence: "live" | "stale" | "killed";
-    killed: boolean;
-    killedBy: string | null;
-    killedAt: string | null;
+    presence: "live" | "stale" | "paused";
+    paused: boolean;
+    pausedBy: string | null;
+    pausedAt: string | null;
     note: string | null;
     state: AgentState | null;
     lastSeen: string | null;
@@ -105,9 +105,9 @@
           host: null,
           pid: null,
           presence: "stale",
-          killed: false,
-          killedBy: null,
-          killedAt: null,
+          paused: false,
+          pausedBy: null,
+          pausedAt: null,
           note: null,
           state: null,
           lastSeen: null,
@@ -150,9 +150,9 @@
       g.host = r.host ?? g.host;
       g.pid = r.pid ?? g.pid;
       g.presence = r.status;
-      g.killed = r.killed;
-      g.killedBy = r.killed_by_login ?? null;
-      g.killedAt = r.killed_at ?? null;
+      g.paused = r.paused;
+      g.pausedBy = r.paused_by_login ?? null;
+      g.pausedAt = r.paused_at ?? null;
       g.note = g.note ?? r.note ?? null;
       g.state = g.state ?? r.state ?? null;
       g.lastSeen = r.last_seen ?? g.lastSeen;
@@ -175,7 +175,7 @@
     }
     // Sort only on claim counts and name, never on live/stale: a heartbeat
     // flips presence every few seconds and must not reorder the masonry.
-    const rank = (g: Group) => (g.killed ? 1 : 0);
+    const rank = (g: Group) => (g.paused ? 1 : 0);
     return [...map.values()].sort(
       (a, b) =>
         rank(a) - rank(b) ||
@@ -187,7 +187,7 @@
 
   const claimHolders = $derived(allGroups.filter((g) => g.work.length > 0).length);
   const idleSessions = $derived(allGroups.filter((g) => g.work.length === 0).length);
-  const killedCount = $derived(allGroups.filter((g) => g.killed).length);
+  const pausedCount = $derived(allGroups.filter((g) => g.paused).length);
   const hiddenGroups = $derived(allGroups.filter((g) => g.hidden));
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
@@ -260,7 +260,7 @@
       if (!parent) continue;
       const count = counts.get(parent.name) ?? { total: 0, live: 0 };
       count.total++;
-      if (g.presence === "live" && !g.killed) count.live++;
+      if (g.presence === "live" && !g.paused) count.live++;
       counts.set(parent.name, count);
     }
     return counts;
@@ -403,7 +403,7 @@
           rawParent: null,
           nodes: [makeNode(root, 1, new Set([root.id]))],
           directTotal: kids.length,
-          directLive: kids.filter((c) => c.presence === "live" && !c.killed).length,
+          directLive: kids.filter((c) => c.presence === "live" && !c.paused).length,
           rootRendered: canRenderCard(root),
         };
       }
@@ -490,13 +490,17 @@
 
   async function killGroup(g: Group) {
     const ok = window.confirm(
-      `Kill ${g.name}?\n\nThis releases every claim it holds and blocks it from writing until it is revived.`,
+      `Kill ${g.name}?\n\nThis removes the agent completely: its claims are released, its roster card and profile disappear, and the name is freed. This cannot be undone.`,
     );
     if (ok) await store.killAgent(g.name);
   }
 
-  async function reviveGroup(g: Group) {
-    await store.reviveAgent(g.name);
+  async function pauseGroup(g: Group) {
+    await store.pauseAgent(g.name);
+  }
+
+  async function resumeGroup(g: Group) {
+    await store.resumeAgent(g.name);
   }
 
   async function hideGroup(g: Group) {
@@ -580,11 +584,11 @@
   {@const parentId = parentById.get(g.id)}
   {@const parent = parentId ? byId.get(parentId) : null}
   {@const unlinkedParent = !parent && g.parentSessionId ? g.parentSessionId : null}
-  {@const directLive = direct.filter((c) => c.presence === "live" && !c.killed).length}
+  {@const directLive = direct.filter((c) => c.presence === "live" && !c.paused).length}
   <div
     class="agent-card"
     class:stale={g.stale > 0}
-    class:killed={g.killed}
+    class:paused={g.paused}
     class:hidden={g.hidden}
     class:orchestrator={isOrchestrator}
     class:subagent-card={!!parent || !!unlinkedParent}
@@ -632,8 +636,8 @@
         {#if g.hidden}
           <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
         {/if}
-        {#if g.killed}
-          <span class="killed-badge" title="Writes blocked until revived">killed</span>
+        {#if g.paused}
+          <span class="paused-badge" title="Claims kept; new claims blocked until resumed">paused</span>
         {:else if g.stale > 0}
           <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
             <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
@@ -778,7 +782,7 @@
       <div class="stat"><b>{tallies.active}</b><span>active</span></div>
       <div class="stat"><b>{tallies.review}</b><span>review</span></div>
       <div class="stat" class:bad={tallies.blocked > 0}><b>{tallies.blocked}</b><span>blocked</span></div>
-      <div class="stat" class:bad={killedCount > 0}><b>{killedCount}</b><span>killed</span></div>
+      <div class="stat" class:warn={pausedCount > 0}><b>{pausedCount}</b><span>paused</span></div>
     </div>
   </header>
 
@@ -862,7 +866,7 @@
               <span class="role-badge orch">orchestrator</span>
               <b class="group-name" title={root.name}>{root.name}</b>
               {#if !section.rootRendered}<span class="hidden-badge">hidden</span>{/if}
-              {#if root.killed}<span class="killed-badge">killed</span>{/if}
+              {#if root.paused}<span class="paused-badge" title="Claims kept; new claims blocked until resumed">paused</span>{/if}
               <span class="group-meta">
                 {section.directTotal} subagent{section.directTotal === 1 ? "" : "s"} · {section.directLive} live
               </span>
@@ -932,7 +936,7 @@
             {selected.name}
             {#if selected.login != null && selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
             {#if selected.hidden}<span class="hidden-badge">hidden</span>{/if}
-            {#if selected.killed}<span class="killed-badge">killed</span>{/if}
+            {#if selected.paused}<span class="paused-badge">paused</span>{/if}
           </div>
           {#if selected.message}<p class="mmessage">{selected.message}</p>{/if}
           <div class="msub">
@@ -955,11 +959,12 @@
         {:else}
           <button class="btn sm" onclick={() => void hideGroup(selected)}>Hide</button>
         {/if}
-        {#if selected.killed}
-          <button class="btn sm" onclick={() => void reviveGroup(selected)}>Revive</button>
+        {#if selected.paused}
+          <button class="btn sm" onclick={() => void resumeGroup(selected)}>Resume</button>
         {:else}
-          <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
+          <button class="btn sm" onclick={() => void pauseGroup(selected)}>Pause</button>
         {/if}
+        <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
         <button class="close" aria-label="Close" onclick={closeAgent}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
         </button>
@@ -1008,10 +1013,10 @@
             Claims, chat identity and history are untouched.
           </div>
         {/if}
-        {#if selected.killed}
-          <div class="killed-note">
-            Writes are blocked{selected.killedBy ? `; killed by ${selected.killedBy}` : ""}{selected.killedAt ? ` ${ago(selected.killedAt, now)}` : ""}.
-            Revive before this agent writes again.
+        {#if selected.paused}
+          <div class="paused-note">
+            Paused{selected.pausedBy ? ` by ${selected.pausedBy}` : ""}{selected.pausedAt ? ` ${ago(selected.pausedAt, now)}` : ""}.
+            Claims are kept; new claims are blocked until resumed.
           </div>
         {/if}
       </div>
@@ -1425,9 +1430,9 @@
   .agent-card.stale {
     border-color: color-mix(in srgb, var(--danger) 32%, var(--line));
   }
-  .agent-card.killed {
-    border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
-    background: color-mix(in srgb, var(--danger) 4%, var(--surface));
+  .agent-card.paused {
+    border-color: color-mix(in srgb, var(--status-doing) 55%, var(--line));
+    background: color-mix(in srgb, var(--status-doing) 5%, var(--surface));
   }
   .agent-card.hidden {
     border-style: dashed;
@@ -1554,7 +1559,7 @@
   }
   .stale-badge,
   .hidden-badge,
-  .killed-badge,
+  .paused-badge,
   .idle-badge,
   .queued-badge {
     display: inline-flex;
@@ -1571,10 +1576,10 @@
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 11%, transparent);
   }
-  .killed-badge {
-    color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 16%, transparent);
-    border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
+  .paused-badge {
+    color: var(--status-doing);
+    background: color-mix(in srgb, var(--status-doing) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-doing) 40%, transparent);
   }
   .hidden-badge {
     color: var(--status-review);
@@ -1810,8 +1815,8 @@
   .linklike:hover {
     text-decoration: underline;
   }
-  .killed-note {
-    color: var(--danger);
+  .paused-note {
+    color: var(--status-doing);
     font-size: 11px;
   }
   .hidden-note {

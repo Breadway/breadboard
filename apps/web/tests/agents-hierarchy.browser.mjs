@@ -5,7 +5,8 @@ import { chromium } from "playwright";
 // live roster actually has: one root orchestrator with two dozen direct
 // children (one of them a tall card), a second independent root orchestrator,
 // a real nested orchestrator with grandchildren, a hidden orchestrator that
-// still has visible children, unlinked entries and killed entries.
+// still has visible children, unlinked entries, paused children and a killed
+// agent that must disappear from the roster entirely.
 //
 // Run against a scratch server:
 //
@@ -48,7 +49,8 @@ try {
     greatGrandchild: `batch-leaf-${stamp}`,
     tall: `tall-sub-${stamp}`,
     hiddenChild: `hidden-sub-${stamp}`,
-    killedChild: `killed-sub-${stamp}`,
+    pausedChild: `paused-sub-${stamp}`,
+    removedChild: `removed-sub-${stamp}`,
     hiddenOrch: `hidden-orch-${stamp}`,
     hiddenOrchSession: `ses_hidden_orch_${stamp}`,
     hiddenOrchChild: `hidden-orch-child-${stamp}`,
@@ -107,9 +109,14 @@ try {
       await register(names.hiddenChild, `ses_hidden_child_${stamp}`, names.rootSession);
       await claim(names.hiddenChild, `ses_hidden_child_${stamp}`, 1);
       await api("POST", `/api/agents/${names.hiddenChild}/hide`);
-      await register(names.killedChild, `ses_killed_child_${stamp}`, names.rootSession);
-      await claim(names.killedChild, `ses_killed_child_${stamp}`, 1);
-      await api("POST", `/api/agents/${names.killedChild}/kill`);
+      await register(names.pausedChild, `ses_paused_child_${stamp}`, names.rootSession);
+      await claim(names.pausedChild, `ses_paused_child_${stamp}`, 1);
+      await api("POST", `/api/agents/${names.pausedChild}/pause`);
+
+      // Kill removes the agent: no roster row, no card, no placeholder.
+      await register(names.removedChild, `ses_removed_child_${stamp}`, names.rootSession);
+      await claim(names.removedChild, `ses_removed_child_${stamp}`, 1);
+      await api("POST", `/api/agents/${names.removedChild}/kill`);
 
       await register(names.childOrch, names.childOrchSession, names.rootSession);
       await claim(names.childOrch, names.childOrchSession, 1);
@@ -180,7 +187,8 @@ try {
           parent: el.getAttribute("data-parent"),
           direct: Number(el.getAttribute("data-direct-subagents") || 0),
           hidden: el.getAttribute("data-hidden") === "true",
-          killed: el.classList.contains("killed"),
+          paused: el.classList.contains("paused"),
+          pausedBadge: el.querySelector(".paused-badge")?.textContent?.trim() ?? null,
           x: Math.round(r.x),
           y: Math.round(r.y),
           width: Math.round(r.width),
@@ -269,7 +277,13 @@ try {
     assert.match(overflow, new RegExp(`1 more under\\s+${names.grandchildOrch}`, "i"), `${width}: cap says N more under X`);
 
     assert.equal(byName[names.hiddenChild], undefined, `${width}: hidden child is excluded by default`);
-    assert.equal(byName[names.killedChild]?.killed, true, `${width}: killed child still renders as its own card`);
+    assert.equal(byName[names.pausedChild]?.paused, true, `${width}: paused child renders as paused`);
+    assert.equal(byName[names.pausedChild]?.pausedBadge, "paused", `${width}: paused child has a paused badge`);
+    assert.equal(byName[names.removedChild], undefined, `${width}: a killed agent is absent from the cards`);
+    const roster = await context.request.get(`${base}/api/agents/roster`);
+    assert.ok(roster.ok(), `${width}: roster request succeeds`);
+    const rosterNames = (await roster.json()).map((entry) => entry.agent_name);
+    assert.ok(!rosterNames.includes(names.removedChild), `${width}: a killed agent is absent from /api/agents/roster`);
     assert.ok(hiddenSection, `${width}: hidden orchestrator keeps a section header`);
     assert.match(hiddenSection.text, new RegExp(names.hiddenOrch, "i"), `${width}: placeholder names the hidden orchestrator`);
     assert.match(hiddenSection.text, /hidden/i, `${width}: placeholder calls it hidden`);

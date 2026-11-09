@@ -40,8 +40,10 @@ try {
     missingParent: `ses_missing_${stamp}`,
     hidden: `hidden-sub-${stamp}`,
     hiddenSession: `ses_hidden_${stamp}`,
-    killed: `killed-sub-${stamp}`,
-    killedSession: `ses_killed_${stamp}`,
+    paused: `paused-sub-${stamp}`,
+    pausedSession: `ses_paused_${stamp}`,
+    removed: `removed-sub-${stamp}`,
+    removedSession: `ses_removed_${stamp}`,
   };
 
   const fixture = await page.evaluate(
@@ -81,7 +83,7 @@ try {
         [names.child, names.childSession],
         [names.busy, names.busySession],
         [names.hidden, names.hiddenSession],
-        [names.killed, names.killedSession],
+        [names.paused, names.pausedSession],
       ]) {
         await api("POST", "/api/agents/register", {
           agent_name: agent,
@@ -100,7 +102,18 @@ try {
         pid: 12,
       });
       await api("POST", `/api/agents/${names.hidden}/hide`);
-      await api("POST", `/api/agents/${names.killed}/kill`);
+      await api("POST", `/api/agents/${names.paused}/pause`);
+
+      // Kill removes the agent outright: no roster row and no card remain.
+      await api("POST", "/api/agents/register", {
+        agent_name: names.removed,
+        session_id: names.removedSession,
+        parent_session_id: names.orchSession,
+        host: "test",
+        pid: 13,
+      });
+      await claim(names.removed, names.removedSession, 1);
+      await api("POST", `/api/agents/${names.removed}/kill`);
 
       for (const neighbor of [`crumb-${stamp}`, `zesty-${stamp}`]) {
         await api("POST", "/api/agents/register", { agent_name: neighbor, session_id: `ses_${neighbor}` });
@@ -117,6 +130,8 @@ try {
         return {
           name: el.getAttribute("data-agent"),
           hidden: el.getAttribute("data-hidden") === "true",
+          paused: el.classList.contains("paused"),
+          pausedBadge: el.querySelector(".paused-badge")?.textContent?.trim() ?? null,
           claims: Number(el.getAttribute("data-claims") || 0),
           x: Math.round(r.x),
           y: Math.round(r.y),
@@ -175,7 +190,14 @@ try {
     assert.equal(byName[names.orphan].parent, "", `${width}: unresolved parent is not a resolved link`);
     assert.match(byName[names.orphan].rawParent ?? "", new RegExp(names.missingParent), `${width}: unresolved parent keeps raw id`);
     assert.equal(byName[names.hidden], undefined, `${width}: hidden child is excluded by default`);
-    assert.equal(byName[names.killed].parent, names.orch, `${width}: killed child keeps the link`);
+    assert.equal(byName[names.paused].parent, names.orch, `${width}: paused child keeps the link`);
+    assert.equal(byName[names.paused].paused, true, `${width}: paused child renders as paused`);
+    assert.equal(byName[names.paused].pausedBadge, "paused", `${width}: paused child has a paused badge`);
+    assert.equal(byName[names.removed], undefined, `${width}: a killed agent is absent from the roster`);
+    const roster = await context.request.get(`${base}/api/agents/roster`);
+    assert.ok(roster.ok(), `${width}: roster request succeeds`);
+    const rosterNames = (await roster.json()).map((entry) => entry.agent_name);
+    assert.ok(!rosterNames.includes(names.removed), `${width}: a killed agent is absent from /api/agents/roster`);
     assert.equal(tall.subs, "3 live", `${width}: orchestrator counts live subagents`);
 
     const siblings = before.filter(

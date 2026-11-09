@@ -127,13 +127,18 @@ fn all_event_names() -> Vec<&'static str> {
             id: 0,
             key: String::new(),
         },
-        AgentKilled {
+        AgentRemoved {
             agent: String::new(),
-            killed_by: None,
+            removed_by: None,
+            claims_released: 0,
         },
-        AgentRevived {
+        AgentPaused {
             agent: String::new(),
-            revived_by: None,
+            paused_by: None,
+        },
+        AgentResumed {
+            agent: String::new(),
+            resumed_by: None,
         },
         AgentHidden {
             agent: String::new(),
