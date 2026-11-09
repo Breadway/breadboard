@@ -37,3 +37,9 @@ digest_hour  = 8               # local hour 0-23 to send it (BREADBOARD_NOTIFICA
 # opencode_db          = "/var/lib/opencode/opencode.db"
 import_interval_mins = 5       # BREADBOARD_USAGE_IMPORT_INTERVAL_MINS
 spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; 0 disables warnings
+
+[claims]
+# Live exclusive claim budgets. Intents are never capped, and releasing a
+# claim frees capacity immediately. Tune here; no migration is needed.
+max_exclusive_per_agent        = 10   # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT
+max_exclusive_per_orchestrator = 100  # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR

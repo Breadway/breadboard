@@ -793,7 +793,9 @@ server.tool(
     "issues so the Agents tab groups your work; after naming, omit agent_name here. " +
     "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
     "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
-    "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
+    "assigns the card to you. Exclusive claims are budgeted (10 per agent name, 100 per orchestrator " +
+    "tree); a refusal names the limit and the claim to release, and intents are never capped. " +
+    "mode=intent is a soft reservation for work you plan to take later: it " +
     "never moves the card and never blocks anyone. " +
     "The MCP server auto-heartbeats your claim every 60s while this process is alive, so it stays live; " +
     "call release_claim when done and update_claim to report state/PR progress.",

@@ -31,6 +31,35 @@ pub struct Config {
     pub notifications: NotificationConfig,
     pub summary: SummaryConfig,
     pub usage: UsageConfig,
+    pub claims: ClaimBudgetConfig,
+}
+
+/// Live exclusive claim budgets. Kept in config, not the database, so the
+/// limits can be tuned without a migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ClaimBudgetConfig {
+    /// Maximum live exclusive claims one agent name may hold at once.
+    pub max_exclusive_per_agent: i64,
+    /// Maximum live exclusive claims across one orchestrator and every
+    /// registered agent below it. An unlinked agent is its own root.
+    pub max_exclusive_per_orchestrator: i64,
+}
+
+/// The two caps in the form the store uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimLimits {
+    pub per_agent: i64,
+    pub per_orchestrator: i64,
+}
+
+impl Default for ClaimLimits {
+    fn default() -> Self {
+        Self {
+            per_agent: 10,
+            per_orchestrator: 100,
+        }
+    }
 }
 
 /// Token/cost statistics imported from OpenCode's local session database.
@@ -106,6 +135,7 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             summary: SummaryConfig::default(),
             usage: UsageConfig::default(),
+            claims: ClaimBudgetConfig::default(),
         }
     }
 }
@@ -151,6 +181,15 @@ impl Default for UsageConfig {
             opencode_db: default_opencode_db(),
             import_interval_mins: 5,
             spend_warn_usd: 5.0,
+        }
+    }
+}
+
+impl Default for ClaimBudgetConfig {
+    fn default() -> Self {
+        Self {
+            max_exclusive_per_agent: ClaimLimits::default().per_agent,
+            max_exclusive_per_orchestrator: ClaimLimits::default().per_orchestrator,
         }
     }
 }
@@ -246,6 +285,16 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT") {
+            if let Ok(n) = v.parse::<i64>() {
+                self.claims.max_exclusive_per_agent = n.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR") {
+            if let Ok(n) = v.parse::<i64>() {
+                self.claims.max_exclusive_per_orchestrator = n.max(1);
+            }
+        }
     }
 
     /// Where chat attachments are written. Persisted on the same volume as
@@ -262,6 +311,14 @@ impl Config {
     /// SQLite connection string with `?mode=rwc` so the file is created on first run.
     pub fn database_url(&self) -> String {
         format!("sqlite://{}?mode=rwc", self.database_path.display())
+    }
+
+    /// Active live exclusive claim budgets.
+    pub fn claim_limits(&self) -> ClaimLimits {
+        ClaimLimits {
+            per_agent: self.claims.max_exclusive_per_agent.max(1),
+            per_orchestrator: self.claims.max_exclusive_per_orchestrator.max(1),
+        }
     }
 }
 

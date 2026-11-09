@@ -22,12 +22,21 @@ pub struct TestApp {
 }
 
 pub async fn spawn() -> TestApp {
-    spawn_with_forgejo(None).await
+    spawn_full(None, None).await
 }
 
 pub async fn spawn_with_forgejo(fake: Option<(String, String)>) -> TestApp {
+    spawn_full(fake, None).await
+}
+
+/// Spawn with explicit live exclusive claim budgets (per agent, per tree).
+pub async fn spawn_with_claim_limits(per_agent: i64, per_orchestrator: i64) -> TestApp {
+    spawn_full(None, Some((per_agent, per_orchestrator))).await
+}
+
+async fn spawn_full(fake: Option<(String, String)>, claim_limits: Option<(i64, i64)>) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
-    let config = Config {
+    let mut config = Config {
         database_path: tmp.path().join("test.db"),
         listen: "127.0.0.1:0".into(),
         public_url: "http://127.0.0.1".into(),
@@ -42,6 +51,10 @@ pub async fn spawn_with_forgejo(fake: Option<(String, String)>) -> TestApp {
         },
         ..Config::default()
     };
+    if let Some((per_agent, per_orchestrator)) = claim_limits {
+        config.claims.max_exclusive_per_agent = per_agent;
+        config.claims.max_exclusive_per_orchestrator = per_orchestrator;
+    }
 
     let db = db::connect(&config.database_url()).await.unwrap();
     store::ensure_seed(&db).await.unwrap();
