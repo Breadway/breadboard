@@ -407,6 +407,11 @@ export interface AgentRosterEntry {
   killed_by?: number | null;
   killed_by_login?: string | null;
   killed_at?: string | null;
+  /** Hidden from the default Agents view. Claims and chat identity remain. */
+  hidden: boolean;
+  hidden_by?: number | null;
+  hidden_by_login?: string | null;
+  hidden_at?: string | null;
 }
 
 // Mirrors breadboard_core::event::BoardEvent (serde tag = "type").
@@ -434,6 +439,8 @@ export type BoardEvent =
   | { type: "agent.released"; id: number; key: string }
   | { type: "agent.killed"; agent: string; killed_by: number | null }
   | { type: "agent.revived"; agent: string; revived_by: number | null }
+  | { type: "agent.hidden"; agent: string; hidden_by: number | null }
+  | { type: "agent.unhidden"; agent: string; unhidden_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
   | { type: "chat.room.deleted"; id: number };
 
@@ -578,6 +585,10 @@ export class BreadboardClient {
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/kill`);
   reviveAgent = (name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/revive`);
+  hideAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/hide`);
+  unhideAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/unhide`);
   renameAgent = (name: string, new_name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/rename`, {
       new_name,

@@ -8,6 +8,7 @@
     "dev": "vite",
     "build": "vite build",
     "test:browser": "node tests/cycle-defaults.browser.mjs",
+    "test:agents": "node tests/agents-layout.browser.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },

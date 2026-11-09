@@ -586,6 +586,35 @@ class Store {
     }
   }
 
+  /** Hide an agent from the default Agents view; claims and chat stay. */
+  async hideAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.hideAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      const claims =
+        entry.claim_count > 0
+          ? `; it still holds ${entry.claim_count} claim${entry.claim_count === 1 ? "" : "s"}`
+          : "";
+      this.info(`Hid ${entry.agent_name}${claims}`, () => void this.unhideAgent(entry.agent_name));
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't hide ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  async unhideAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.unhideAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.info(`Revealed ${entry.agent_name}`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't reveal ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
   async claim(key: string, body: ClaimUpsert): Promise<boolean> {
     try {
       const c = await api.claimIssue(key, body);
@@ -736,6 +765,8 @@ class Store {
         break;
       case "agent.killed":
       case "agent.revived":
+      case "agent.hidden":
+      case "agent.unhidden":
         void this.loadAgents();
         break;
       case "agent.updated": {

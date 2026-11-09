@@ -90,6 +90,19 @@ pub enum BoardEvent {
         agent: String,
         revived_by: Option<i64>,
     },
+    /// An agent was hidden from the default Agents view. Its claims and chat
+    /// identity are untouched.
+    #[serde(rename = "agent.hidden")]
+    AgentHidden {
+        agent: String,
+        hidden_by: Option<i64>,
+    },
+    /// A hidden agent was revealed again.
+    #[serde(rename = "agent.unhidden")]
+    AgentUnhidden {
+        agent: String,
+        unhidden_by: Option<i64>,
+    },
     /// A chat message was posted to a room or DM.
     #[serde(rename = "chat.message")]
     ChatMessage { room_id: i64, id: i64 },
@@ -116,6 +129,8 @@ impl BoardEvent {
             BoardEvent::AgentReleased { .. } => "bread.board.agent.released",
             BoardEvent::AgentKilled { .. } => "bread.board.agent.killed",
             BoardEvent::AgentRevived { .. } => "bread.board.agent.revived",
+            BoardEvent::AgentHidden { .. } => "bread.board.agent.hidden",
+            BoardEvent::AgentUnhidden { .. } => "bread.board.agent.unhidden",
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
             BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
         }

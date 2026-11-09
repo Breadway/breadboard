@@ -2520,6 +2520,14 @@ struct AgentProfileRow {
     login: String,
 }
 
+#[derive(FromRow)]
+struct AgentHiddenRow {
+    agent_name: String,
+    hidden_by: Option<i64>,
+    hidden_by_login: Option<String>,
+    hidden_at: String,
+}
+
 const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.host, s.pid, s.note, \
     s.user_id, u.login AS login, s.first_seen, s.last_seen, s.killed, s.killed_by, \
     k.login AS killed_by_login, s.killed_at";
@@ -2554,6 +2562,10 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         killed_by: None,
         killed_by_login: None,
         killed_at: None,
+        hidden: false,
+        hidden_by: None,
+        hidden_by_login: None,
+        hidden_at: None,
     }
 }
 
@@ -2800,6 +2812,55 @@ pub async fn revive_agent(
     Ok((roster_entry(db, &name).await?, changed))
 }
 
+/// Hide a known agent name from the default Agents view. Idempotent; claims
+/// and chat identity are deliberately untouched.
+pub async fn hide_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+) -> AppResult<(AgentRosterEntry, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
+    let changed = sqlx::query(
+        "INSERT INTO agent_hidden (agent_name, hidden_by, hidden_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(agent_name) DO NOTHING",
+    )
+    .bind(&name)
+    .bind(user_id)
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?
+    .rows_affected()
+        > 0;
+    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    Ok((entry, changed))
+}
+
+/// Reveal a hidden name. Idempotent; returns whether a row was removed.
+pub async fn unhide_agent(
+    db: &SqlitePool,
+    raw_name: &str,
+) -> AppResult<(Option<AgentRosterEntry>, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+    let changed = sqlx::query("DELETE FROM agent_hidden WHERE agent_name = ?1")
+        .bind(&name)
+        .execute(db)
+        .await?
+        .rows_affected()
+        > 0;
+    let entry = roster_entry(db, &name).await?;
+    if entry.is_none() && !changed {
+        return Err(AppError::NotFound);
+    }
+    Ok((entry, changed))
+}
+
 /// Rename an agent. Claims, profile and session row move in one transaction;
 /// a name owned by another user is refused rather than duplicated.
 pub async fn rename_agent(
@@ -2909,6 +2970,17 @@ pub async fn rename_agent(
             }
             other => AppError::Db(other),
         })?;
+    sqlx::query("UPDATE agent_hidden SET agent_name = ?2 WHERE agent_name = ?1")
+        .bind(&old)
+        .bind(&new)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::Database(dbe) if dbe.is_unique_violation() => {
+                AppError::Conflict("that agent name is already hidden".into())
+            }
+            other => AppError::Db(other),
+        })?;
     tx.commit().await?;
 
     roster_entry(db, &new).await?.ok_or(AppError::NotFound)
@@ -2929,6 +3001,13 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
     .await?;
     let sessions: Vec<AgentSessionRow> =
         sqlx::query_as(&agent_session_join()).fetch_all(db).await?;
+    let hidden: Vec<AgentHiddenRow> = sqlx::query_as(
+        "SELECT h.agent_name, h.hidden_by, u.login AS hidden_by_login, h.hidden_at
+           FROM agent_hidden h
+           LEFT JOIN users u ON u.id = h.hidden_by",
+    )
+    .fetch_all(db)
+    .await?;
 
     let mut map: HashMap<String, AgentRosterEntry> = HashMap::new();
     let mut claim_heartbeat: HashMap<String, DateTime<Utc>> = HashMap::new();
@@ -3006,6 +3085,17 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
         }
     }
 
+    // Hiding is display-only, so it is applied last and never changes counts.
+    for hide in &hidden {
+        let key = hide.agent_name.to_lowercase();
+        if let Some(entry) = map.get_mut(&key) {
+            entry.hidden = true;
+            entry.hidden_by = hide.hidden_by;
+            entry.hidden_by_login = hide.hidden_by_login.clone();
+            entry.hidden_at = Some(parse_ts(&hide.hidden_at));
+        }
+    }
+
     let mut roster: Vec<AgentRosterEntry> = map
         .into_values()
         .map(|mut entry| {
@@ -3025,12 +3115,11 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
             entry
         })
         .collect();
+    // Heartbeats flip live/stale constantly. Keep the server order stable by
+    // sorting only on claim counts and name, with killed names last, so the
+    // masonry layout does not reshuffle every 15 seconds.
     roster.sort_by(|a, b| {
-        let rank = |e: &AgentRosterEntry| match e.status.as_str() {
-            "live" => 0,
-            "stale" => 1,
-            _ => 2,
-        };
+        let rank = |e: &AgentRosterEntry| i64::from(e.killed);
         rank(a)
             .cmp(&rank(b))
             .then_with(|| b.exclusive_count.cmp(&a.exclusive_count))
