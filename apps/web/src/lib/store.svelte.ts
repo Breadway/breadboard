@@ -9,6 +9,7 @@ import {
   type AgentRosterEntry,
   type AgentState,
   type BoardEvent,
+  type ChatRoom,
   type ClaimUpdate,
   type ClaimUpsert,
   type Cycle,
@@ -164,6 +165,12 @@ class Store {
   chatRoom = $state<number | null>(null);
   /** Total unread chat messages for the signed-in human. */
   chatUnread = $state(0);
+  /** Rooms as last fetched, so the Agents card can show a DM link and its
+   *  unread count without opening the Chat view. */
+  chatRooms = $state<ChatRoom[]>([]);
+  /** Pending in-app DM deep link: the Chat view opens or creates this DM. The
+   *  route /chat?dm=<agent> sets it on a cold load too. */
+  chatDm = $state<string | null>(null);
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
@@ -564,6 +571,55 @@ class Store {
       this.roster = roster;
     } catch {
       /* ignore */
+    }
+  }
+
+  /** Fetch the room list once and keep the shared unread total honest for
+   *  views outside Chat. */
+  async loadChatRooms(): Promise<ChatRoom[]> {
+    const next = await api.listChatRooms();
+    this.chatRooms = next;
+    this.chatUnread = next.reduce((n, r) => n + r.unread, 0);
+    return next;
+  }
+
+  /** The DM shared with this agent, when it already exists. */
+  dmRoomFor(agentName: string): ChatRoom | undefined {
+    const wanted = agentName.trim().toLowerCase();
+    return this.chatRooms.find(
+      (r) =>
+        r.kind === "dm" &&
+        r.members.some((m) => m.toLowerCase() === `agent:${wanted}`),
+    );
+  }
+
+  /** The agent on the other side of a DM room, for URL syncing. */
+  chatDmAgent(room: ChatRoom | undefined): string | null {
+    if (!room || room.kind !== "dm") return null;
+    const member = room.members.find((m) => m.toLowerCase().startsWith("agent:"));
+    return member ? member.slice("agent:".length) : null;
+  }
+
+  /** Stable, copyable deep link to the DM with an agent. */
+  chatDmHref(agentName: string): string {
+    return `/chat?dm=${encodeURIComponent(agentName)}`;
+  }
+
+  /** Land on the chat page and open (or create) the DM with this agent. */
+  openAgentDm(agentName: string) {
+    this.chatFocus = null;
+    this.chatDm = agentName;
+    this.view = "chat";
+    this.updateChatUrl(agentName);
+  }
+
+  /** Keep the address bar on the room currently open. One agent name yields
+   *  the copyable DM deep link; a shared room keeps /chat; leaving Chat falls
+   *  back to the board route. */
+  updateChatUrl(agentName: string | null, inChat = false) {
+    const href = agentName ? this.chatDmHref(agentName) : inChat ? "/chat" : "/";
+    if (location.pathname + location.search !== href) {
+      history.replaceState(null, "", href);
     }
   }
 
