@@ -2095,7 +2095,13 @@ async fn session_links_and_required_handoff() {
     assert_eq!(back.as_array().unwrap()[0]["key"], key);
 
     // A planned exclusive claim with no evidence never held work: explicit
-    // no_note is allowed and writes no handoff.
+    // no_note is allowed and writes no handoff. The name's holder has to look
+    // stale first: BB-170 refuses a second live session on the same name.
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
+        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
     assert_eq!(
         claim("ses_beta", "planned", "exclusive", None)
             .await
@@ -2130,7 +2136,14 @@ async fn session_links_and_required_handoff() {
         .unwrap();
     assert_eq!(issue["sessions"].as_array().unwrap().len(), 2);
 
-    // A planned claim with a branch did hold work: no_note is refused.
+    // A planned claim with a branch did hold work: no_note is refused. The
+    // previous session has to look stale before a new session can reuse the
+    // name (BB-170).
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
+        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
     assert_eq!(
         claim("ses_delta", "planned", "exclusive", Some("fix/x"))
             .await
@@ -2174,7 +2187,12 @@ async fn session_links_and_required_handoff() {
     assert_eq!(issue["sessions"].as_array().unwrap().len(), 3);
 
     // An intent is always a no-work claim; releasing it without a note still
-    // asks for the explicit opt-in.
+    // asks for the explicit opt-in. Stale the holder first for BB-170.
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
+        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
     let intent = claim("ses_gamma", "implementing", "intent", None).await;
     assert_eq!(intent.status(), 201);
     let refused = c
