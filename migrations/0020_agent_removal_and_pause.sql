@@ -45,13 +45,13 @@ FROM agent_sessions s
 WHERE s.killed = 1;
 
 DELETE FROM chat_pushes
- WHERE member IN ('agent:' || (SELECT agent_name FROM agent_sessions WHERE killed = 1));
+ WHERE member IN (SELECT 'agent:' || agent_name FROM agent_sessions WHERE killed = 1);
 
 DELETE FROM chat_push_subs
- WHERE member IN ('agent:' || (SELECT agent_name FROM agent_sessions WHERE killed = 1));
+ WHERE member IN (SELECT 'agent:' || agent_name FROM agent_sessions WHERE killed = 1);
 
 DELETE FROM chat_reads
- WHERE member IN ('agent:' || (SELECT agent_name FROM agent_sessions WHERE killed = 1));
+ WHERE member IN (SELECT 'agent:' || agent_name FROM agent_sessions WHERE killed = 1);
 
 DELETE FROM agent_hidden
  WHERE lower(agent_name) IN (SELECT agent_name FROM agent_sessions WHERE killed = 1);
