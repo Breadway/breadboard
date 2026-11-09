@@ -368,6 +368,11 @@ pub struct AgentMessage {
 pub struct NewChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Session speaking as `agent_name`. When set, a live name held by a
+    /// different session is refused instead of letting two sessions share the
+    /// identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     /// Room id or shared-room name (`lobby`). Ignored when `to` is set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub room: Option<String>,
@@ -438,6 +443,8 @@ pub struct AckChatPushes {
 pub struct OpenDm {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     pub with: String,
 }
 

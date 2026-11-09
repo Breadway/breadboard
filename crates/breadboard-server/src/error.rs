@@ -19,6 +19,16 @@ pub enum AppError {
     ForbiddenMsg(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    /// A live agent name is already held by a different session. The response
+    /// carries the holder session id and free alternatives so a registering
+    /// client can rename before claiming instead of guessing.
+    #[error("{message}")]
+    AgentNameTaken {
+        message: String,
+        agent_name: String,
+        session_id: Option<String>,
+        alternatives: Vec<String>,
+    },
     #[error("{0}")]
     TooLarge(String),
     #[error("{0}")]
@@ -59,6 +69,23 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::ForbiddenMsg(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::AgentNameTaken {
+                message,
+                agent_name,
+                session_id,
+                alternatives,
+            } => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": message,
+                        "agent_name": agent_name,
+                        "session_id": session_id,
+                        "alternatives": alternatives,
+                    })),
+                )
+                    .into_response();
+            }
             AppError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
             AppError::UnsupportedMediaType(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m.clone()),
             AppError::Expired => (StatusCode::GONE, "expired".to_string()),

@@ -680,12 +680,14 @@ async fn chat_author(
     app: &AppState,
     user: &AuthUser,
     agent_name: Option<&str>,
+    session_id: Option<&str>,
 ) -> AppResult<(String, String, breadboard_core::ChatAuthorKind)> {
     match agent_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => {
             // Unknown names auto-register so a fresh session is listed from
-            // its first write. Pause blocks inbound pushes, not speaking.
-            store::ensure_agent_writable(&app.db, user.0.id, name, None).await?;
+            // its first write. A live name held by a different session is a
+            // 409 here too, so chat cannot merge two sessions into one author.
+            store::ensure_agent_writable(&app.db, user.0.id, name, session_id).await?;
             if !store::user_has_agent(&app.db, user.0.id, name).await? {
                 return Err(crate::error::AppError::forbidden());
             }
@@ -1051,7 +1053,13 @@ pub async fn open_dm(
     user: AuthUser,
     Json(body): Json<breadboard_core::dto::OpenDm>,
 ) -> AppResult<Json<breadboard_core::ChatRoom>> {
-    let (author, _, _) = chat_author(&app, &user, body.agent_name.as_deref()).await?;
+    let (author, _, _) = chat_author(
+        &app,
+        &user,
+        body.agent_name.as_deref(),
+        body.session_id.as_deref(),
+    )
+    .await?;
     let peer = store::agent_member(&body.with);
     if peer == author {
         return Err(crate::error::AppError::bad_request(
@@ -1257,7 +1265,13 @@ pub async fn post_chat_message(
             "message must be 2000 characters or fewer",
         ));
     }
-    let (author, display, kind) = chat_author(&app, &user, body.agent_name.as_deref()).await?;
+    let (author, display, kind) = chat_author(
+        &app,
+        &user,
+        body.agent_name.as_deref(),
+        body.session_id.as_deref(),
+    )
+    .await?;
 
     let room = if let Some(to) = body.to.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let peer = store::agent_member(to);

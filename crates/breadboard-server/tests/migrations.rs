@@ -24,6 +24,152 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../../migrations/0019_agent_parent_session.sql"),
 ];
 
+/// Read migrations from the repository in filename order, stopping before the
+/// named file so a migration can be tested against realistic pre-state.
+fn migrations_before(stop: &str) -> Vec<String> {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+    let mut files: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".sql") && name.as_str() < stop)
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .map(|name| {
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../migrations")
+                    .join(name),
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// BB-170: existing duplicate sessions on one name resolve to the most
+/// recently active session. Claims from the displaced session stay in place
+/// and the displaced id is recorded so it is discoverable, not silently lost.
+#[tokio::test]
+async fn migration_0028_resolves_duplicate_live_names_without_losing_claims() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = SqlitePool::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("duplicate-names.db").display()
+    ))
+    .await
+    .unwrap();
+    for sql in migrations_before("0028") {
+        sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO projects (id, key, name, next_number) VALUES (1, 'AGENT', 'Agent work', 3)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, key) in [(1_i64, "AGENT-1"), (2_i64, "AGENT-2")] {
+        sqlx::query(
+            "INSERT INTO issues
+                (id, key, project_id, title, created_at, updated_at)
+             VALUES (?1, ?2, 1, 'duplicate name fixture',
+                     '2026-11-09T08:00:00Z', '2026-11-09T08:00:00Z')",
+        )
+        .bind(id)
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // The production shape: one name row already overwritten by the newest
+    // registration, while the older session's claim is still attributed to it.
+    sqlx::query(
+        "INSERT INTO agent_sessions
+            (agent_name, session_id, user_id, first_seen, last_seen)
+         VALUES ('duplicate', 'ses_old', 1, '2026-11-09T08:00:00Z', '2026-11-09T08:10:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (issue_id, session_id, heartbeat) in [
+        (1_i64, "ses_old", "2026-11-09T08:10:00Z"),
+        (2_i64, "ses_new", "2026-11-09T09:30:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent_claims
+                (issue_id, claimed_by, agent_name, mode, session_id, state,
+                 board_status, claimed_at, updated_at, last_heartbeat)
+             VALUES (?1, 1, 'duplicate', 'exclusive', ?2, 'implementing',
+                     'doing', '2026-11-09T08:00:00Z', ?3, ?3)",
+        )
+        .bind(issue_id)
+        .bind(session_id)
+        .bind(heartbeat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0028_unique_live_agent_name.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let holder: (String, String) = sqlx::query_as(
+        "SELECT session_id, last_seen FROM agent_sessions WHERE agent_name = 'duplicate'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(holder.0, "ses_new", "newest session must hold the name");
+    assert_eq!(holder.1, "2026-11-09T09:30:00Z");
+
+    let claims: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT issue_id, session_id FROM agent_claims
+          WHERE agent_name = 'duplicate' ORDER BY issue_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        claims,
+        vec![
+            (1, "ses_old".to_string()),
+            (2, "ses_new".to_string())
+        ],
+        "no claim may be dropped or reattributed"
+    );
+
+    let conflicts: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT agent_name, session_id, holder_session_id
+           FROM agent_name_conflicts",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        conflicts,
+        vec![(
+            "duplicate".to_string(),
+            "ses_old".to_string(),
+            "ses_new".to_string()
+        )],
+        "the displaced session must stay discoverable"
+    );
+}
+
 #[tokio::test]
 async fn migration_removes_pre_existing_killed_rows_and_keeps_audit() {
     let tmp = tempfile::tempdir().unwrap();

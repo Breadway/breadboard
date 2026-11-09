@@ -685,6 +685,12 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    /** Structured fields some errors carry, e.g. a 409 name collision. */
+    readonly details?: {
+      agent_name?: string;
+      session_id?: string | null;
+      alternatives?: string[];
+    },
   ) {
     super(message);
     this.name = "ApiError";
@@ -714,13 +720,26 @@ export class BreadboardClient {
     });
     if (!res.ok) {
       let msg = res.statusText;
+      let details: ConstructorParameters<typeof ApiError>[2];
       try {
-        const j = (await res.json()) as { error?: string };
+        const j = (await res.json()) as {
+          error?: string;
+          agent_name?: string;
+          session_id?: string | null;
+          alternatives?: string[];
+        };
         if (j?.error) msg = j.error;
+        if (j?.agent_name || j?.session_id || j?.alternatives) {
+          details = {
+            agent_name: j.agent_name,
+            session_id: j.session_id,
+            alternatives: j.alternatives,
+          };
+        }
       } catch {
         /* keep statusText */
       }
-      throw new ApiError(res.status, msg);
+      throw new ApiError(res.status, msg, details);
     }
     if (res.status === 204) return undefined as T;
     const text = await res.text();
@@ -955,6 +974,7 @@ export class BreadboardClient {
     room?: string;
     to?: string;
     agent_name?: string;
+    session_id?: string;
     uploads?: number[];
   }) => this.req<ChatMessage>("POST", "/api/chat/messages", body);
 
@@ -995,8 +1015,8 @@ export class BreadboardClient {
   setChatPushSub = (room: string, enabled: boolean, agent?: string) =>
     this.req<void>("PUT", "/api/chat/push-subs", { room, enabled, agent_name: agent });
 
-  openDm = (withAgent: string, agent_name?: string) =>
-    this.req<ChatRoom>("POST", "/api/chat/dm", { with: withAgent, agent_name });
+  openDm = (withAgent: string, agent_name?: string, session_id?: string) =>
+    this.req<ChatRoom>("POST", "/api/chat/dm", { with: withAgent, agent_name, session_id });
 
   setAgentMessage = (agent_name: string, message: string) =>
     this.req<{ agent_name: string; message: string | null }>("PUT", "/api/agents/message", {

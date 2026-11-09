@@ -2898,8 +2898,14 @@ async fn upsert_agent_session(
     pid: Option<i64>,
     note: Option<&str>,
     ts: &str,
-) -> AppResult<()> {
-    sqlx::query(
+) -> AppResult<bool> {
+    // The conflict guard is atomic: the UPDATE only applies when the caller
+    // owns the row, does not identify itself (older clients), or the holder
+    // has stopped heartbeating past the live window. A false WHERE clause
+    // leaves the row untouched and rows_affected() == 0, which callers turn
+    // into a name-taken refusal.
+    let stale_before = (Utc::now() - chrono::Duration::seconds(AGENT_LIVE_SECS)).to_rfc3339();
+    let result = sqlx::query(
         "INSERT INTO agent_sessions
             (agent_name, session_id, parent_session_id, host, pid, note, user_id,
              first_seen, last_seen)
@@ -2911,7 +2917,11 @@ async fn upsert_agent_session(
             pid                = COALESCE(excluded.pid, agent_sessions.pid),
             note               = COALESCE(excluded.note, agent_sessions.note),
             user_id            = COALESCE(agent_sessions.user_id, excluded.user_id),
-            last_seen          = excluded.last_seen",
+            last_seen          = excluded.last_seen
+         WHERE ?2 IS NULL
+            OR agent_sessions.session_id IS NULL
+            OR agent_sessions.session_id IS ?2
+            OR julianday(agent_sessions.last_seen) < julianday(?9)",
     )
     .bind(name)
     .bind(session_id)
@@ -2921,9 +2931,63 @@ async fn upsert_agent_session(
     .bind(note)
     .bind(user_id)
     .bind(ts)
+    .bind(&stale_before)
     .execute(db)
     .await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
+}
+
+/// Which session currently holds a live name, if any. Used to explain a
+/// refusal rather than leaving the caller with a bare 409.
+async fn live_name_holder(db: &SqlitePool, name: &str) -> AppResult<Option<String>> {
+    let row: Option<(Option<String>, String)> =
+        sqlx::query_as("SELECT session_id, last_seen FROM agent_sessions WHERE agent_name = ?1")
+            .bind(name)
+            .fetch_optional(db)
+            .await?;
+    let Some((session_id, last_seen)) = row else {
+        return Ok(None);
+    };
+    if (Utc::now() - parse_ts(&last_seen)).num_seconds() < AGENT_LIVE_SECS {
+        Ok(session_id)
+    } else {
+        Ok(None)
+    }
+}
+
+/// Build the 409 used by registration, claiming and chat when a live name is
+/// already held by a different session. Registration gets curated
+/// alternatives in the same response so the caller can rename before claiming.
+async fn agent_name_taken(db: &SqlitePool, name: &str) -> AppError {
+    let holder = live_name_holder(db, name).await.ok().flatten();
+    let alternatives = match known_agent_names(db).await {
+        Ok(known) => names::pick_names(&known, 3),
+        Err(_) => Vec::new(),
+    };
+    let message = match holder.as_deref() {
+        Some(session) => format!(
+            "agent name '{name}' is live on session {session}; choose another name{}",
+            alternatives_suffix(&alternatives)
+        ),
+        None => format!(
+            "agent name '{name}' is live on another session; choose another name{}",
+            alternatives_suffix(&alternatives)
+        ),
+    };
+    AppError::AgentNameTaken {
+        message,
+        agent_name: name.to_string(),
+        session_id: holder,
+        alternatives,
+    }
+}
+
+fn alternatives_suffix(alternatives: &[String]) -> String {
+    if alternatives.is_empty() {
+        String::new()
+    } else {
+        format!(" (alternatives: {})", alternatives.join(", "))
+    }
 }
 
 /// Register or refresh one session. No `agent_name` assigns a unique curated
@@ -2991,7 +3055,7 @@ pub async fn register_agent(
     };
 
     let ts = now_rfc3339();
-    upsert_agent_session(
+    let registered = upsert_agent_session(
         db,
         user_id,
         &name,
@@ -3003,6 +3067,9 @@ pub async fn register_agent(
         &ts,
     )
     .await?;
+    if !registered {
+        return Err(agent_name_taken(db, &name).await);
+    }
 
     if first_registration {
         let detail = match (
@@ -3067,7 +3134,7 @@ pub async fn ensure_agent_writable(
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
 
-    upsert_agent_session(
+    let registered = upsert_agent_session(
         db,
         user_id,
         &name,
@@ -3079,6 +3146,9 @@ pub async fn ensure_agent_writable(
         &now_rfc3339(),
     )
     .await?;
+    if !registered {
+        return Err(agent_name_taken(db, &name).await);
+    }
     Ok(name)
 }
 
