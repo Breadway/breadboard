@@ -80,6 +80,20 @@ Agents claim issues on top of this workflow. There are two claim modes:
   and it never moves or assigns the card. It shows as "queued" on the Agents
   page and issue drawer.
 
+Exclusive work is budgeted. One agent name may hold at most **10** live
+exclusive claims, and one orchestrator tree (the orchestrator plus every
+registered agent below it through `parent_session_id`) may hold at most
+**100**. An unlinked agent is its own tree. Intents are not capped: only
+exclusive claims count. Releasing a claim, removing its agent, or moving an
+issue out from under a live claim frees capacity immediately. A refused claim
+returns `409` naming the limit that was hit and which claim to release.
+Promoting a queued intent into an exclusive claim goes through the same check.
+Both defaults live in `breadboard.toml` (`[claims] max_exclusive_per_agent`
+and `max_exclusive_per_orchestrator`, env
+`BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT` /
+`BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR`) so they can be tuned
+without a migration.
+
 Releasing keeps the status and only removes the tint. A claim with no
 heartbeat for 5+ minutes reads as **stale** for exclusive work on the Agents
 page but never auto-expires: only an explicit release (or a new claim after
@@ -97,8 +111,9 @@ the panel does not offer filters that could only ever be empty.
 ### Agent ownership and orchestration
 
 Ownership is per issue, not per agent: one agent may hold many exclusive
-claims, and the Agents tab groups them under that agent with each issue's
-state and an overall done/total ring.
+claims up to its budget (10 per name, 100 per orchestrator tree), and the
+Agents tab groups them under that agent with each issue's state and an overall
+done/total ring.
 
 A claim with no heartbeat for 5+ minutes is shown with a clock and marked
 **stale**, never as `blocked`: stale means "may be abandoned", blocked is a
@@ -238,7 +253,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
-| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, message?, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, message?, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Exclusive also enforces the live budgets (10 per agent name, 100 per orchestrator tree) and returns `409` naming the limit and what to release; intents are not capped. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
 | `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. `?agent=` / `?mode=exclusive|intent` pick one when you hold several; with neither, the exclusive claim wins over an intent and the freshest wins otherwise. Only the claiming user may update, and a mismatched `session_id` is `409`. `pr_url` must be an absolute http(s) URL. A newly set `pr_url` also comments the link on the issue once (synced to Forgejo). Emits `agent.updated` |
 | `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
 | `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
@@ -260,7 +275,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
 | `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name the server resolves to its registered session when `parent_session_id` is absent. Returns `{ agent_name, alternatives[], live, paused, session_id, parent_session_id, orchestrator, orchestrator_session_id }`; registration refreshes a paused name without unpausing it. `200` |
-| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, paused, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, paused_by, paused_by_login, paused_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `live` is a heartbeat inside 120 seconds on a name that is not paused; `status` is `live`, `stale` or `paused`. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, paused, status, message, state, claim_count, exclusive_count, intent_count, exclusive_limit, orchestrator_exclusive_count, orchestrator_exclusive_limit, user_id, login, paused_by, paused_by_login, paused_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `live` is a heartbeat inside 120 seconds on a name that is not paused; `status` is `live`, `stale` or `paused`. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id. `exclusive_limit` is the per-agent claim cap and `orchestrator_exclusive_count` / `orchestrator_exclusive_limit` are the live usage and cap for the whole tree this name belongs to (an unlinked agent is its own one-name tree) |
 | `POST` | `/api/agents/{name}/kill` | remove the lowercased name: release every claim it holds (exclusive and intent), delete its session row, profile, hidden flag and chat push/subscription/read state, write one server-side `agent_removals` audit row, and emit `agent.removed`. Returns `{ agent_name, removed, claims_released, profile_removed }`. `404` for an unknown name, with no row created (BB-145) |
 | `POST` | `/api/agents/{name}/pause` | pause a known name: keep its claims, profile and roster row, set `paused_by`/`paused_at`, drop pending chat pushes and emit `agent.paused`. New claims are refused with `403`; heartbeats and registration still refresh the row. Idempotent. `404` for an unknown name |
 | `POST` | `/api/agents/{name}/resume` | clear the pause flag and emit `agent.resumed`. Idempotent. `404` for an unknown name |

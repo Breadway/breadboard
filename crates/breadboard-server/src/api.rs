@@ -1339,7 +1339,7 @@ pub async fn register_agent(
     Json(body): Json<breadboard_core::dto::AgentRegister>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRegistration>> {
     Ok(Json(
-        store::register_agent(&app.db, user.0.id, &body).await?,
+        store::register_agent(&app.db, user.0.id, &body, &app.config.claim_limits()).await?,
     ))
 }
 
@@ -1348,7 +1348,9 @@ pub async fn agent_roster(
     State(app): State<AppState>,
     _user: AuthUser,
 ) -> AppResult<Json<Vec<breadboard_core::dto::AgentRosterEntry>>> {
-    Ok(Json(store::agent_roster(&app.db).await?))
+    Ok(Json(
+        store::agent_roster(&app.db, &app.config.claim_limits()).await?,
+    ))
 }
 
 /// Kill a name: remove it from every view, release its claims, free the name
@@ -1377,7 +1379,8 @@ pub async fn pause_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::pause_agent(&app.db, user.0.id, &name).await?;
+    let (entry, changed) =
+        store::pause_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentPaused {
             agent: entry.agent_name.clone(),
@@ -1395,7 +1398,7 @@ pub async fn resume_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::resume_agent(&app.db, &name).await?;
+    let (entry, changed) = store::resume_agent(&app.db, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentResumed {
             agent: entry.agent_name.clone(),
@@ -1413,7 +1416,8 @@ pub async fn hide_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::hide_agent(&app.db, user.0.id, &name).await?;
+    let (entry, changed) =
+        store::hide_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentHidden {
             agent: entry.agent_name.clone(),
@@ -1430,7 +1434,7 @@ pub async fn unhide_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::unhide_agent(&app.db, &name).await?;
+    let (entry, changed) = store::unhide_agent(&app.db, &name, &app.config.claim_limits()).await?;
     let entry = entry.ok_or(crate::error::AppError::NotFound)?;
     if changed {
         let event = BoardEvent::AgentUnhidden {
@@ -1452,7 +1456,14 @@ pub async fn rename_agent(
     Json(body): Json<breadboard_core::dto::AgentRename>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
     Ok(Json(
-        store::rename_agent(&app.db, user.0.id, &name, &body.new_name).await?,
+        store::rename_agent(
+            &app.db,
+            user.0.id,
+            &name,
+            &body.new_name,
+            &app.config.claim_limits(),
+        )
+        .await?,
     ))
 }
 
@@ -1529,7 +1540,14 @@ pub async fn claim_issue(
     )
     .await?;
     let mode = body.mode.unwrap_or(ClaimMode::Exclusive);
-    let claim = store::insert_claim(&app.db, &issue, user.0.id, &body).await?;
+    let claim = store::insert_claim(
+        &app.db,
+        &issue,
+        user.0.id,
+        &body,
+        &app.config.claim_limits(),
+    )
+    .await?;
     let audit = store::log_claim_event(
         &app.db,
         issue.id,

@@ -14,6 +14,7 @@ use breadboard_core::{
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqlitePool};
 
+use crate::config::ClaimLimits;
 use crate::dto::{
     AgentRegister, AgentRegistration, AgentRemoval, AgentRosterEntry, IssueFilter, IssuePatch,
     NewCycle, NewEpic, NewIssue, NewProject,
@@ -2150,6 +2151,138 @@ pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bo
     Ok(n > 0)
 }
 
+/// Live exclusive claim usage plus the resolved orchestrator tree (BB-154).
+///
+/// The tree comes from `agent_sessions`: a name whose `parent_session_id`
+/// matches another registered session's `session_id` rolls up under that
+/// parent. An unlinked name (or a parent that is not a registered session) is
+/// its own root, which matches the roster's resolution rules.
+#[derive(Debug, Default)]
+pub struct ClaimUsage {
+    /// Lowercased agent name -> live exclusive claims.
+    pub counts: HashMap<String, i64>,
+    /// Lowercased agent name -> orchestrator tree root name.
+    pub roots: HashMap<String, String>,
+    /// Root name -> live exclusive claims across the whole tree.
+    pub totals: HashMap<String, i64>,
+}
+
+impl ClaimUsage {
+    pub fn root_of(&self, name: &str) -> String {
+        let key = name.trim().to_lowercase();
+        self.roots.get(&key).cloned().unwrap_or(key)
+    }
+
+    pub fn own_count(&self, name: &str) -> i64 {
+        self.counts
+            .get(&name.trim().to_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn tree_count(&self, name: &str) -> i64 {
+        self.totals.get(&self.root_of(name)).copied().unwrap_or(0)
+    }
+}
+
+/// Walk up `parent_session_id` until a name has no registered parent. A
+/// repeated name in one chain is a cycle and stops the walk at the repeat.
+fn tree_root(name: &str, parents: &HashMap<String, String>) -> String {
+    let mut current = name.to_string();
+    let mut seen = HashSet::new();
+    while let Some(parent) = parents.get(&current) {
+        if !seen.insert(current.clone()) {
+            break;
+        }
+        current = parent.clone();
+    }
+    current
+}
+
+/// Snapshot exclusive claim counts and the orchestrator forest in one pass.
+pub async fn claim_usage(db: &SqlitePool) -> AppResult<ClaimUsage> {
+    let count_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT lower(agent_name) AS name, COUNT(*) AS n
+           FROM agent_claims
+          WHERE mode = 'exclusive'
+          GROUP BY lower(agent_name)",
+    )
+    .fetch_all(db)
+    .await?;
+    let counts: HashMap<String, i64> = count_rows.into_iter().collect();
+
+    let sessions: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT lower(agent_name), session_id, parent_session_id FROM agent_sessions",
+    )
+    .fetch_all(db)
+    .await?;
+    let by_session: HashMap<String, String> = sessions
+        .iter()
+        .filter_map(|(name, session, _)| session.clone().map(|id| (id, name.clone())))
+        .collect();
+    let mut parents: HashMap<String, String> = HashMap::new();
+    for (name, _, parent_session) in &sessions {
+        if let Some(parent_name) = parent_session.as_ref().and_then(|id| by_session.get(id)) {
+            if parent_name != name {
+                parents.insert(name.clone(), parent_name.clone());
+            }
+        }
+    }
+
+    let mut roots: HashMap<String, String> = HashMap::new();
+    // A name can appear in both `counts` and `sessions`, so resolve each name
+    // once instead of summing its claims once per source.
+    for name in sessions
+        .iter()
+        .map(|(name, _, _)| name)
+        .chain(counts.keys())
+    {
+        if !roots.contains_key(name) {
+            roots.insert(name.clone(), tree_root(name, &parents));
+        }
+    }
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    for (name, n) in &counts {
+        let root = roots.get(name).cloned().unwrap_or_else(|| name.clone());
+        *totals.entry(root).or_insert(0) += n;
+    }
+
+    Ok(ClaimUsage {
+        counts,
+        roots,
+        totals,
+    })
+}
+
+/// Refuse a new exclusive claim when either live budget is already full.
+/// Intents never call this: only exclusive claims are capped.
+pub async fn ensure_claim_budget(
+    db: &SqlitePool,
+    agent_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<()> {
+    let usage = claim_usage(db).await?;
+    let name = agent_name.trim().to_lowercase();
+    let own = usage.own_count(&name);
+    if own >= limits.per_agent {
+        return Err(AppError::Conflict(format!(
+            "'{name}' already holds {own} live exclusive claims (limit {} per agent); \
+             release a claim before claiming another",
+            limits.per_agent
+        )));
+    }
+    let root = usage.root_of(&name);
+    let total = usage.tree_count(&name);
+    if total >= limits.per_orchestrator {
+        return Err(AppError::Conflict(format!(
+            "orchestrator '{root}' and its subagents already hold {total} live exclusive claims \
+             (limit {} per orchestrator); release a claim before claiming another",
+            limits.per_orchestrator
+        )));
+    }
+    Ok(())
+}
+
 pub async fn get_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
     let row: Option<AgentClaimRow> =
         sqlx::query_as(&format!("{} WHERE c.id = ?1", agent_claim_join()))
@@ -2202,6 +2335,7 @@ pub async fn insert_claim(
     issue: &Issue,
     claimed_by: i64,
     input: &crate::dto::ClaimUpsert,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentClaim> {
     input.validate().map_err(AppError::BadRequest)?;
     let mode = input.mode.unwrap_or(ClaimMode::Exclusive);
@@ -2222,6 +2356,13 @@ pub async fn insert_claim(
 
     if mode == ClaimMode::Exclusive && has_exclusive_claim(db, issue.id).await? {
         return Err(AppError::Conflict("issue is already claimed".into()));
+    }
+
+    // Budgets cover new exclusive work and promoting a queued intent into an
+    // exclusive claim: both arrive here as `mode = exclusive`. The intent is
+    // still in place, so a refusal leaves the soft reservation untouched.
+    if mode == ClaimMode::Exclusive {
+        ensure_claim_budget(db, &input.agent_name, limits).await?;
     }
 
     // Taking the work makes the same agent's queued intent redundant, and
@@ -2697,6 +2838,9 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         claim_count: 0,
         exclusive_count: 0,
         intent_count: 0,
+        exclusive_limit: 0,
+        orchestrator_exclusive_count: 0,
+        orchestrator_exclusive_limit: 0,
         user_id: None,
         login: None,
         paused_by: None,
@@ -2788,6 +2932,7 @@ pub async fn register_agent(
     db: &SqlitePool,
     user_id: i64,
     input: &AgentRegister,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentRegistration> {
     let explicit = input
         .agent_name
@@ -2894,7 +3039,9 @@ pub async fn register_agent(
         alternatives = names::pick_names(&known, 3);
     }
 
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     Ok(AgentRegistration {
         agent_name: name,
         alternatives,
@@ -3055,6 +3202,7 @@ pub async fn pause_agent(
     db: &SqlitePool,
     user_id: i64,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3088,7 +3236,9 @@ pub async fn pause_agent(
         .execute(db)
         .await?;
 
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     if changed {
         crate::agent_events::record_best_effort(
             db,
@@ -3106,7 +3256,11 @@ pub async fn pause_agent(
 
 /// Resume a paused name. Idempotent; returns whether the call changed
 /// anything. Unknown names are a 404.
-pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRosterEntry, bool)> {
+pub async fn resume_agent(
+    db: &SqlitePool,
+    raw_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
     let known = known_agent_names(db).await?;
@@ -3139,7 +3293,9 @@ pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRo
         )
         .await;
     }
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     Ok((entry, changed))
 }
 
@@ -3149,6 +3305,7 @@ pub async fn hide_agent(
     db: &SqlitePool,
     user_id: i64,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3168,7 +3325,9 @@ pub async fn hide_agent(
     .await?
     .rows_affected()
         > 0;
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     if changed {
         crate::agent_events::record_best_effort(
             db,
@@ -3188,6 +3347,7 @@ pub async fn hide_agent(
 pub async fn unhide_agent(
     db: &SqlitePool,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(Option<AgentRosterEntry>, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3197,7 +3357,7 @@ pub async fn unhide_agent(
         .await?
         .rows_affected()
         > 0;
-    let entry = roster_entry(db, &name).await?;
+    let entry = roster_entry(db, &name, limits).await?;
     if entry.is_none() && !changed {
         return Err(AppError::NotFound);
     }
@@ -3222,13 +3382,16 @@ pub async fn rename_agent(
     user_id: i64,
     raw_old: &str,
     raw_new: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentRosterEntry> {
     let old = names::normalize(raw_old);
     let new = names::normalize(raw_new);
     validate_agent_name(&old)?;
     validate_agent_name(&new)?;
     if old == new {
-        return roster_entry(db, &old).await?.ok_or(AppError::NotFound);
+        return roster_entry(db, &old, limits)
+            .await?
+            .ok_or(AppError::NotFound);
     }
 
     let known = known_agent_names(db).await?;
@@ -3326,13 +3489,19 @@ pub async fn rename_agent(
         })?;
     tx.commit().await?;
 
-    roster_entry(db, &new).await?.ok_or(AppError::NotFound)
+    roster_entry(db, &new, limits)
+        .await?
+        .ok_or(AppError::NotFound)
 }
 
 /// The union of sessions, profiles and claims, deduplicated by lowercased
 /// agent name. This is what the Agents page renders.
-pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
+pub async fn agent_roster(
+    db: &SqlitePool,
+    limits: &ClaimLimits,
+) -> AppResult<Vec<AgentRosterEntry>> {
     let claims = list_claims(db).await?;
+    let usage = claim_usage(db).await?;
     let profiles: Vec<AgentProfileRow> = sqlx::query_as(
         "SELECT lower(p.agent_name) AS agent_name, p.message, p.user_id,
                 u.login AS login
@@ -3456,6 +3625,11 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
             } else {
                 "stale".to_string()
             };
+            // Budget visibility: per-agent usage is `exclusive_count`, and the
+            // orchestrator roll-up counts the whole tree this name belongs to.
+            entry.exclusive_limit = limits.per_agent;
+            entry.orchestrator_exclusive_count = usage.tree_count(&entry.agent_name);
+            entry.orchestrator_exclusive_limit = limits.per_orchestrator;
             entry
         })
         .collect();
@@ -3495,9 +3669,13 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
     Ok(roster)
 }
 
-pub async fn roster_entry(db: &SqlitePool, name: &str) -> AppResult<Option<AgentRosterEntry>> {
+pub async fn roster_entry(
+    db: &SqlitePool,
+    name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<Option<AgentRosterEntry>> {
     let name = names::normalize(name);
-    Ok(agent_roster(db)
+    Ok(agent_roster(db, limits)
         .await?
         .into_iter()
         .find(|entry| entry.agent_name == name))
