@@ -77,12 +77,12 @@ try {
       const hiddenIdle = `hidden-idle-${stamp}`;
       await api("POST", "/api/agents/register", { agent_name: hiddenIdle, session_id: `ses_${hiddenIdle}` });
       await api("POST", `/api/agents/${hiddenIdle}/hide`);
-      const killed = `killed-${stamp}`;
-      await api("POST", "/api/agents/register", { agent_name: killed, session_id: `ses_${killed}` });
-      await api("POST", `/api/agents/${killed}/kill`);
-      await api("POST", `/api/agents/${killed}/hide`);
+      const paused = `paused-${stamp}`;
+      await api("POST", "/api/agents/register", { agent_name: paused, session_id: `ses_${paused}` });
+      await api("POST", `/api/agents/${paused}/pause`);
+      await api("POST", `/api/agents/${paused}/hide`);
 
-      return { tall: "rye-ranger", hiddenClaim, hiddenIdle, killed, project: project.key };
+      return { tall: "rye-ranger", hiddenClaim, hiddenIdle, paused, project: project.key };
     },
     { stamp },
   );
@@ -137,7 +137,7 @@ try {
     await page.getByRole("button", { name: /Show hidden/i }).click();
     await page.waitForTimeout(200);
     const revealed = await cardInfo();
-    for (const name of [fixture.hiddenClaim, fixture.hiddenIdle, fixture.killed]) {
+    for (const name of [fixture.hiddenClaim, fixture.hiddenIdle, fixture.paused]) {
       const card = revealed.find((c) => c.name === name);
       assert.ok(card?.hidden, `${width}: ${name} is revealed`);
       assert.ok(card?.unhide, `${width}: ${name} has an Unhide control`);

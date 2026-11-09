@@ -3,6 +3,7 @@
 
 pub mod agent_events;
 pub mod api;
+pub mod artifacts;
 pub mod auth;
 pub mod bus;
 pub mod config;

@@ -60,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
         "startup stage: app state built"
     );
 
+    if let Err(error) = breadboard_server::artifacts::purge_expired(&state).await {
+        tracing::warn!(%error, "artifact expiry on startup failed");
+    }
+    breadboard_server::artifacts::spawn_expiry_sweep(state.clone());
+
     if state.forgejo.is_configured() {
         sync::spawn_reconcile(state.clone());
         tracing::info!(

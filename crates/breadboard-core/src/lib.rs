@@ -435,6 +435,80 @@ pub struct ChatUpload {
     pub size: i64,
 }
 
+/// The kind of evidence an artifact carries. Stored as the same strings in
+/// SQLite; `ci-log` keeps the hyphen so URLs and JSON read naturally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArtifactKind {
+    Bench,
+    Screenshot,
+    CiLog,
+    Diff,
+    Trace,
+    Other,
+}
+
+impl ArtifactKind {
+    pub const ALL: [ArtifactKind; 6] = [
+        ArtifactKind::Bench,
+        ArtifactKind::Screenshot,
+        ArtifactKind::CiLog,
+        ArtifactKind::Diff,
+        ArtifactKind::Trace,
+        ArtifactKind::Other,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ArtifactKind::Bench => "bench",
+            ArtifactKind::Screenshot => "screenshot",
+            ArtifactKind::CiLog => "ci-log",
+            ArtifactKind::Diff => "diff",
+            ArtifactKind::Trace => "trace",
+            ArtifactKind::Other => "other",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// Images render inline; everything else is shown in the text viewer or
+    /// offered as a download.
+    pub fn is_image(self) -> bool {
+        matches!(self, ArtifactKind::Screenshot)
+    }
+
+    /// Logs, diffs and traces are text evidence and get the viewer.
+    pub fn is_text(self) -> bool {
+        matches!(
+            self,
+            ArtifactKind::CiLog | ArtifactKind::Diff | ArtifactKind::Trace
+        )
+    }
+}
+
+/// One immutable piece of evidence attached to an issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueArtifact {
+    pub id: i64,
+    pub issue_id: i64,
+    pub kind: ArtifactKind,
+    /// Optional comment this evidence belongs to.
+    pub comment_id: Option<i64>,
+    /// Optional review request reference (a key or URL). Kept as text so it
+    /// stays valid when review requests become their own record.
+    pub review_ref: Option<String>,
+    pub filename: String,
+    pub mime: String,
+    pub size: i64,
+    /// Agent name that produced it, or `human:<login>` for a web upload.
+    pub uploader_agent: String,
+    pub session_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub id: i64,

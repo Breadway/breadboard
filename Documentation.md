@@ -30,9 +30,12 @@ zero claims, as an idle session. The card keeps the optional one-line message,
 a rounded tile per issue coloured by board status and a dashed tile for queued
 intents. Clicking a card opens a popup with the full session id (selectable and
 copyable), host, pid, last-seen, the claim list, completion ring, states and
-release actions. A kill button confirms that it releases every claim and
-blocks writes until the agent is revived. The header counts live sessions
-(heartbeat inside 120 seconds) separately from claim holders.
+release actions. Kill removes the agent completely: claims are released, the
+roster card, profile, hidden flag and chat notification state are deleted, and
+the name is free again. Pause is separate and non-destructive: it keeps claims
+and the roster card with a paused badge, but refuses new claims and stops chat
+pushes from waking the agent; Resume restores it. The header counts live
+sessions (heartbeat inside 120 seconds) separately from claim holders.
 
 Agents can be hidden from the default view without deleting them. Hidden is a
 server-side per-name flag: claims, chat identity and history stay intact, and
@@ -45,7 +48,7 @@ resolves that to an orchestrator name; the subagent card shows an `under
 <orchestrator>` chip that focuses the orchestrator and its direct subagents.
 An unresolved parent keeps the raw session id on the chip instead of dropping
 the link. An orchestrator card shows how many of its direct subagents are
-live. Hiding or killing a subagent affects only that card, never the
+live. Hiding, pausing or removing a subagent affects only that card, never the
 orchestrator. The link fields never participate in sorting.
 
 Cards use
@@ -117,11 +120,23 @@ rename is free; once it holds claims the server moves the claims, profile and
 session row in one transaction or refuses with a clear conflict. An old name
 never keeps orphaned claims.
 
-A killed name is blocked from every agent-scoped write (claims, heartbeats,
-messages and agent chat) until it is explicitly revived. Registration is not a
-write gate: a killed session can still refresh its row, but it remains killed.
-Unknown names auto-register on their first write, because every session should
-be listed rather than refused.
+Kill is a removal, not a tombstone. The name leaves the roster, profile, hidden
+set, claim tables and chat notification state, and one server-side
+`agent_removals` audit row records who removed it and how many claims were
+released. Nothing about the removal is rendered on the Agents page. The name is
+immediately free again: a session that registers it starts clean. Unknown names
+return 404, so a typo cannot create a phantom row.
+
+Pause is the non-destructive action for an agent that is partway through work.
+It keeps the session row, profile and every claim, shows a paused badge, and
+blocks new claims. Pending chat pushes are dropped and new pushes are not
+created, so chat injection cannot wake it. Registration refreshes the session
+without unpausing. Resume clears the flag and allows new claims; the existing
+claims were never released. Unknown names return 404 for both actions.
+
+Unknown names still auto-register on their first ordinary write, because every
+session should be listed rather than refused; only kill, pause and resume
+require an existing name.
 
 - An **exclusive claim is accountability** for one issue. Keep it with the
   agent that will actually finish that issue.
@@ -209,6 +224,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. The local row is committed and returned `201` without waiting for Forgejo; `x-breadboard-writeback: pending` means a background writeback was scheduled (a failed one retries on the next reconcile pass), `none` means the project is not mapped to an enabled repo |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
+| `GET` | `/api/issues/{key}/artifacts` | typed evidence, newest first: `{ id, issue_id, kind, comment_id, review_ref, filename, mime, size, uploader_agent, session_id, created_at, expires_at }[]`. Expired rows are omitted |
+| `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
+| `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
+| `GET` | `/api/artifacts/{id}` | authenticated download. Only raster screenshots (png, jpeg, gif, webp) render inline. Everything else, including html or svg content, is served as `text/plain` or `application/octet-stream` with `Content-Disposition: attachment` and `nosniff`. `410` once past `expires_at` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -234,10 +253,11 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/chat/uploads/{id}` | authenticated download. Safe images (png/jpeg/gif/webp) render inline; everything else is served as an attachment with `nosniff` |
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
-| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name the server resolves to its registered session when `parent_session_id` is absent. Returns `{ agent_name, alternatives[], live, killed, session_id, parent_session_id, orchestrator, orchestrator_session_id }`; registration never revives a killed name. `200` |
-| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed`. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id |
-| `POST` | `/api/agents/{name}/kill` | mark the lowercased name killed, release every claim it holds (exclusive and intent), record the caller in `killed_by`, and emit `agent.killed`. Idempotent: a second call keeps the original killer and still returns the roster row. `200` |
-| `POST` | `/api/agents/{name}/revive` | clear a kill so the name can write again; emits `agent.revived`. Idempotent. `404` when the name was never registered |
+| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name the server resolves to its registered session when `parent_session_id` is absent. Returns `{ agent_name, alternatives[], live, paused, session_id, parent_session_id, orchestrator, orchestrator_session_id }`; registration refreshes a paused name without unpausing it. `200` |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, paused, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, paused_by, paused_by_login, paused_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `live` is a heartbeat inside 120 seconds on a name that is not paused; `status` is `live`, `stale` or `paused`. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id |
+| `POST` | `/api/agents/{name}/kill` | remove the lowercased name: release every claim it holds (exclusive and intent), delete its session row, profile, hidden flag and chat push/subscription/read state, write one server-side `agent_removals` audit row, and emit `agent.removed`. Returns `{ agent_name, removed, claims_released, profile_removed }`. `404` for an unknown name, with no row created (BB-145) |
+| `POST` | `/api/agents/{name}/pause` | pause a known name: keep its claims, profile and roster row, set `paused_by`/`paused_at`, drop pending chat pushes and emit `agent.paused`. New claims are refused with `403`; heartbeats and registration still refresh the row. Idempotent. `404` for an unknown name |
+| `POST` | `/api/agents/{name}/resume` | clear the pause flag and emit `agent.resumed`. Idempotent. `404` for an unknown name |
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
@@ -303,8 +323,9 @@ after reconnecting to recover missed changes.
 | `agent.claimed` | `bread.board.agent.claimed` | `id`, `key`, `agent`, `mode`, `session_id`, `state` |
 | `agent.updated` | `bread.board.agent.updated` | `id`, `key`, `agent`, `mode`, `session_id`, `state`, `claim` (the full claim, so clients patch one entry instead of refetching the agent list) |
 | `agent.released` | `bread.board.agent.released` | `id`, `key` |
-| `agent.killed` | `bread.board.agent.killed` | `agent`, `killed_by` |
-| `agent.revived` | `bread.board.agent.revived` | `agent`, `revived_by` |
+| `agent.removed` | `bread.board.agent.removed` | `agent`, `removed_by`, `claims_released` |
+| `agent.paused` | `bread.board.agent.paused` | `agent`, `paused_by` |
+| `agent.resumed` | `bread.board.agent.resumed` | `agent`, `resumed_by` |
 | `agent.hidden` | `bread.board.agent.hidden` | `agent`, `hidden_by` |
 | `agent.unhidden` | `bread.board.agent.unhidden` | `agent`, `unhidden_by` |
 | `chat.message` | `bread.board.chat.message` | `room_id`, `id` |
@@ -345,6 +366,8 @@ rooms push only while that member subscribes with `chat_push` /
 land in `GET /api/chat/pushes`; the MCP server polls it and raises MCP logging
 notifications while the agent process is alive, so an idle agent can be woken
 between turns. Browser clients raise a Notification for their DMs and pings.
+A paused agent is never enqueued for a push and its pending pushes are dropped,
+so chat injection cannot wake it.
 
 Read state is per `(room, member)`: `unread` counts messages newer than your
 cursor, excluding your own. Reading a room clears it, so an agent can check
@@ -363,6 +386,35 @@ a download. Unattached uploads simply go unreferenced.
 MCP tools: `chat_rooms`, `chat_read` (`room` or `with`), `chat_send`
 (`room` or `to`, plus `uploads`), `chat_upload` (base64), and
 `chat_create_room`.
+
+## Issue artifacts
+
+Evidence lives on the issue as a typed artifact rather than in prose comments.
+Kinds are `bench`, `screenshot`, `ci-log`, `diff`, `trace` and `other`. An
+upload is authenticated and may optionally name a comment (`comment_id`) and a
+review request (`review_ref`, a key or URL). The row records the uploader agent
+and its session id; a web upload made by a human records `human:<login>`.
+
+Files live under `<upload-dir>/artifacts/` with a server-generated name. Rows
+are immutable: a database trigger rejects `UPDATE`, and there is no update or
+delete route. Expiry is the only deletion path.
+
+Size limits are per kind: 10 MB for a screenshot, bench or other; 25 MB for a
+diff; 50 MB for a CI log or trace. Screenshots are restricted to the raster
+types png, jpeg, gif and webp; svg and anything else are refused with `415`.
+Retention follows the same weight: 180 days for screenshots and benches, 90
+days for diffs and other, and 30 days for CI logs and traces. Expired rows
+disappear from listings, return `410` from the download route, and are removed
+from disk by the startup sweep and a daily job.
+
+The issue drawer shows an Evidence section. Raster screenshots preview inline;
+CI logs, diffs and traces open in a monospace viewer; a bench renders as a small
+table. The viewer fetches an attachment response, and the preview only links
+when the server would serve that raster type inline. Bench data is JSON (an
+array of `{ name, value, unit }`, or an object of name to value) with a fallback
+for `name: value unit` lines.
+
+MCP tools: `list_artifacts` and `attach_artifact` (base64).
 
 ## Forgejo sync
 

@@ -683,8 +683,8 @@ async fn chat_author(
 ) -> AppResult<(String, String, breadboard_core::ChatAuthorKind)> {
     match agent_name.map(str::trim).filter(|s| !s.is_empty()) {
         Some(name) => {
-            // A killed agent cannot speak; an unknown name auto-registers so a
-            // fresh session is listed from its first write.
+            // Unknown names auto-register so a fresh session is listed from
+            // its first write. Pause blocks inbound pushes, not speaking.
             store::ensure_agent_writable(&app.db, user.0.id, name, None).await?;
             if !store::user_has_agent(&app.db, user.0.id, name).await? {
                 return Err(crate::error::AppError::forbidden());
@@ -1351,18 +1351,37 @@ pub async fn agent_roster(
     Ok(Json(store::agent_roster(&app.db).await?))
 }
 
-/// Kill a name: release every claim, block writes, record who asked. Repeated
-/// calls are no-ops and keep the original killer.
+/// Kill a name: remove it from every view, release its claims, free the name
+/// and keep only a server-side audit row. Unknown names are a 404 and never
+/// create a roster entry.
 pub async fn kill_agent(
     State(app): State<AppState>,
     user: AuthUser,
     Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRemoval>> {
+    let removal = store::remove_agent(&app.db, user.0.id, &name).await?;
+    let event = BoardEvent::AgentRemoved {
+        agent: removal.agent_name.clone(),
+        removed_by: Some(user.0.id),
+        claims_released: removal.claims_released,
+    };
+    app.bus.publish(event.clone());
+    notify::emit_bread(&app, &event);
+    Ok(Json(removal))
+}
+
+/// Pause a known agent: keep its claims and roster row, refuse new claims and
+/// suppress chat pushes until resumed.
+pub async fn pause_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::kill_agent(&app.db, user.0.id, &name).await?;
+    let (entry, changed) = store::pause_agent(&app.db, user.0.id, &name).await?;
     if changed {
-        let event = BoardEvent::AgentKilled {
+        let event = BoardEvent::AgentPaused {
             agent: entry.agent_name.clone(),
-            killed_by: Some(user.0.id),
+            paused_by: Some(user.0.id),
         };
         app.bus.publish(event.clone());
         notify::emit_bread(&app, &event);
@@ -1370,17 +1389,17 @@ pub async fn kill_agent(
     Ok(Json(entry))
 }
 
-pub async fn revive_agent(
+/// Resume a paused agent. Idempotent.
+pub async fn resume_agent(
     State(app): State<AppState>,
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::revive_agent(&app.db, &name).await?;
-    let entry = entry.ok_or(crate::error::AppError::NotFound)?;
+    let (entry, changed) = store::resume_agent(&app.db, &name).await?;
     if changed {
-        let event = BoardEvent::AgentRevived {
+        let event = BoardEvent::AgentResumed {
             agent: entry.agent_name.clone(),
-            revived_by: Some(user.0.id),
+            resumed_by: Some(user.0.id),
         };
         app.bus.publish(event.clone());
         notify::emit_bread(&app, &event);
@@ -1499,9 +1518,10 @@ pub async fn claim_issue(
             "cannot claim a PR card",
         ));
     }
-    // Killing is name-scoped, so the gate is too. Unknown names auto-register
-    // here instead of being rejected: every session should be listed.
-    store::ensure_agent_writable(
+    // Claiming is name-scoped, so the pause gate is too. Unknown names
+    // auto-register here instead of being rejected: every session should be
+    // listed.
+    store::ensure_agent_can_claim(
         &app.db,
         user.0.id,
         &body.agent_name,
@@ -1674,8 +1694,9 @@ pub async fn heartbeat_claim(
         session,
     )
     .await?;
-    // A killed name cannot heartbeat or rename a claim. Gate the target name
-    // too when this update renames the claim.
+    // Heartbeats and renames stay allowed while paused so existing claims keep
+    // their owner. Gate the target name too when this update renames the
+    // claim.
     store::ensure_agent_writable(
         &app.db,
         user.0.id,

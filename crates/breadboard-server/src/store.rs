@@ -15,8 +15,8 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqlitePool};
 
 use crate::dto::{
-    AgentRegister, AgentRegistration, AgentRosterEntry, IssueFilter, IssuePatch, NewCycle, NewEpic,
-    NewIssue, NewProject,
+    AgentRegister, AgentRegistration, AgentRemoval, AgentRosterEntry, IssueFilter, IssuePatch,
+    NewCycle, NewEpic, NewIssue, NewProject,
 };
 use crate::error::{AppError, AppResult};
 use crate::names;
@@ -2584,7 +2584,7 @@ pub async fn get_agent_message(
 }
 
 // ---------------------------------------------------------------------------
-// agent roster: sessions, kill/revive, rename
+// agent roster: sessions, remove/pause, rename
 // ---------------------------------------------------------------------------
 
 /// A session with no heartbeat for longer than this is stale on the roster.
@@ -2604,10 +2604,10 @@ struct AgentSessionRow {
     login: Option<String>,
     first_seen: String,
     last_seen: String,
-    killed: i64,
-    killed_by: Option<i64>,
-    killed_by_login: Option<String>,
-    killed_at: Option<String>,
+    paused: i64,
+    paused_by: Option<i64>,
+    paused_by_login: Option<String>,
+    paused_at: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -2627,14 +2627,14 @@ struct AgentHiddenRow {
 }
 
 const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.parent_session_id, s.host, s.pid, \
-    s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.killed, s.killed_by, \
-    k.login AS killed_by_login, s.killed_at";
+    s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.paused, s.paused_by, \
+    p.login AS paused_by_login, s.paused_at";
 
 fn agent_session_join() -> String {
     format!(
         "SELECT {AGENT_SESSION_COLS} FROM agent_sessions s \
          LEFT JOIN users u ON u.id = s.user_id \
-         LEFT JOIN users k ON k.id = s.killed_by"
+         LEFT JOIN users p ON p.id = s.paused_by"
     )
 }
 
@@ -2648,7 +2648,7 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         first_seen: None,
         last_seen: None,
         live: false,
-        killed: false,
+        paused: false,
         status: "stale".to_string(),
         message: None,
         state: None,
@@ -2657,9 +2657,9 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         intent_count: 0,
         user_id: None,
         login: None,
-        killed_by: None,
-        killed_by_login: None,
-        killed_at: None,
+        paused_by: None,
+        paused_by_login: None,
+        paused_at: None,
         hidden: false,
         hidden_by: None,
         hidden_by_login: None,
@@ -2857,7 +2857,7 @@ pub async fn register_agent(
         agent_name: name,
         alternatives,
         live: entry.live,
-        killed: entry.killed,
+        paused: entry.paused,
         session_id: entry.session_id,
         parent_session_id: entry.parent_session_id,
         orchestrator: entry.orchestrator,
@@ -2865,8 +2865,10 @@ pub async fn register_agent(
     })
 }
 
-/// Auto-register an unknown name and reject a killed one. Every agent-scoped
-/// write goes through this: the human wants new sessions listed, not refused.
+/// Auto-register an unknown name. Every agent-scoped write goes through this:
+/// the human wants new sessions listed, not refused. Pause does not block
+/// heartbeats or chat here; it blocks new claims through
+/// [`ensure_agent_can_claim`].
 pub async fn ensure_agent_writable(
     db: &SqlitePool,
     user_id: i64,
@@ -2875,17 +2877,6 @@ pub async fn ensure_agent_writable(
 ) -> AppResult<String> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
-
-    let killed: Option<i64> =
-        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
-            .bind(&name)
-            .fetch_optional(db)
-            .await?;
-    if killed == Some(1) {
-        return Err(AppError::forbidden_msg(format!(
-            "agent '{name}' is killed; revive it before writing"
-        )));
-    }
 
     upsert_agent_session(
         db,
@@ -2902,95 +2893,195 @@ pub async fn ensure_agent_writable(
     Ok(name)
 }
 
-/// Mark a name killed, release every claim it holds, and report whether this
-/// call performed the transition. Already-killed is a no-op, so kill is
-/// idempotent and preserves the original killer.
-pub async fn kill_agent(
+/// Gate for taking new work. A paused agent keeps its existing claims but may
+/// not claim anything new until it is resumed.
+pub async fn ensure_agent_can_claim(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+    session_id: Option<&str>,
+) -> AppResult<String> {
+    let name = ensure_agent_writable(db, user_id, raw_name, session_id).await?;
+    let paused: Option<i64> =
+        sqlx::query_scalar("SELECT paused FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    if paused == Some(1) {
+        return Err(AppError::forbidden_msg(format!(
+            "agent '{name}' is paused; resume it before claiming new work"
+        )));
+    }
+    Ok(name)
+}
+
+/// Remove a name completely: release every claim it holds, delete its session
+/// row, profile, hidden flag and chat notification state, and record one
+/// server-side audit row. Unknown names are a 404 and never create a row.
+pub async fn remove_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+) -> AppResult<AgentRemoval> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
+
+    let ts = now_rfc3339();
+    let member = format!("agent:{name}");
+    let mut tx = crate::db::begin_write(db).await?;
+
+    let claims_released = sqlx::query("DELETE FROM agent_claims WHERE lower(agent_name) = ?1")
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as i64;
+    let profile_removed = sqlx::query("DELETE FROM agent_profiles WHERE lower(agent_name) = ?1")
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+        > 0;
+    sqlx::query("DELETE FROM agent_hidden WHERE lower(agent_name) = ?1")
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_pushes WHERE member = ?1")
+        .bind(&member)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_push_subs WHERE member = ?1")
+        .bind(&member)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_reads WHERE member = ?1")
+        .bind(&member)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO agent_removals
+            (agent_name, removed_by, removed_at, reason, claims_released, profile_removed)
+         VALUES (?1, ?2, ?3, 'kill', ?4, ?5)",
+    )
+    .bind(&name)
+    .bind(user_id)
+    .bind(&ts)
+    .bind(claims_released)
+    .bind(i64::from(profile_removed))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM agent_sessions WHERE agent_name = ?1")
+        .bind(&name)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    // One action, one row: a mass removal is not a release per claim.
+    crate::agent_events::record_best_effort(
+        db,
+        crate::agent_events::AgentEventInsert::new(
+            &name,
+            breadboard_core::AgentEventKind::Removed,
+        )
+        .summary(format!(
+            "Removed; {claims_released} claim(s) released"
+        ))
+        .detail(if profile_removed {
+            "profile removed".to_string()
+        } else {
+            "profile kept".to_string()
+        })
+        .actor(Some(user_id)),
+    )
+    .await;
+
+    Ok(AgentRemoval {
+        agent_name: name,
+        removed: true,
+        claims_released,
+        profile_removed,
+    })
+}
+
+/// Pause a known name. Claims, profile and session row stay; new claims are
+/// refused and pending chat pushes are dropped so an injector cannot wake it.
+pub async fn pause_agent(
     db: &SqlitePool,
     user_id: i64,
     raw_name: &str,
 ) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
 
-    let existing: Option<i64> =
-        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+    let ts = now_rfc3339();
+    // A claim-only or profile-only name still gets a session row so the pause
+    // flag has somewhere to live; registration preserves that flag.
+    upsert_agent_session(db, user_id, &name, None, None, None, None, None, &ts).await?;
+    let was_paused: Option<i64> =
+        sqlx::query_scalar("SELECT paused FROM agent_sessions WHERE agent_name = ?1")
             .bind(&name)
             .fetch_optional(db)
             .await?;
-    let already_killed = existing == Some(1);
-    let ts = now_rfc3339();
-
-    match existing {
-        Some(_) if already_killed => {}
-        Some(_) => {
-            sqlx::query(
-                "UPDATE agent_sessions
-                    SET killed = 1, killed_by = ?2, killed_at = ?3
-                  WHERE agent_name = ?1",
-            )
-            .bind(&name)
-            .bind(user_id)
-            .bind(&ts)
-            .execute(db)
-            .await?;
-        }
-        None => {
-            sqlx::query(
-                "INSERT INTO agent_sessions
-                    (agent_name, user_id, first_seen, last_seen, killed, killed_by, killed_at)
-                 VALUES (?1, ?2, ?3, ?3, 1, ?2, ?3)",
-            )
-            .bind(&name)
-            .bind(user_id)
-            .bind(&ts)
-            .execute(db)
-            .await?;
-        }
-    }
-
-    // Killing is name-scoped: every claim under this agent goes, including
-    // intents and claims owned by another user using the same name.
-    sqlx::query("DELETE FROM agent_claims WHERE lower(agent_name) = ?1")
-        .bind(&name)
+    let changed = was_paused != Some(1);
+    sqlx::query(
+        "UPDATE agent_sessions
+            SET paused = 1, paused_by = ?2, paused_at = ?3
+          WHERE agent_name = ?1",
+    )
+    .bind(&name)
+    .bind(user_id)
+    .bind(&ts)
+    .execute(db)
+    .await?;
+    sqlx::query("DELETE FROM chat_pushes WHERE member = ?1")
+        .bind(format!("agent:{name}"))
         .execute(db)
         .await?;
 
     let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
-    if !already_killed {
+    if changed {
         crate::agent_events::record_best_effort(
             db,
             crate::agent_events::AgentEventInsert::new(
                 &name,
-                breadboard_core::AgentEventKind::StateChange,
+                breadboard_core::AgentEventKind::Paused,
             )
-            .summary("Marked killed; claims released")
+            .summary("Paused; claims kept, new claims refused")
             .actor(Some(user_id)),
         )
         .await;
     }
-    Ok((entry, !already_killed))
+    Ok((entry, changed))
 }
 
-/// Clear a kill so the name can write again. Idempotent; returns whether the
-/// call changed anything.
-pub async fn revive_agent(
-    db: &SqlitePool,
-    raw_name: &str,
-) -> AppResult<(Option<AgentRosterEntry>, bool)> {
+/// Resume a paused name. Idempotent; returns whether the call changed
+/// anything. Unknown names are a 404.
+pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
 
-    let was_killed: Option<i64> =
-        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
+    let was_paused: Option<i64> =
+        sqlx::query_scalar("SELECT paused FROM agent_sessions WHERE agent_name = ?1")
             .bind(&name)
             .fetch_optional(db)
             .await?;
-    let changed = was_killed == Some(1);
+    let changed = was_paused == Some(1);
     if changed {
         sqlx::query(
             "UPDATE agent_sessions
-                SET killed = 0, killed_by = NULL, killed_at = NULL
+                SET paused = 0, paused_by = NULL, paused_at = NULL
               WHERE agent_name = ?1",
         )
         .bind(&name)
@@ -3002,11 +3093,12 @@ pub async fn revive_agent(
                 &name,
                 breadboard_core::AgentEventKind::StateChange,
             )
-            .summary("Revived after a kill"),
+            .summary("Resumed after a pause"),
         )
         .await;
     }
-    Ok((roster_entry(db, &name).await?, changed))
+    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    Ok((entry, changed))
 }
 
 /// Hide a known agent name from the default Agents view. Idempotent; claims
@@ -3104,17 +3196,6 @@ pub async fn rename_agent(
     if known.contains(&new) {
         return Err(AppError::Conflict(format!(
             "agent name '{new}' is already in use"
-        )));
-    }
-
-    let killed: Option<i64> =
-        sqlx::query_scalar("SELECT killed FROM agent_sessions WHERE agent_name = ?1")
-            .bind(&old)
-            .fetch_optional(db)
-            .await?;
-    if killed == Some(1) {
-        return Err(AppError::forbidden_msg(format!(
-            "agent '{old}' is killed; revive it before renaming"
         )));
     }
 
@@ -3296,10 +3377,10 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
         }
         entry.first_seen = Some(parse_ts(&session.first_seen));
         entry.last_seen = Some(parse_ts(&session.last_seen));
-        entry.killed = session.killed != 0;
-        entry.killed_by = session.killed_by;
-        entry.killed_by_login = session.killed_by_login.clone();
-        entry.killed_at = session.killed_at.as_deref().map(parse_ts);
+        entry.paused = session.paused != 0;
+        entry.paused_by = session.paused_by;
+        entry.paused_by_login = session.paused_by_login.clone();
+        entry.paused_at = session.paused_at.as_deref().map(parse_ts);
         if entry.user_id.is_none() {
             entry.user_id = session.user_id;
             entry.login = session.login.clone();
@@ -3320,14 +3401,14 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
     let mut roster: Vec<AgentRosterEntry> = map
         .into_values()
         .map(|mut entry| {
-            let live = !entry.killed
+            let live = !entry.paused
                 && entry
                     .last_seen
                     .map(|at| (now - at).num_seconds() < AGENT_LIVE_SECS)
                     .unwrap_or(false);
             entry.live = live;
-            entry.status = if entry.killed {
-                "killed".to_string()
+            entry.status = if entry.paused {
+                "paused".to_string()
             } else if live {
                 "live".to_string()
             } else {
@@ -3360,10 +3441,10 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
     }
 
     // Heartbeats flip live/stale constantly. Keep the server order stable by
-    // sorting only on claim counts and name, with killed names last, so the
+    // sorting only on claim counts and name, with paused names last, so the
     // masonry layout does not reshuffle every 15 seconds.
     roster.sort_by(|a, b| {
-        let rank = |e: &AgentRosterEntry| i64::from(e.killed);
+        let rank = |e: &AgentRosterEntry| i64::from(e.paused);
         rank(a)
             .cmp(&rank(b))
             .then_with(|| b.exclusive_count.cmp(&a.exclusive_count))
@@ -3917,7 +3998,22 @@ pub async fn create_chat_pushes(
         }
     }
 
+    // Pause stops chat injection waking an agent: never enqueue a push for a
+    // paused name, whether it came from a DM, a subscription, @everyone or a
+    // direct mention.
+    let paused: HashSet<String> =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions WHERE paused = 1")
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
+
     for (member, (user_id, kind)) in want {
+        if let Some(agent) = member.strip_prefix("agent:") {
+            if paused.contains(agent) {
+                continue;
+            }
+        }
         sqlx::query(
             "INSERT OR IGNORE INTO chat_pushes
                 (user_id, member, room_id, message_id, kind, created_at)
@@ -3956,6 +4052,10 @@ pub async fn list_chat_pushes(
            JOIN chat_messages m ON m.id = p.message_id
           WHERE p.member = ?1 AND p.id > ?2
             AND m.deleted_at IS NULL AND m.compacted_at IS NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM agent_sessions s
+                 WHERE s.paused = 1 AND p.member = 'agent:' || s.agent_name
+            )
           ORDER BY p.id ASC LIMIT ?3",
     )
     .bind(member)

@@ -40,8 +40,8 @@ try {
     missingParent: `ses_missing_${stamp}`,
     hidden: `hidden-sub-${stamp}`,
     hiddenSession: `ses_hidden_${stamp}`,
-    killed: `killed-sub-${stamp}`,
-    killedSession: `ses_killed_${stamp}`,
+    paused: `paused-sub-${stamp}`,
+    pausedSession: `ses_paused_${stamp}`,
   };
 
   const fixture = await page.evaluate(
@@ -81,7 +81,7 @@ try {
         [names.child, names.childSession],
         [names.busy, names.busySession],
         [names.hidden, names.hiddenSession],
-        [names.killed, names.killedSession],
+        [names.paused, names.pausedSession],
       ]) {
         await api("POST", "/api/agents/register", {
           agent_name: agent,
@@ -100,7 +100,7 @@ try {
         pid: 12,
       });
       await api("POST", `/api/agents/${names.hidden}/hide`);
-      await api("POST", `/api/agents/${names.killed}/kill`);
+      await api("POST", `/api/agents/${names.paused}/pause`);
 
       for (const neighbor of [`crumb-${stamp}`, `zesty-${stamp}`]) {
         await api("POST", "/api/agents/register", { agent_name: neighbor, session_id: `ses_${neighbor}` });
@@ -169,7 +169,7 @@ try {
     assert.equal(byName[names.busy].under, `under ${names.orch}`, `${width}: busy child links`);
     assert.equal(byName[names.orphan].unresolved, `under ${names.missingParent}`, `${width}: unresolved parent keeps raw id`);
     assert.equal(byName[names.hidden], undefined, `${width}: hidden child is excluded by default`);
-    assert.equal(byName[names.killed].under, `under ${names.orch}`, `${width}: killed child keeps the link`);
+    assert.equal(byName[names.paused].under, `under ${names.orch}`, `${width}: paused child keeps the link`);
     assert.equal(tall.subs, "3 live", `${width}: orchestrator counts live subagents`);
 
     const columns = new Set(before.map((c) => c.x)).size;
