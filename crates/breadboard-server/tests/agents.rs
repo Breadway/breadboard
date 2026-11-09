@@ -1955,18 +1955,23 @@ async fn session_links_and_required_handoff() {
     let created = create_issue(&c, &base, &auth, "handoff target").await;
     let key = created["key"].as_str().unwrap().to_string();
 
-    let claim = |session: &str, state: &str, mode: &str, branch: Option<&str>| {
+    // Distinct names per session: one live name belongs to one session, so a
+    // second session cannot reuse "handoff-agent" inside its 120 second
+    // liveness window. The later session ids and handoff timestamps still
+    // exercise the link and note behavior.
+    let claim = |session: &str, agent: &str, state: &str, mode: &str, branch: Option<&str>| {
         let c = c.clone();
         let base = base.clone();
         let auth = auth.clone();
         let key = key.clone();
         let session = session.to_string();
+        let agent = agent.to_string();
         let state = state.to_string();
         let mode = mode.to_string();
         let branch = branch.map(str::to_string);
         async move {
             let mut body = json!({
-                "agent_name": "handoff-agent",
+                "agent_name": agent,
                 "session_id": session,
                 "state": state,
                 "mode": mode,
@@ -1984,7 +1989,14 @@ async fn session_links_and_required_handoff() {
     };
 
     // Claim creating the session link.
-    let first = claim("ses_alpha", "implementing", "exclusive", None).await;
+    let first = claim(
+        "ses_alpha",
+        "handoff-agent",
+        "implementing",
+        "exclusive",
+        None,
+    )
+    .await;
     assert_eq!(first.status(), 201);
     let issue: Value = c
         .get(format!("{base}/api/issues/{key}"))
@@ -2095,15 +2107,9 @@ async fn session_links_and_required_handoff() {
     assert_eq!(back.as_array().unwrap()[0]["key"], key);
 
     // A planned exclusive claim with no evidence never held work: explicit
-    // no_note is allowed and writes no handoff. The name's holder has to look
-    // stale first: BB-170 refuses a second live session on the same name.
-    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
-        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
-        .execute(&app.db)
-        .await
-        .unwrap();
+    // no_note is allowed and writes no handoff.
     assert_eq!(
-        claim("ses_beta", "planned", "exclusive", None)
+        claim("ses_beta", "handoff-beta", "planned", "exclusive", None)
             .await
             .status(),
         201
@@ -2136,18 +2142,17 @@ async fn session_links_and_required_handoff() {
         .unwrap();
     assert_eq!(issue["sessions"].as_array().unwrap().len(), 2);
 
-    // A planned claim with a branch did hold work: no_note is refused. The
-    // previous session has to look stale before a new session can reuse the
-    // name (BB-170).
-    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
-        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
-        .execute(&app.db)
-        .await
-        .unwrap();
+    // A planned claim with a branch did hold work: no_note is refused.
     assert_eq!(
-        claim("ses_delta", "planned", "exclusive", Some("fix/x"))
-            .await
-            .status(),
+        claim(
+            "ses_delta",
+            "handoff-delta",
+            "planned",
+            "exclusive",
+            Some("fix/x")
+        )
+        .await
+        .status(),
         201
     );
     let bad = c
@@ -2187,13 +2192,8 @@ async fn session_links_and_required_handoff() {
     assert_eq!(issue["sessions"].as_array().unwrap().len(), 3);
 
     // An intent is always a no-work claim; releasing it without a note still
-    // asks for the explicit opt-in. Stale the holder first for BB-170.
-    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'handoff-agent'")
-        .bind((chrono::Utc::now() - chrono::Duration::seconds(600)).to_rfc3339())
-        .execute(&app.db)
-        .await
-        .unwrap();
-    let intent = claim("ses_gamma", "implementing", "intent", None).await;
+    // asks for the explicit opt-in.
+    let intent = claim("ses_gamma", "handoff-gamma", "implementing", "intent", None).await;
     assert_eq!(intent.status(), 201);
     let refused = c
         .delete(format!("{base}/api/issues/{key}/claim?mode=intent"))
