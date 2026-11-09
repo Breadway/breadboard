@@ -132,7 +132,9 @@ async fn claim_lifecycle() {
 
     // Release: card keeps its status, claim disappears.
     let rel = c
-        .delete(format!("{base}/api/issues/{key}/claim"))
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+        ))
         .header("authorization", &auth)
         .send()
         .await
@@ -198,11 +200,13 @@ async fn claim_events_flow_over_sse() {
     assert_eq!(updated["claim"]["state"], "verifying");
     assert!(updated["claim"]["last_heartbeat"].is_string());
 
-    c.delete(format!("{base}/api/issues/{key}/claim"))
-        .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap();
+    c.delete(format!(
+        "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+    ))
+    .header("authorization", &auth)
+    .send()
+    .await
+    .unwrap();
     assert_eq!(events.next_type().await, "agent.released");
 }
 
@@ -337,11 +341,13 @@ async fn claim_changes_appear_in_activity() {
         .send()
         .await
         .unwrap();
-    c.delete(format!("{base}/api/claims/{claim_id}"))
-        .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap();
+    c.delete(format!(
+        "{base}/api/claims/{claim_id}?note=done%3B%20next%3B%20risky"
+    ))
+    .header("authorization", &auth)
+    .send()
+    .await
+    .unwrap();
 
     let activity: Value = c
         .get(format!("{base}/api/issues/{key}/activity"))
@@ -1702,4 +1708,512 @@ async fn get_roster(c: &reqwest::Client, base: &str, auth: &str) -> Value {
         .json()
         .await
         .unwrap()
+}
+
+async fn claim_as(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    key: &str,
+    agent: &str,
+    mode: &str,
+) -> reqwest::Response {
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", auth)
+        .json(&json!({ "agent_name": agent, "mode": mode }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn register(c: &reqwest::Client, base: &str, auth: &str, body: Value) -> reqwest::Response {
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The eleventh live exclusive claim for one name is refused, releasing one
+/// frees capacity, and the roster exposes both budgets.
+#[tokio::test]
+async fn exclusive_claim_budget_per_agent_and_release() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let mut keys = Vec::new();
+    for i in 0..11 {
+        let issue = create_issue(&c, &base, &auth, &format!("budget item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    for key in &keys[..10] {
+        let resp = claim_as(&c, &base, &auth, key, "greedy-loaf", "exclusive").await;
+        assert_eq!(resp.status(), 201, "claim {key} should be allowed");
+    }
+
+    let refused = claim_as(&c, &base, &auth, &keys[10], "greedy-loaf", "exclusive").await;
+    assert_eq!(refused.status(), 409, "eleventh claim must be refused");
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap_or("");
+    assert!(
+        message.contains("10"),
+        "limit missing from error: {message}"
+    );
+    assert!(
+        message.contains("release"),
+        "release guidance missing from error: {message}"
+    );
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "greedy-loaf");
+    assert_eq!(row["exclusive_count"], 10);
+    assert_eq!(row["exclusive_limit"], 10);
+    assert_eq!(row["orchestrator_exclusive_count"], 10);
+    assert_eq!(row["orchestrator_exclusive_limit"], 100);
+
+    // Releasing one live claim frees exactly one slot.
+    let released = c
+        .delete(format!(
+            "{base}/api/issues/{}/claim?note=done%3B%20next%3B%20risky",
+            keys[0]
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 204);
+    let allowed = claim_as(&c, &base, &auth, &keys[10], "greedy-loaf", "exclusive").await;
+    assert_eq!(allowed.status(), 201, "release should free capacity");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(roster_row(&roster, "greedy-loaf")["exclusive_count"], 10);
+}
+
+/// Intents are reservations, not work: the per-agent cap never applies.
+#[tokio::test]
+async fn intent_claims_are_not_capped() {
+    let app = tu::spawn_with_claim_limits(2, 5).await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    for i in 0..4 {
+        let issue = create_issue(&c, &base, &auth, &format!("queued item {i}")).await;
+        let key = issue["key"].as_str().unwrap();
+        let resp = claim_as(&c, &base, &auth, key, "patient-rye", "intent").await;
+        assert_eq!(resp.status(), 201, "intent {i} should be allowed");
+    }
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "patient-rye");
+    assert_eq!(row["intent_count"], 4);
+    assert_eq!(row["exclusive_count"], 0);
+}
+
+/// The hundred-and-first live exclusive claim across one orchestrator tree is
+/// refused, even when the claiming subagent is far below its own cap.
+#[tokio::test]
+async fn orchestrator_subtree_budget_refuses_hundred_and_first() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    register(
+        &c,
+        &base,
+        &auth,
+        json!({ "agent_name": "tree-root", "session_id": "ses_tree_root" }),
+    )
+    .await;
+
+    let children: Vec<String> = (0..12).map(|i| format!("tree-child-{i}")).collect();
+    for (i, child) in children.iter().enumerate() {
+        register(
+            &c,
+            &base,
+            &auth,
+            json!({
+                "agent_name": child,
+                "session_id": format!("ses_tree_child_{i}"),
+                "parent_session_id": "ses_tree_root"
+            }),
+        )
+        .await;
+    }
+
+    // 101 claimable issues plus one for the unlinked control.
+    let mut keys = Vec::new();
+    for i in 0..102 {
+        let issue = create_issue(&c, &base, &auth, &format!("tree item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    let mut next = 0usize;
+    for child in children.iter().take(11) {
+        for _ in 0..9 {
+            let resp = claim_as(&c, &base, &auth, &keys[next], child, "exclusive").await;
+            assert_eq!(resp.status(), 201, "seeding {child} claim {next}");
+            next += 1;
+        }
+    }
+    assert_eq!(next, 99);
+
+    // The hundredth claim in the tree is allowed.
+    let hundredth = claim_as(&c, &base, &auth, &keys[next], &children[11], "exclusive").await;
+    assert_eq!(hundredth.status(), 201, "hundredth tree claim should fit");
+    next += 1;
+    assert_eq!(next, 100);
+
+    // The hundred-and-first is refused by the tree budget, not the per-agent
+    // budget: this child holds only one claim.
+    let refused = claim_as(&c, &base, &auth, &keys[next], &children[11], "exclusive").await;
+    assert_eq!(refused.status(), 409, "101st tree claim must be refused");
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap_or("");
+    assert!(message.contains("100"), "tree limit missing: {message}");
+    assert!(
+        message.contains("release"),
+        "release guidance missing: {message}"
+    );
+
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(
+        roster_row(&roster, "tree-root")["orchestrator_exclusive_count"],
+        100
+    );
+    assert_eq!(
+        roster_row(&roster, &children[11])["orchestrator_exclusive_count"],
+        100
+    );
+
+    // An unlinked agent is its own tree and still has room.
+    let solo = claim_as(&c, &base, &auth, &keys[next], "solo-loaf", "exclusive").await;
+    assert_eq!(
+        solo.status(),
+        201,
+        "unlinked agent must not count in the tree"
+    );
+}
+
+/// An unlinked agent is its own root: two of them never share one budget.
+#[tokio::test]
+async fn unlinked_agents_count_under_themselves_only() {
+    let app = tu::spawn_with_claim_limits(10, 5).await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let mut keys = Vec::new();
+    for i in 0..10 {
+        let issue = create_issue(&c, &base, &auth, &format!("solo item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    for key in &keys[..5] {
+        let resp = claim_as(&c, &base, &auth, key, "solo-one", "exclusive").await;
+        assert_eq!(resp.status(), 201);
+    }
+    // If the two names shared a root, this would already exceed the 5-claim
+    // tree budget.
+    for key in &keys[5..] {
+        let resp = claim_as(&c, &base, &auth, key, "solo-two", "exclusive").await;
+        assert_eq!(
+            resp.status(),
+            201,
+            "{key} should be under solo-two's own tree"
+        );
+    }
+
+    let roster = get_roster(&c, &base, &auth).await;
+    for name in ["solo-one", "solo-two"] {
+        let row = roster_row(&roster, name);
+        assert_eq!(row["exclusive_count"], 5);
+        assert_eq!(row["orchestrator_exclusive_count"], 5);
+        assert_eq!(row["orchestrator_exclusive_limit"], 5);
+    }
+}
+
+/// BB-162: session links survive release, and a release requires a handoff
+/// note unless it is an explicit no-work claim.
+#[tokio::test]
+async fn session_links_and_required_handoff() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "handoff target").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let claim = |session: &str, state: &str, mode: &str, branch: Option<&str>| {
+        let c = c.clone();
+        let base = base.clone();
+        let auth = auth.clone();
+        let key = key.clone();
+        let session = session.to_string();
+        let state = state.to_string();
+        let mode = mode.to_string();
+        let branch = branch.map(str::to_string);
+        async move {
+            let mut body = json!({
+                "agent_name": "handoff-agent",
+                "session_id": session,
+                "state": state,
+                "mode": mode,
+            });
+            if let Some(branch) = branch {
+                body["branch"] = json!(branch);
+            }
+            c.post(format!("{base}/api/issues/{key}/claim"))
+                .header("authorization", &auth)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Claim creating the session link.
+    let first = claim("ses_alpha", "implementing", "exclusive", None).await;
+    assert_eq!(first.status(), 201);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(issue["last_handoff"].is_null());
+    let sessions = issue["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session_id"], "ses_alpha");
+    assert_eq!(sessions[0]["agent_name"], "handoff-agent");
+    assert_eq!(sessions[0]["last_state"], "implementing");
+    let first_seen = sessions[0]["first_seen"].as_str().unwrap().to_string();
+
+    // Missing note is refused with the exact rule.
+    let refused = c
+        .delete(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("handoff note"), "{message}");
+    assert!(message.contains("done"), "{message}");
+    assert!(message.contains("no_note"), "{message}");
+
+    // no_note is not a bypass for work that started.
+    let bypass = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bypass.status(), 400);
+    let body: Value = bypass.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("no_note"));
+
+    // A real note releases and is stored, shown and listed.
+    let note = "done: core path; next: tests; risky: auth edge";
+    let released = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note={}",
+            urlencode(note)
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 204);
+
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["last_handoff"]["note"], note);
+    let sessions = issue["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "release must keep the session link");
+    assert_eq!(sessions[0]["first_seen"], first_seen);
+    assert_eq!(sessions[0]["last_state"], "implementing");
+
+    let handoffs: Value = c
+        .get(format!("{base}/api/issues/{key}/handoffs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    assert_eq!(handoffs[0]["note"], note);
+
+    let events: Value = c
+        .get(format!(
+            "{base}/api/agents/handoff-agent/events?kind=handoff"
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(events["events"][0]["kind"], "handoff");
+    assert_eq!(events["events"][0]["summary"], note);
+
+    // Back-link: the session knows the issue it touched.
+    let back: Value = c
+        .get(format!("{base}/api/sessions/ses_alpha/issues"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(back.as_array().unwrap()[0]["key"], key);
+
+    // A planned exclusive claim with no evidence never held work: explicit
+    // no_note is allowed and writes no handoff.
+    assert_eq!(
+        claim("ses_beta", "planned", "exclusive", None)
+            .await
+            .status(),
+        201
+    );
+    let no_work = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_work.status(), 204);
+    let handoffs: Value = c
+        .get(format!("{base}/api/issues/{key}/handoffs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 2);
+
+    // A planned claim with a branch did hold work: no_note is refused.
+    assert_eq!(
+        claim("ses_delta", "planned", "exclusive", Some("fix/x"))
+            .await
+            .status(),
+        201
+    );
+    let bad = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    let body: Value = bad.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("no_note"));
+    let good = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note={}",
+            urlencode("done: branch; next: review; risky: none")
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(good.status(), 204);
+
+    // The most recent note is the resume context.
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        issue["last_handoff"]["note"],
+        "done: branch; next: review; risky: none"
+    );
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 3);
+
+    // An intent is always a no-work claim; releasing it without a note still
+    // asks for the explicit opt-in.
+    let intent = claim("ses_gamma", "implementing", "intent", None).await;
+    assert_eq!(intent.status(), 201);
+    let refused = c
+        .delete(format!("{base}/api/issues/{key}/claim?mode=intent"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let intent_release = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?mode=intent&no_note=true"
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(intent_release.status(), 204);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 4);
+}
+
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "%20".to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }

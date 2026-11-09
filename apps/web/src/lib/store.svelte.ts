@@ -9,6 +9,7 @@ import {
   type AgentRosterEntry,
   type AgentState,
   type BoardEvent,
+  type ChatRoom,
   type ClaimUpdate,
   type ClaimUpsert,
   type Cycle,
@@ -164,12 +165,23 @@ class Store {
   chatRoom = $state<number | null>(null);
   /** Total unread chat messages for the signed-in human. */
   chatUnread = $state(0);
+  /** Rooms as last fetched, so the Agents card can show a DM link and its
+   *  unread count without opening the Chat view. */
+  chatRooms = $state<ChatRoom[]>([]);
+  /** Pending in-app DM deep link: the Chat view opens or creates this DM. The
+   *  route /chat?dm=<agent> sets it on a cold load too. */
+  chatDm = $state<string | null>(null);
 
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
   unread = $state(0);
 
   agents = $state<AgentClaim[]>([]);
+  /** Claim awaiting a handoff note before release. Set by releaseById when no
+   *  note was supplied; the ReleaseHandoff dialog consumes it. */
+  pendingRelease = $state<AgentClaim | null>(null);
+  /** Exact server refusal shown inside the release dialog. */
+  releaseError = $state<string | null>(null);
   /** Sessions, profiles and claims, one row per lowercased name. Roster rows
    *  with no claims still render, as idle sessions. */
   roster = $state<AgentRosterEntry[]>([]);
@@ -567,6 +579,55 @@ class Store {
     }
   }
 
+  /** Fetch the room list once and keep the shared unread total honest for
+   *  views outside Chat. */
+  async loadChatRooms(): Promise<ChatRoom[]> {
+    const next = await api.listChatRooms();
+    this.chatRooms = next;
+    this.chatUnread = next.reduce((n, r) => n + r.unread, 0);
+    return next;
+  }
+
+  /** The DM shared with this agent, when it already exists. */
+  dmRoomFor(agentName: string): ChatRoom | undefined {
+    const wanted = agentName.trim().toLowerCase();
+    return this.chatRooms.find(
+      (r) =>
+        r.kind === "dm" &&
+        r.members.some((m) => m.toLowerCase() === `agent:${wanted}`),
+    );
+  }
+
+  /** The agent on the other side of a DM room, for URL syncing. */
+  chatDmAgent(room: ChatRoom | undefined): string | null {
+    if (!room || room.kind !== "dm") return null;
+    const member = room.members.find((m) => m.toLowerCase().startsWith("agent:"));
+    return member ? member.slice("agent:".length) : null;
+  }
+
+  /** Stable, copyable deep link to the DM with an agent. */
+  chatDmHref(agentName: string): string {
+    return `/chat?dm=${encodeURIComponent(agentName)}`;
+  }
+
+  /** Land on the chat page and open (or create) the DM with this agent. */
+  openAgentDm(agentName: string) {
+    this.chatFocus = null;
+    this.chatDm = agentName;
+    this.view = "chat";
+    this.updateChatUrl(agentName);
+  }
+
+  /** Keep the address bar on the room currently open. One agent name yields
+   *  the copyable DM deep link; a shared room keeps /chat; leaving Chat falls
+   *  back to the board route. */
+  updateChatUrl(agentName: string | null, inChat = false) {
+    const href = agentName ? this.chatDmHref(agentName) : inChat ? "/chat" : "/";
+    if (location.pathname + location.search !== href) {
+      history.replaceState(null, "", href);
+    }
+  }
+
   /** Kill an agent: removes it from the roster, every view and its name. */
   async killAgent(name: string): Promise<boolean> {
     try {
@@ -666,20 +727,36 @@ class Store {
     }
   }
 
-  /** Release one claim by id; the card keeps its status. */
-  async releaseById(id: number, undoable = true): Promise<boolean> {
+  /** Release one claim by id; the card keeps its status. Without a handoff
+   *  note this opens the release dialog instead of calling the server, because
+   *  the server refuses a bare release for work that held anything. */
+  async releaseById(
+    id: number,
+    undoable = true,
+    note?: string,
+    noNote = false,
+  ): Promise<boolean> {
     const snapshot = this.agents;
     const claim = snapshot.find((a) => a.id === id);
+    if (!claim) return false;
+    if (note == null && !noNote) {
+      this.releaseError = null;
+      this.pendingRelease = claim;
+      return false;
+    }
     this.agents = this.agents.filter((a) => a.id !== id);
     try {
-      await api.releaseClaimById(id);
+      await api.releaseClaimById(id, note, noNote);
+      if (this.pendingRelease?.id === id) this.pendingRelease = null;
+      this.releaseError = null;
       this.info(
-        `Released ${claim?.key ?? "claim"}`,
-        undoable && claim ? () => void this.reclaim(claim) : undefined,
+        `Released ${claim.key}`,
+        undoable ? () => void this.reclaim(claim) : undefined,
       );
       return true;
     } catch (e) {
       this.agents = snapshot;
+      this.releaseError = errMsg(e);
       this.flash(`Couldn't release the claim: ${errMsg(e)}`);
       return false;
     }
@@ -782,10 +859,22 @@ class Store {
         break;
       }
       case "agent.claimed":
-      case "agent.released":
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         break;
+      case "agent.released": {
+        void this.loadAgents();
+        // A release can leave a handoff note and refresh the session links, so
+        // refetch the issue rather than only bumping the drawer tick.
+        try {
+          const fresh = await api.getIssue(ev.key);
+          this.#upsert(fresh);
+        } catch {
+          /* deleted between event and fetch */
+        }
+        this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        break;
+      }
       case "agent.removed":
       case "agent.paused":
       case "agent.resumed":

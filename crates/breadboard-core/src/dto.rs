@@ -543,6 +543,14 @@ pub struct AgentRosterEntry {
     pub claim_count: i64,
     pub exclusive_count: i64,
     pub intent_count: i64,
+    /// Live exclusive claim cap for one agent name (default 10).
+    pub exclusive_limit: i64,
+    /// Live exclusive claims across this agent's orchestrator tree: the root
+    /// agent plus every registered subagent below it. An unlinked agent is
+    /// its own root, so this equals `exclusive_count`.
+    pub orchestrator_exclusive_count: i64,
+    /// Live exclusive claim cap for one orchestrator tree (default 100).
+    pub orchestrator_exclusive_limit: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

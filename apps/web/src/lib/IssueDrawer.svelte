@@ -7,6 +7,7 @@
     type ActivityEntry,
     type Comment,
     type Issue,
+    type IssueDetail,
     type IssueLink,
     type IssuePatch,
     type LinkKind,
@@ -21,6 +22,7 @@
   import UsageStats from "./UsageStats.svelte";
   import Artifacts from "./Artifacts.svelte";
   import Commits from "./Commits.svelte";
+  import IssueSessions from "./IssueSessions.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
   import ReviewPanel from "./ReviewPanel.svelte";
 
@@ -28,7 +30,7 @@
   // a live event from someone else, or a refused save (which leaves the store
   // untouched) all show here immediately. Only comments and activity, which
   // the store doesn't hold, are fetched per issue.
-  let fetched = $state<Issue | null>(null);
+  let fetched = $state<IssueDetail | null>(null);
   const issue = $derived(store.issueByKey(store.selectedKey) ?? (fetched?.key === store.selectedKey ? fetched : null));
 
   let comments = $state<Comment[]>([]);
@@ -571,6 +573,11 @@
             </div>
           {/if}
         </section>
+
+        <IssueSessions
+          sessions={fetched?.sessions ?? []}
+          handoff={fetched?.last_handoff ?? issue.last_handoff ?? null}
+        />
 
         <ReviewPanel issueKey={issue.key} />
 

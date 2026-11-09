@@ -275,6 +275,12 @@ pub struct Issue {
     pub cycle_id: Option<i64>,
     pub labels: Vec<String>,
     pub links: Vec<IssueLink>,
+    /// Most recent handoff note left when a claim was released, when one
+    /// exists. Embedded so a board card and the issue drawer can show it
+    /// without a second request; the full history is `GET
+    /// /api/issues/{key}/handoffs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_handoff: Option<HandoffNote>,
     pub forgejo_ref: Option<ForgejoRef>,
     /// Forgejo milestone title, synced inbound only.
     pub milestone: Option<String>,
@@ -697,6 +703,41 @@ pub struct AgentClaim {
     pub claimed_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_heartbeat: DateTime<Utc>,
+}
+
+/// One session that touched an issue. The identifiers are the same ones the
+/// roster and usage stats already carry: `session_id` is the OpenCode session
+/// and `agent_name` the lowercased agent that claimed it. The row survives a
+/// release, so it answers "who worked this before me" after the tint is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueSession {
+    pub issue_id: i64,
+    pub key: String,
+    pub title: String,
+    pub status: Status,
+    pub session_id: String,
+    pub agent_name: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    /// Claim lifecycle state at the last recorded action.
+    pub last_state: Option<AgentState>,
+}
+
+/// One required release handoff note. Stored apart from the claim so it
+/// survives release and can be shown on the card, in the agent timeline and
+/// to the next session that picks the issue up.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoffNote {
+    pub id: i64,
+    pub issue_id: i64,
+    pub key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub agent_name: String,
+    pub mode: ClaimMode,
+    pub state: AgentState,
+    pub note: String,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Lifecycle of a review request. `changes_requested` records an outcome but

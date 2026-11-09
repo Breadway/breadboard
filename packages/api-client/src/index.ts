@@ -85,10 +85,38 @@ export interface Issue {
   cycle_id: number | null;
   labels: string[];
   links: IssueLink[];
+  /** Most recent release handoff note, when one exists. */
+  last_handoff?: HandoffNote | null;
   forgejo_ref: ForgejoRef | null;
   milestone: string | null;
   created_at: string;
   updated_at: string;
+}
+
+/** One session that touched an issue. Survives release. */
+export interface IssueSession {
+  issue_id: number;
+  key: string;
+  title: string;
+  status: Status;
+  session_id: string;
+  agent_name: string;
+  first_seen: string;
+  last_seen: string;
+  last_state: AgentState | null;
+}
+
+/** A required release handoff: what is done, what is next, what is risky. */
+export interface HandoffNote {
+  id: number;
+  issue_id: number;
+  key: string;
+  session_id: string | null;
+  agent_name: string;
+  mode: ClaimMode;
+  state: AgentState;
+  note: string;
+  created_at: string;
 }
 
 export interface Comment {
@@ -101,7 +129,7 @@ export interface Comment {
   updated_at: string;
 }
 
-export type IssueDetail = Issue & { comments: Comment[] };
+export type IssueDetail = Issue & { comments: Comment[]; sessions: IssueSession[] };
 
 export type EpicView = Epic & {
   progress: Record<string, number>;
@@ -609,6 +637,12 @@ export interface AgentRosterEntry {
   claim_count: number;
   exclusive_count: number;
   intent_count: number;
+  /** Live exclusive claim cap for one agent name (default 10). */
+  exclusive_limit: number;
+  /** Live exclusive claims across this agent's orchestrator tree. */
+  orchestrator_exclusive_count: number;
+  /** Live exclusive claim cap for one orchestrator tree (default 100). */
+  orchestrator_exclusive_limit: number;
   user_id?: number | null;
   login?: string | null;
   paused_by?: number | null;
@@ -982,10 +1016,38 @@ export class BreadboardClient {
     this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
   heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>
     this.req<AgentClaim>("PUT", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`, update);
-  releaseClaim = (key: string, agent?: string) =>
-    this.req<void>("DELETE", `/api/issues/${key}/claim${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
-  releaseClaimById = (id: number) =>
-    this.req<void>("DELETE", `/api/claims/${id}`);
+  releaseClaim = (
+    key: string,
+    agent?: string,
+    note?: string,
+    noNote = false,
+  ) => {
+    const q = new URLSearchParams();
+    if (agent) q.set("agent", agent);
+    if (note != null) q.set("note", note);
+    if (noNote) q.set("no_note", "true");
+    const qs = q.toString();
+    return this.req<void>(
+      "DELETE",
+      `/api/issues/${key}/claim${qs ? `?${qs}` : ""}`,
+    );
+  };
+  releaseClaimById = (id: number, note?: string, noNote = false) => {
+    const q = new URLSearchParams();
+    if (note != null) q.set("note", note);
+    if (noNote) q.set("no_note", "true");
+    const qs = q.toString();
+    return this.req<void>("DELETE", `/api/claims/${id}${qs ? `?${qs}` : ""}`);
+  };
+  getIssueSessions = (key: string) =>
+    this.req<IssueSession[]>("GET", `/api/issues/${key}/sessions`);
+  getIssueHandoffs = (key: string) =>
+    this.req<HandoffNote[]>("GET", `/api/issues/${key}/handoffs`);
+  getSessionIssues = (sessionID: string) =>
+    this.req<IssueSession[]>(
+      "GET",
+      `/api/sessions/${encodeURIComponent(sessionID)}/issues`,
+    );
   listChatRooms = (agent?: string) =>
     this.req<ChatRoom[]>("GET", `/api/chat/rooms${agent ? `?agent=${encodeURIComponent(agent)}` : ""}`);
   createChatRoom = (name: string, description?: string) =>

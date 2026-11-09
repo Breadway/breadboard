@@ -13,9 +13,19 @@
   import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
+  import ReleaseHandoff from "./lib/ReleaseHandoff.svelte";
   import { closeOpenMenu } from "./lib/ui/Menu.svelte";
 
   let devLoginName = $state("riley");
+
+  // A cold load of /chat?dm=<agent> opens that DM. The SPA fallback serves
+  // index.html for the path, so this runs before the first paint of a view.
+  function applyPathRoute() {
+    if (!/(^|\/)chat\/?$/.test(location.pathname)) return;
+    const dm = new URLSearchParams(location.search).get("dm")?.trim();
+    store.view = "chat";
+    if (dm) store.chatDm = dm;
+  }
 
   // #new (the desktop shell's quick-add hotkey) opens the palette; #KEY
   // (from "Copy link") opens that issue once the board has loaded.
@@ -35,6 +45,7 @@
   });
 
   onMount(() => {
+    applyPathRoute();
     void store.init();
     onHash();
     window.addEventListener("hashchange", onHash);
@@ -145,7 +156,13 @@
       </div>
       <nav class="tabbar" aria-label="Views">
         {#each tabs as t (t.v)}
-          <button class:on={store.view === t.v} onclick={() => (store.view = t.v)}>
+          <button
+            class:on={store.view === t.v}
+            onclick={() => {
+              store.view = t.v;
+              if (t.v !== "chat") store.updateChatUrl(null);
+            }}
+          >
             {t.label}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}{#if t.v === "agents" && store.activeAgents}<span class="pill">{store.activeAgents}</span>{/if}
           </button>
         {/each}
@@ -155,6 +172,7 @@
 
   <IssueDrawer />
   <CommandPalette />
+  <ReleaseHandoff />
 
   {#if store.toast}
     {#key store.toast.id}

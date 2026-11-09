@@ -6,8 +6,7 @@
 //   BREADBOARD_SERVER / BREADBOARD_TOKEN env vars
 //   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -21,10 +20,12 @@ import {
   STATUSES,
   PRIORITIES,
   type ArtifactKind,
+  type HandoffNote,
   type IssueFilter,
   type IssueLink,
   type IssuePatch,
 } from "@breadboard/api-client";
+import { resolveCommitMetadata } from "./git.js";
 
 const LINK_KINDS = ["blocks", "blocked-by", "relates-to"] as const;
 
@@ -224,34 +225,6 @@ void ensureRegistered().catch((e) => {
   console.error(`breadboard registration failed: ${e instanceof Error ? e.message : String(e)}`);
 });
 
-function runGit(args: string[], input?: string): string | undefined {
-  const result = spawnSync("git", args, {
-    input,
-    encoding: "utf8",
-    timeout: 10_000,
-    maxBuffer: 32 * 1024 * 1024,
-  });
-  if (result.error || result.status !== 0 || typeof result.stdout !== "string") return undefined;
-  return result.stdout.trim();
-}
-
-/** Expand a short or symbolic SHA using the local repo, when `workdir` is known. */
-function resolveCommitSha(workdir: string, sha: string): string {
-  const full = runGit(["-C", workdir, "rev-parse", "--verify", `${sha}^{commit}`]);
-  return full?.split(/\s+/)[0] || sha.trim();
-}
-
-function resolveTreeSha(workdir: string, sha: string): string | undefined {
-  return runGit(["-C", workdir, "rev-parse", `${sha}^{tree}`])?.split(/\s+/)[0];
-}
-
-/** `git patch-id --stable`: the same patch keeps this id across a rebase. */
-function resolvePatchId(workdir: string, sha: string): string | undefined {
-  const patch = runGit(["-C", workdir, "show", "--no-color", "--pretty=format:", sha]);
-  if (!patch) return undefined;
-  return runGit(["patch-id", "--stable"], patch)?.split(/\s+/)[0];
-}
-
 async function resolveEpicId(keyOrId?: string): Promise<number | undefined> {
   if (!keyOrId) return undefined;
   const n = Number(keyOrId);
@@ -340,7 +313,23 @@ function stopChatPoller() {
   pollerAgent = undefined;
 }
 
+/// The breadboard-chat plugin already injects pushes into the session. Running
+/// this poller too wakes the same agent twice per push, which showed up as one
+/// agent posting several replies to a single @everyone. Skip it when the plugin
+/// is installed, unless the operator forces it on with BREADBOARD_CHAT_POLLER=1.
+function chatPollerEnabled(): boolean {
+  const mode = (process.env.BREADBOARD_CHAT_POLLER ?? "").trim().toLowerCase()
+  if (["0", "off", "false", "no"].includes(mode)) return false
+  if (["1", "on", "true", "yes"].includes(mode)) return true
+  const configDir = process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config")
+  return !existsSync(join(configDir, "opencode", "plugins", "breadboard-chat"))
+}
+
 function ensureChatPoller(explicit?: string) {
+  if (!chatPollerEnabled()) {
+    stopChatPoller()
+    return
+  }
   const name = explicit?.trim() || autoAgentName;
   if (!name) return;
   if (chatPoller && pollerAgent === name) return;
@@ -630,6 +619,8 @@ server.tool(
     "exact session; it never guesses from whichever agent was last active. If this session used " +
     "more than one model, pass model explicitly. Pass workdir (the local repo path) to fill commit " +
     "tree_sha and patch_id from git, which lets a later rebase or squash match this record. " +
+    "When workdir is given it must be a git work tree and the commit must resolve there; otherwise " +
+    "the tool returns an explicit error and records nothing. " +
     "If no model can be established it is stored as unknown, not invented.",
   {
     repo: z.string().describe("owner/name, e.g. Breadway/breadboard"),
@@ -654,9 +645,10 @@ server.tool(
       let resolvedTree = tree_sha;
       let resolvedPatch = patch_id;
       if (workdir) {
-        resolvedSha = resolveCommitSha(workdir, resolvedSha);
-        if (!resolvedTree) resolvedTree = resolveTreeSha(workdir, resolvedSha);
-        if (!resolvedPatch) resolvedPatch = resolvePatchId(workdir, resolvedSha);
+        const metadata = resolveCommitMetadata(workdir, resolvedSha);
+        resolvedSha = metadata.sha;
+        if (!resolvedTree) resolvedTree = metadata.tree_sha;
+        if (!resolvedPatch) resolvedPatch = metadata.patch_id;
       }
       return client.recordCommit({
         repo,
@@ -873,10 +865,13 @@ server.tool(
     "issues so the Agents tab groups your work; after naming, omit agent_name here. " +
     "mode=exclusive (default) is real work: first claim wins (409 means another agent has it: do not " +
     "fight the lock, check agent_status and pick other work), and it moves backlog/todo to doing and " +
-    "assigns the card to you. mode=intent is a soft reservation for work you plan to take later: it " +
+    "assigns the card to you. Exclusive claims are budgeted (10 per agent name, 100 per orchestrator " +
+    "tree); a refusal names the limit and the claim to release, and intents are never capped. " +
+    "mode=intent is a soft reservation for work you plan to take later: it " +
     "never moves the card and never blocks anyone. " +
     "The MCP server auto-heartbeats your claim every 60s while this process is alive, so it stays live; " +
-    "call release_claim when done and update_claim to report state/PR progress.",
+    "the result includes the issue's latest handoff note when one exists, so a resuming session can pick " +
+    "up context. call release_claim with a handoff note when done and update_claim to report state/PR progress.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z
@@ -906,7 +901,8 @@ server.tool(
         const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
         startKeepalive(key, created.agent_name);
         ensureChatPoller(created.agent_name);
-        return created;
+        const issue = await client.getIssue(key).catch(() => null);
+        return { ...created, last_handoff: issue?.last_handoff ?? null };
       } catch (e) {
         // Re-claiming your own claim after a restart is not a conflict: find
         // it, heartbeat it, and re-arm the keepalive. Only resume a claim of
@@ -920,7 +916,12 @@ server.tool(
             const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
             startKeepalive(key, resumed.agent_name);
             ensureChatPoller(resumed.agent_name);
-            return { ...resumed, resumed: true };
+            const issue = await client.getIssue(key).catch(() => null);
+            return {
+              ...resumed,
+              resumed: true,
+              last_handoff: issue?.last_handoff ?? null,
+            };
           }
         }
         throw e;
@@ -951,15 +952,31 @@ server.tool(
 server.tool(
   "release_claim",
   "Release your claim (exclusive or intent). The card keeps its status; only the agent tint goes away. " +
+    "REQUIRED: pass note, one line covering what is done, what is next and what is risky, so the next " +
+    "session can pick the issue up. The server refuses a release without it (400), and the error names " +
+    "the rule. The only exception is an explicit no_note=true for a claim that never held work: an intent " +
+    "claim, or an exclusive claim still in planned state with no branch, worktree, repo, PR or head commit. " +
     "Pass agent_name when you hold more than one claim on the issue.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z.string().optional().describe("which of your claims to release"),
+    note: z
+      .string()
+      .optional()
+      .describe(
+        "REQUIRED handoff: done, next and risky in one line (500 chars max). Refused without it unless no_note is true and the claim never held work.",
+      ),
+    no_note: z
+      .boolean()
+      .optional()
+      .describe(
+        "Explicitly release a claim that never held work without a handoff. Only valid for an intent claim or a planned exclusive claim with no branch, worktree, repo, PR or commit; otherwise the server refuses.",
+      ),
   },
-  ({ key, agent_name }) =>
+  ({ key, agent_name, note, no_note }) =>
     run(async () => {
       const who = agent_name?.trim() || autoAgentName;
-      await client.releaseClaim(key, who);
+      await client.releaseClaim(key, who, note, no_note === true);
       stopKeepalive(key, who);
       return `released ${key}`;
     }),
@@ -1021,7 +1038,9 @@ server.tool(
   "resume_claims",
   "Re-attach to work you already own after a restart. Heartbeats every claim owned by you under " +
     "this agent name and re-arms the keepalive for each, so they stop looking abandoned/stale. " +
-    "Call this when an MCP session starts and you intend to continue previous work.",
+    "Returns each claim's latest handoff note, which is the note the previous session left when it " +
+    "released: read it as context before continuing. Call this when an MCP session starts and you " +
+    "intend to continue previous work.",
   {
     agent_name: z
       .string()
@@ -1038,13 +1057,14 @@ server.tool(
       if (mine.length === 0) {
         return `no claims found for ${name}`;
       }
-      const resumed: string[] = [];
+      const resumed: Array<{ key: string; last_handoff: HandoffNote | null }> = [];
       const failed: string[] = [];
       for (const c of mine) {
         try {
           await client.heartbeatClaim(c.key, { agent_name: name }, name);
           startKeepalive(c.key, name);
-          resumed.push(c.key);
+          const issue = await client.getIssue(c.key).catch(() => null);
+          resumed.push({ key: c.key, last_handoff: issue?.last_handoff ?? null });
         } catch {
           failed.push(c.key);
         }

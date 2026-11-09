@@ -26,9 +26,11 @@
 
   onMount(() => {
     void store.loadAgents();
+    void store.loadChatRooms().catch(() => {});
     const t = setInterval(() => {
       now = Date.now();
       void store.loadAgents();
+      void store.loadChatRooms().catch(() => {});
     }, 15_000);
     return () => clearInterval(t);
   });
@@ -80,6 +82,12 @@
     parentSessionId: string | null;
     orchestrator: string | null;
     orchestratorSessionId: string | null;
+    /** Live exclusive claim budget for this name (per agent). */
+    exclusiveLimit: number;
+    /** Live exclusive claims across the orchestrator tree this name is in. */
+    treeExclusive: number;
+    /** Live exclusive claim budget for one orchestrator tree. */
+    treeLimit: number;
   }
 
   // The roster is the union of sessions, profiles and claims, so a name with
@@ -119,6 +127,9 @@
           parentSessionId: null,
           orchestrator: null,
           orchestratorSessionId: null,
+          exclusiveLimit: 10,
+          treeExclusive: 0,
+          treeLimit: 100,
         };
         map.set(id, g);
       }
@@ -164,6 +175,9 @@
       g.parentSessionId = r.parent_session_id ?? null;
       g.orchestrator = r.orchestrator ?? null;
       g.orchestratorSessionId = r.orchestrator_session_id ?? null;
+      g.exclusiveLimit = r.exclusive_limit;
+      g.treeExclusive = r.orchestrator_exclusive_count;
+      g.treeLimit = r.orchestrator_exclusive_limit;
       if (r.last_seen && (!g.lastHeartbeat || r.last_seen > g.lastHeartbeat)) {
         g.lastHeartbeat = r.last_seen;
       }
@@ -439,9 +453,36 @@
   const selectedSubagents = $derived(
     selected ? subagentCounts.get(selected.name) : undefined,
   );
+  const selectedDm = $derived(selected ? store.dmRoomFor(selected.name) : undefined);
+  const selectedDmUnread = $derived(selectedDm?.unread ?? 0);
+  const selectedDmHref = $derived(selected ? store.chatDmHref(selected.name) : "");
+  const selectedDmUrl = $derived(
+    selected ? new URL(selectedDmHref, location.origin).toString() : "",
+  );
 
   function openAgent(g: Group) {
     openAgentId = g.id;
+    // The DM may have been created or read since the page loaded.
+    void store.loadChatRooms().catch(() => {});
+  }
+
+  /** Land on the DM with this agent; Chat opens or creates it. */
+  function messageAgent(g: Group) {
+    store.openAgentDm(g.name);
+    closeAgent();
+  }
+
+  async function copyDmLink() {
+    if (!selected) return;
+    try {
+      await navigator.clipboard.writeText(selectedDmUrl);
+      copied = selectedDmUrl;
+      setTimeout(() => {
+        if (copied === selectedDmUrl) copied = null;
+      }, 1500);
+    } catch {
+      /* the link is still selectable and copyable by hand */
+    }
   }
 
   function focusOn(name: string | null) {
@@ -699,6 +740,20 @@
 
     <footer class="afoot">
       <span class="counts">{g.work.length} issue{g.work.length === 1 ? "" : "s"}</span>
+      <span
+        class="budget"
+        class:warn={g.exclusiveLimit > 0 && g.work.length * 5 >= g.exclusiveLimit * 4}
+        class:full={g.exclusiveLimit > 0 && g.work.length >= g.exclusiveLimit}
+        title="Live exclusive claims: {g.work.length} of {g.exclusiveLimit} allowed per agent"
+      >{g.work.length}/{g.exclusiveLimit}</span>
+      {#if isOrchestrator || parent}
+        <span
+          class="budget tree"
+          class:warn={g.treeLimit > 0 && g.treeExclusive * 5 >= g.treeLimit * 4}
+          class:full={g.treeLimit > 0 && g.treeExclusive >= g.treeLimit}
+          title="Live exclusive claims across {isOrchestrator ? "this orchestrator and its subagents" : "this agent's orchestrator tree"}: {g.treeExclusive} of {g.treeLimit}"
+        >tree {g.treeExclusive}/{g.treeLimit}</span>
+      {/if}
       <span class="grow"></span>
       {#if g.work.length}
         <span class="completion">
@@ -963,6 +1018,11 @@
             <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
           </span>
         {/if}
+        <button
+          class="btn sm message-agent"
+          title="Open the DM with {selected.name}"
+          onclick={() => messageAgent(selected)}
+        >Message</button>
         {#if selected.hidden}
           <button class="btn sm" onclick={() => void unhideGroup(selected)}>Unhide</button>
         {:else}
@@ -980,6 +1040,28 @@
       </header>
 
       <div class="session">
+        <div class="srow chat-row" data-dm-agent={selected.name} data-dm-unread={selectedDmUnread}>
+          <span class="slabel">chat</span>
+          <a
+            class="dm-link"
+            href={selectedDmHref}
+            title="Open the DM with {selected.name}"
+            onclick={(e) => {
+              e.preventDefault();
+              messageAgent(selected);
+            }}
+          >{selectedDmHref}</a>
+          <span
+            class="dm-unread"
+            class:on={selectedDmUnread > 0}
+            title={selectedDmUnread
+              ? `${selectedDmUnread} unread message${selectedDmUnread === 1 ? "" : "s"} from ${selected.name}`
+              : "No unread messages"}
+          >{selectedDmUnread ? `${selectedDmUnread} unread` : "no unread"}</span>
+          <button class="btn ghost sm" onclick={() => void copyDmLink()}>
+            {copied === selectedDmUrl ? "Copied" : "Copy link"}
+          </button>
+        </div>
         <div class="srow">
           <span class="slabel">session</span>
           {#if selected.sessionId}
@@ -1016,6 +1098,14 @@
             <span>{selectedSubagents.live} live of {selectedSubagents.total}</span>
           </div>
         {/if}
+        <div class="srow">
+          <span class="slabel">claims</span>
+          <span>{selected.work.length} of {selected.exclusiveLimit} exclusive</span>
+          {#if selected.orchestrator || selectedSubagents?.total}
+            <span class="slabel">tree</span>
+            <span>{selected.treeExclusive} of {selected.treeLimit}</span>
+          {/if}
+        </div>
         {#if selected.hidden}
           <div class="hidden-note">
             Hidden{selected.hiddenBy ? ` by ${selected.hiddenBy}` : ""}{selected.hiddenAt ? ` ${ago(selected.hiddenAt, now)}` : ""}.
@@ -1687,6 +1777,25 @@
   .counts {
     color: var(--ink-3);
   }
+  .budget {
+    padding: 1px 5px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--ink-3) 35%, transparent);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+  }
+  .budget.tree {
+    border-style: dashed;
+  }
+  .budget.warn {
+    border-color: color-mix(in srgb, #d69e2e 70%, transparent);
+    color: #d69e2e;
+  }
+  .budget.full {
+    border-color: color-mix(in srgb, var(--danger) 70%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
+  }
   .completion {
     display: inline-flex;
     align-items: center;
@@ -1826,6 +1935,26 @@
   }
   .linklike:hover {
     text-decoration: underline;
+  }
+  .dm-link {
+    color: var(--accent);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .dm-link:hover {
+    text-decoration: underline;
+  }
+  .dm-unread {
+    padding: 1px 6px;
+    border-radius: 99px;
+    border: 1px solid var(--line-2);
+    color: var(--ink-3);
+    font: 500 9.5px/1.5 var(--font-mono);
+  }
+  .dm-unread.on {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .paused-note {
     color: var(--status-doing);

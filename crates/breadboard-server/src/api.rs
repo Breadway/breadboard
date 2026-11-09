@@ -208,6 +208,10 @@ pub struct IssueDetail {
     #[serde(flatten)]
     issue: Issue,
     comments: Vec<Comment>,
+    /// Sessions that touched this issue, most recent action first. A released
+    /// claim keeps its link, so this is the handoff history a fresh session
+    /// reads before starting.
+    sessions: Vec<breadboard_core::IssueSession>,
 }
 
 pub async fn list_issues(
@@ -278,7 +282,45 @@ pub async fn get_issue(
 ) -> AppResult<Json<IssueDetail>> {
     let issue = store::get_issue_by_key(&app.db, &key).await?;
     let comments = store::list_comments(&app.db, issue.id).await?;
-    Ok(Json(IssueDetail { issue, comments }))
+    let sessions = store::list_issue_sessions(&app.db, issue.id).await?;
+    Ok(Json(IssueDetail {
+        issue,
+        comments,
+        sessions,
+    }))
+}
+
+/// Sessions that touched one issue.
+pub async fn get_issue_sessions(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(key): Path<String>,
+) -> AppResult<Json<Vec<breadboard_core::IssueSession>>> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    Ok(Json(store::list_issue_sessions(&app.db, issue.id).await?))
+}
+
+/// Handoff-note history for one issue, newest first.
+pub async fn get_issue_handoffs(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(key): Path<String>,
+) -> AppResult<Json<Vec<breadboard_core::HandoffNote>>> {
+    let issue = store::get_issue_by_key(&app.db, &key).await?;
+    Ok(Json(
+        store::list_issue_handoffs(&app.db, issue.id, 50).await?,
+    ))
+}
+
+/// Back-link: the issues one session touched.
+pub async fn get_session_issues(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(session_id): Path<String>,
+) -> AppResult<Json<Vec<breadboard_core::IssueSession>>> {
+    Ok(Json(
+        store::list_session_issues(&app.db, &session_id).await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -1339,7 +1381,7 @@ pub async fn register_agent(
     Json(body): Json<breadboard_core::dto::AgentRegister>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRegistration>> {
     Ok(Json(
-        store::register_agent(&app.db, user.0.id, &body).await?,
+        store::register_agent(&app.db, user.0.id, &body, &app.config.claim_limits()).await?,
     ))
 }
 
@@ -1348,7 +1390,9 @@ pub async fn agent_roster(
     State(app): State<AppState>,
     _user: AuthUser,
 ) -> AppResult<Json<Vec<breadboard_core::dto::AgentRosterEntry>>> {
-    Ok(Json(store::agent_roster(&app.db).await?))
+    Ok(Json(
+        store::agent_roster(&app.db, &app.config.claim_limits()).await?,
+    ))
 }
 
 /// Kill a name: remove it from every view, release its claims, free the name
@@ -1377,7 +1421,8 @@ pub async fn pause_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::pause_agent(&app.db, user.0.id, &name).await?;
+    let (entry, changed) =
+        store::pause_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentPaused {
             agent: entry.agent_name.clone(),
@@ -1395,7 +1440,7 @@ pub async fn resume_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::resume_agent(&app.db, &name).await?;
+    let (entry, changed) = store::resume_agent(&app.db, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentResumed {
             agent: entry.agent_name.clone(),
@@ -1413,7 +1458,8 @@ pub async fn hide_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::hide_agent(&app.db, user.0.id, &name).await?;
+    let (entry, changed) =
+        store::hide_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
     if changed {
         let event = BoardEvent::AgentHidden {
             agent: entry.agent_name.clone(),
@@ -1430,7 +1476,7 @@ pub async fn unhide_agent(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
-    let (entry, changed) = store::unhide_agent(&app.db, &name).await?;
+    let (entry, changed) = store::unhide_agent(&app.db, &name, &app.config.claim_limits()).await?;
     let entry = entry.ok_or(crate::error::AppError::NotFound)?;
     if changed {
         let event = BoardEvent::AgentUnhidden {
@@ -1452,7 +1498,14 @@ pub async fn rename_agent(
     Json(body): Json<breadboard_core::dto::AgentRename>,
 ) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
     Ok(Json(
-        store::rename_agent(&app.db, user.0.id, &name, &body.new_name).await?,
+        store::rename_agent(
+            &app.db,
+            user.0.id,
+            &name,
+            &body.new_name,
+            &app.config.claim_limits(),
+        )
+        .await?,
     ))
 }
 
@@ -1529,7 +1582,14 @@ pub async fn claim_issue(
     )
     .await?;
     let mode = body.mode.unwrap_or(ClaimMode::Exclusive);
-    let claim = store::insert_claim(&app.db, &issue, user.0.id, &body).await?;
+    let claim = store::insert_claim(
+        &app.db,
+        &issue,
+        user.0.id,
+        &body,
+        &app.config.claim_limits(),
+    )
+    .await?;
     let audit = store::log_claim_event(
         &app.db,
         issue.id,
@@ -1774,25 +1834,50 @@ pub async fn heartbeat_claim(
     Ok(Json(claim))
 }
 
+#[derive(Deserialize)]
+pub struct ReleaseQuery {
+    /// Agent name, when the caller owns more than one claim on the issue.
+    #[serde(default)]
+    pub agent: Option<String>,
+    /// `exclusive` or `intent`, when the same agent holds both.
+    #[serde(default)]
+    pub mode: Option<ClaimMode>,
+    /// Required handoff note: one line covering done, next and risky.
+    #[serde(default)]
+    pub note: Option<String>,
+    /// Explicit opt-out for a claim that never held work (intent, or planned
+    /// exclusive with no branch/worktree/repo/PR/commit). Never inferred.
+    #[serde(default)]
+    pub no_note: Option<bool>,
+}
+
 /// Release the caller's claim on an issue. `?agent=` disambiguates when the
 /// caller holds more than one. The card keeps its status; only the tint goes
-/// away. Intents are released the same way.
+/// away. A handoff note is required unless the claim never held work and the
+/// caller passes `no_note=true` explicitly.
 pub async fn release_claim(
     State(app): State<AppState>,
     user: AuthUser,
     Path(key): Path<String>,
-    Query(q): Query<ClaimQuery>,
+    Query(q): Query<ReleaseQuery>,
 ) -> AppResult<StatusCode> {
     let issue = store::get_issue_by_key(&app.db, &key).await?;
     let claim =
         resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), q.mode, None).await?;
-    store::delete_claim_by_id(&app.db, claim.id, Some(user.0.id)).await?;
+    let claim = store::release_claim_with_handoff(
+        &app.db,
+        claim.id,
+        Some(user.0.id),
+        q.note.as_deref(),
+        q.no_note.unwrap_or(false),
+    )
+    .await?;
     let _ = store::log_claim_event(
         &app.db,
         issue.id,
         "agent_release",
         Some(&format!("{} ({})", claim.agent_name, claim.mode.as_str())),
-        None,
+        q.note.as_deref(),
         Some(user.0.id),
     )
     .await;
@@ -1811,11 +1896,14 @@ pub async fn release_claim(
 }
 
 /// Release one claim by id (the Agents page uses this so each row is
-/// independently releasable). Only the owner may release.
+/// independently releasable). Only the owner may release. The same handoff
+/// rule applies: a note, or an explicit `no_note` for a claim that never held
+/// work.
 pub async fn release_claim_by_id(
     State(app): State<AppState>,
     user: AuthUser,
     Path(id): Path<i64>,
+    Query(q): Query<ReleaseQuery>,
 ) -> AppResult<StatusCode> {
     let claim = store::get_claim_by_id(&app.db, id)
         .await?
@@ -1823,13 +1911,20 @@ pub async fn release_claim_by_id(
     if claim.claimed_by != user.0.id {
         return Err(crate::error::AppError::forbidden());
     }
-    store::delete_claim_by_id(&app.db, id, Some(user.0.id)).await?;
+    let claim = store::release_claim_with_handoff(
+        &app.db,
+        id,
+        Some(user.0.id),
+        q.note.as_deref(),
+        q.no_note.unwrap_or(false),
+    )
+    .await?;
     let _ = store::log_claim_event(
         &app.db,
         claim.issue_id,
         "agent_release",
         Some(&format!("{} ({})", claim.agent_name, claim.mode.as_str())),
-        None,
+        q.note.as_deref(),
         Some(user.0.id),
     )
     .await;

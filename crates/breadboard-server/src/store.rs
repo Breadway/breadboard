@@ -8,12 +8,13 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::Context;
 use breadboard_core::{
-    Comment, Cycle, Epic, ForgejoRef, Issue, IssueLink, IssueType, LinkKind, Priority, Project,
-    Status, SyncSource, User,
+    Comment, Cycle, Epic, ForgejoRef, HandoffNote, Issue, IssueLink, IssueSession, IssueType,
+    LinkKind, Priority, Project, Status, SyncSource, User,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, SqlitePool};
 
+use crate::config::ClaimLimits;
 use crate::dto::{
     AgentRegister, AgentRegistration, AgentRemoval, AgentRosterEntry, IssueFilter, IssuePatch,
     NewCycle, NewEpic, NewIssue, NewProject,
@@ -642,7 +643,10 @@ async fn hydrate(db: &SqlitePool, r: IssueRow) -> AppResult<Issue> {
             .fetch_all(db)
             .await?;
 
-    Ok(finish_issue(r, labels, link_rows))
+    let last_handoff = latest_handoff(db, r.id).await?;
+    let mut issue = finish_issue(r, labels, link_rows);
+    issue.last_handoff = last_handoff;
+    Ok(issue)
 }
 
 /// Hydrate a page in two grouped queries instead of two per row. A list of N
@@ -677,6 +681,28 @@ async fn hydrate_rows(db: &SqlitePool, rows: Vec<IssueRow>) -> AppResult<Vec<Iss
     links_qb.push(") ORDER BY issue_id");
     let link_rows: Vec<(i64, i64, String)> = links_qb.build_query_as().fetch_all(db).await?;
 
+    // Latest handoff per issue for the page, one grouped query. Ordered newest
+    // first so the first row seen for an id wins.
+    let mut handoff_qb: sqlx::QueryBuilder<sqlx::Sqlite> = sqlx::QueryBuilder::new(format!(
+        "SELECT {} FROM handoff_notes h JOIN issues i ON i.id = h.issue_id WHERE h.issue_id IN (",
+        HANDOFF_COLS
+    ));
+    {
+        let mut separated = handoff_qb.separated(", ");
+        for id in &ids {
+            separated.push_bind(*id);
+        }
+    }
+    handoff_qb.push(") ORDER BY h.created_at DESC, h.id DESC");
+    let handoff_rows: Vec<HandoffRow> = handoff_qb.build_query_as().fetch_all(db).await?;
+    let mut handoff_by_issue: std::collections::HashMap<i64, HandoffNote> =
+        std::collections::HashMap::new();
+    for row in handoff_rows {
+        handoff_by_issue
+            .entry(row.issue_id)
+            .or_insert_with(|| row.into());
+    }
+
     let mut labels_by_issue: std::collections::HashMap<i64, Vec<String>> =
         std::collections::HashMap::new();
     for (issue_id, label) in label_rows {
@@ -696,7 +722,10 @@ async fn hydrate_rows(db: &SqlitePool, rows: Vec<IssueRow>) -> AppResult<Vec<Iss
         .map(|r| {
             let labels = labels_by_issue.remove(&r.id).unwrap_or_default();
             let links = links_by_issue.remove(&r.id).unwrap_or_default();
-            finish_issue(r, labels, links)
+            let last_handoff = handoff_by_issue.remove(&r.id);
+            let mut issue = finish_issue(r, labels, links);
+            issue.last_handoff = last_handoff;
+            issue
         })
         .collect())
 }
@@ -725,6 +754,7 @@ fn finish_issue(r: IssueRow, labels: Vec<String>, link_rows: Vec<(i64, String)>)
         cycle_id: r.cycle_id,
         labels,
         links,
+        last_handoff: None,
         forgejo_ref: match (r.forgejo_repo, r.forgejo_number) {
             (Some(repo), Some(number)) => Some(breadboard_core::ForgejoRef { repo, number }),
             _ => None,
@@ -733,6 +763,162 @@ fn finish_issue(r: IssueRow, labels: Vec<String>, link_rows: Vec<(i64, String)>)
         created_at: parse_ts(&r.created_at),
         updated_at: parse_ts(&r.updated_at),
     }
+}
+
+/// Columns for a hydrated handoff note joined with its issue key.
+const HANDOFF_COLS: &str = "h.id, h.issue_id, i.key AS key, h.session_id, \
+    h.agent_name, h.mode, h.state, h.note, h.created_at";
+
+#[derive(FromRow)]
+struct HandoffRow {
+    id: i64,
+    issue_id: i64,
+    key: String,
+    session_id: Option<String>,
+    agent_name: String,
+    mode: String,
+    state: String,
+    note: String,
+    created_at: String,
+}
+
+impl From<HandoffRow> for HandoffNote {
+    fn from(r: HandoffRow) -> Self {
+        HandoffNote {
+            id: r.id,
+            issue_id: r.issue_id,
+            key: r.key,
+            session_id: r.session_id,
+            agent_name: r.agent_name,
+            mode: ClaimMode::parse(&r.mode).unwrap_or(ClaimMode::Exclusive),
+            state: AgentState::parse(&r.state).unwrap_or(AgentState::Implementing),
+            note: r.note,
+            created_at: parse_ts(&r.created_at),
+        }
+    }
+}
+
+/// Most recent handoff note for one issue, if any. This is what a resuming
+/// session reads as context.
+pub async fn latest_handoff(db: &SqlitePool, issue_id: i64) -> AppResult<Option<HandoffNote>> {
+    let row: Option<HandoffRow> = sqlx::query_as(&format!(
+        "SELECT {HANDOFF_COLS} FROM handoff_notes h JOIN issues i ON i.id = h.issue_id \
+          WHERE h.issue_id = ?1 ORDER BY h.created_at DESC, h.id DESC LIMIT 1"
+    ))
+    .bind(issue_id)
+    .fetch_optional(db)
+    .await?;
+    Ok(row.map(Into::into))
+}
+
+/// Handoff history for an issue, newest first.
+pub async fn list_issue_handoffs(
+    db: &SqlitePool,
+    issue_id: i64,
+    limit: i64,
+) -> AppResult<Vec<HandoffNote>> {
+    let rows: Vec<HandoffRow> = sqlx::query_as(&format!(
+        "SELECT {HANDOFF_COLS} FROM handoff_notes h JOIN issues i ON i.id = h.issue_id \
+          WHERE h.issue_id = ?1 ORDER BY h.created_at DESC, h.id DESC LIMIT ?2"
+    ))
+    .bind(issue_id)
+    .bind(limit.clamp(1, 200))
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+#[derive(FromRow)]
+struct IssueSessionRow {
+    issue_id: i64,
+    key: String,
+    title: String,
+    status: String,
+    session_id: String,
+    agent_name: String,
+    first_seen: String,
+    last_seen: String,
+    last_state: Option<String>,
+}
+
+const ISSUE_SESSION_COLS: &str = "s.issue_id, i.key AS key, i.title AS title, \
+    i.status AS status, s.session_id, s.agent_name, s.first_seen, s.last_seen, s.last_state";
+
+impl From<IssueSessionRow> for IssueSession {
+    fn from(r: IssueSessionRow) -> Self {
+        IssueSession {
+            issue_id: r.issue_id,
+            key: r.key,
+            title: r.title,
+            status: Status::parse(&r.status).unwrap_or(Status::Backlog),
+            session_id: r.session_id,
+            agent_name: r.agent_name,
+            first_seen: parse_ts(&r.first_seen),
+            last_seen: parse_ts(&r.last_seen),
+            last_state: r.last_state.as_deref().and_then(AgentState::parse),
+        }
+    }
+}
+
+/// Sessions that touched one issue, most recent action first.
+pub async fn list_issue_sessions(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<IssueSession>> {
+    let rows: Vec<IssueSessionRow> = sqlx::query_as(&format!(
+        "SELECT {ISSUE_SESSION_COLS} FROM issue_sessions s JOIN issues i ON i.id = s.issue_id \
+          WHERE s.issue_id = ?1 ORDER BY s.last_seen DESC, s.session_id"
+    ))
+    .bind(issue_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// The issue links for one session (issue -> sessions and back).
+pub async fn list_session_issues(
+    db: &SqlitePool,
+    session_id: &str,
+) -> AppResult<Vec<IssueSession>> {
+    let rows: Vec<IssueSessionRow> = sqlx::query_as(&format!(
+        "SELECT {ISSUE_SESSION_COLS} FROM issue_sessions s JOIN issues i ON i.id = s.issue_id \
+          WHERE s.session_id = ?1 ORDER BY s.last_seen DESC, i.key"
+    ))
+    .bind(session_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().map(Into::into).collect())
+}
+
+/// Upsert a session link. `first_seen` is preserved on later heartbeats; the
+/// release path deliberately calls this rather than deleting, so the link
+/// outlives the claim.
+pub async fn link_issue_session(
+    db: &SqlitePool,
+    issue_id: i64,
+    session_id: &str,
+    agent_name: &str,
+    state: AgentState,
+    at: &str,
+) -> AppResult<()> {
+    let session_id = session_id.trim();
+    if session_id.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "INSERT INTO issue_sessions
+            (issue_id, session_id, agent_name, first_seen, last_seen, last_state)
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5)
+         ON CONFLICT(issue_id, session_id) DO UPDATE SET
+            agent_name = excluded.agent_name,
+            last_seen = excluded.last_seen,
+            last_state = excluded.last_state",
+    )
+    .bind(issue_id)
+    .bind(session_id)
+    .bind(crate::names::normalize(agent_name))
+    .bind(at)
+    .bind(state.as_str())
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 pub async fn get_issue(db: &SqlitePool, id: i64) -> AppResult<Issue> {
@@ -2150,6 +2336,138 @@ pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bo
     Ok(n > 0)
 }
 
+/// Live exclusive claim usage plus the resolved orchestrator tree (BB-154).
+///
+/// The tree comes from `agent_sessions`: a name whose `parent_session_id`
+/// matches another registered session's `session_id` rolls up under that
+/// parent. An unlinked name (or a parent that is not a registered session) is
+/// its own root, which matches the roster's resolution rules.
+#[derive(Debug, Default)]
+pub struct ClaimUsage {
+    /// Lowercased agent name -> live exclusive claims.
+    pub counts: HashMap<String, i64>,
+    /// Lowercased agent name -> orchestrator tree root name.
+    pub roots: HashMap<String, String>,
+    /// Root name -> live exclusive claims across the whole tree.
+    pub totals: HashMap<String, i64>,
+}
+
+impl ClaimUsage {
+    pub fn root_of(&self, name: &str) -> String {
+        let key = name.trim().to_lowercase();
+        self.roots.get(&key).cloned().unwrap_or(key)
+    }
+
+    pub fn own_count(&self, name: &str) -> i64 {
+        self.counts
+            .get(&name.trim().to_lowercase())
+            .copied()
+            .unwrap_or(0)
+    }
+
+    pub fn tree_count(&self, name: &str) -> i64 {
+        self.totals.get(&self.root_of(name)).copied().unwrap_or(0)
+    }
+}
+
+/// Walk up `parent_session_id` until a name has no registered parent. A
+/// repeated name in one chain is a cycle and stops the walk at the repeat.
+fn tree_root(name: &str, parents: &HashMap<String, String>) -> String {
+    let mut current = name.to_string();
+    let mut seen = HashSet::new();
+    while let Some(parent) = parents.get(&current) {
+        if !seen.insert(current.clone()) {
+            break;
+        }
+        current = parent.clone();
+    }
+    current
+}
+
+/// Snapshot exclusive claim counts and the orchestrator forest in one pass.
+pub async fn claim_usage(db: &SqlitePool) -> AppResult<ClaimUsage> {
+    let count_rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT lower(agent_name) AS name, COUNT(*) AS n
+           FROM agent_claims
+          WHERE mode = 'exclusive'
+          GROUP BY lower(agent_name)",
+    )
+    .fetch_all(db)
+    .await?;
+    let counts: HashMap<String, i64> = count_rows.into_iter().collect();
+
+    let sessions: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT lower(agent_name), session_id, parent_session_id FROM agent_sessions",
+    )
+    .fetch_all(db)
+    .await?;
+    let by_session: HashMap<String, String> = sessions
+        .iter()
+        .filter_map(|(name, session, _)| session.clone().map(|id| (id, name.clone())))
+        .collect();
+    let mut parents: HashMap<String, String> = HashMap::new();
+    for (name, _, parent_session) in &sessions {
+        if let Some(parent_name) = parent_session.as_ref().and_then(|id| by_session.get(id)) {
+            if parent_name != name {
+                parents.insert(name.clone(), parent_name.clone());
+            }
+        }
+    }
+
+    let mut roots: HashMap<String, String> = HashMap::new();
+    // A name can appear in both `counts` and `sessions`, so resolve each name
+    // once instead of summing its claims once per source.
+    for name in sessions
+        .iter()
+        .map(|(name, _, _)| name)
+        .chain(counts.keys())
+    {
+        if !roots.contains_key(name) {
+            roots.insert(name.clone(), tree_root(name, &parents));
+        }
+    }
+    let mut totals: HashMap<String, i64> = HashMap::new();
+    for (name, n) in &counts {
+        let root = roots.get(name).cloned().unwrap_or_else(|| name.clone());
+        *totals.entry(root).or_insert(0) += n;
+    }
+
+    Ok(ClaimUsage {
+        counts,
+        roots,
+        totals,
+    })
+}
+
+/// Refuse a new exclusive claim when either live budget is already full.
+/// Intents never call this: only exclusive claims are capped.
+pub async fn ensure_claim_budget(
+    db: &SqlitePool,
+    agent_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<()> {
+    let usage = claim_usage(db).await?;
+    let name = agent_name.trim().to_lowercase();
+    let own = usage.own_count(&name);
+    if own >= limits.per_agent {
+        return Err(AppError::Conflict(format!(
+            "'{name}' already holds {own} live exclusive claims (limit {} per agent); \
+             release a claim before claiming another",
+            limits.per_agent
+        )));
+    }
+    let root = usage.root_of(&name);
+    let total = usage.tree_count(&name);
+    if total >= limits.per_orchestrator {
+        return Err(AppError::Conflict(format!(
+            "orchestrator '{root}' and its subagents already hold {total} live exclusive claims \
+             (limit {} per orchestrator); release a claim before claiming another",
+            limits.per_orchestrator
+        )));
+    }
+    Ok(())
+}
+
 pub async fn get_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
     let row: Option<AgentClaimRow> =
         sqlx::query_as(&format!("{} WHERE c.id = ?1", agent_claim_join()))
@@ -2202,6 +2520,7 @@ pub async fn insert_claim(
     issue: &Issue,
     claimed_by: i64,
     input: &crate::dto::ClaimUpsert,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentClaim> {
     input.validate().map_err(AppError::BadRequest)?;
     let mode = input.mode.unwrap_or(ClaimMode::Exclusive);
@@ -2222,6 +2541,13 @@ pub async fn insert_claim(
 
     if mode == ClaimMode::Exclusive && has_exclusive_claim(db, issue.id).await? {
         return Err(AppError::Conflict("issue is already claimed".into()));
+    }
+
+    // Budgets cover new exclusive work and promoting a queued intent into an
+    // exclusive claim: both arrive here as `mode = exclusive`. The intent is
+    // still in place, so a refusal leaves the soft reservation untouched.
+    if mode == ClaimMode::Exclusive {
+        ensure_claim_budget(db, &input.agent_name, limits).await?;
     }
 
     // Taking the work makes the same agent's queued intent redundant, and
@@ -2311,6 +2637,10 @@ pub async fn insert_claim(
             let claim = get_claim_by_id(db, done.last_insert_rowid())
                 .await?
                 .ok_or(AppError::NotFound)?;
+            if let Some(session) = claim.session_id.as_deref() {
+                link_issue_session(db, issue.id, session, &claim.agent_name, claim.state, &ts)
+                    .await?;
+            }
             // Timeline: a new claim (not an intent re-claim, which returns
             // through update_claim_row above).
             crate::agent_events::record_best_effort(
@@ -2487,6 +2817,18 @@ async fn update_claim_row(
 
     let claim = get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)?;
 
+    if let Some(session) = claim.session_id.as_deref() {
+        link_issue_session(
+            db,
+            claim.issue_id,
+            session,
+            &claim.agent_name,
+            claim.state,
+            ts,
+        )
+        .await?;
+    }
+
     if claim.state.as_str() != before_state {
         crate::agent_events::record_best_effort(
             db,
@@ -2532,34 +2874,128 @@ pub async fn update_claim(
     update_claim_row(db, claim_id, input, &now_rfc3339()).await
 }
 
-/// Release one claim by id. Returns the claim that was removed.
+/// Exact message shown when a release omits the required handoff note. Kept
+/// as one string so the REST API, CLI and MCP all surface the same rule.
+pub const RELEASE_NOTE_REQUIRED: &str = "release requires a handoff note: pass note=\"done: ...; next: ...; risky: ...\" (one line, 500 characters max). Use no_note=true only when the claim never held work: an intent claim, or an exclusive claim still in planned state with no branch, worktree, repo, PR or head commit.";
+
+/// Exact message when `no_note` is used on a claim that did hold work.
+pub const NO_NOTE_NOT_ALLOWED: &str = "no_note is only allowed for a claim that never held work: an intent claim, or an exclusive claim still in planned state with no branch, worktree, repo, PR or head commit. This claim held work, so it needs a handoff note covering what is done, what is next and what is risky.";
+
+fn normalize_handoff_note(raw: &str) -> Option<String> {
+    let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!one_line.is_empty()).then_some(one_line)
+}
+
+fn claim_never_held_work(claim: &AgentClaim) -> bool {
+    if claim.mode == ClaimMode::Intent {
+        return true;
+    }
+    claim.state == AgentState::Planned
+        && claim.branch.is_none()
+        && claim.worktree.is_none()
+        && claim.repo.is_none()
+        && claim.pr_url.is_none()
+        && claim.pr_number.is_none()
+        && claim.head_sha.is_none()
+}
+
+/// Release one claim by id, enforcing the handoff-note rule and preserving
+/// the session link. Returns the claim that was removed.
 ///
-/// `actor_id` is the user releasing it (the timeline records who acted); it
-/// does not have to match `claimed_by`, because kill/removal also releases
-/// claims on behalf of another user.
-pub async fn delete_claim_by_id(
+/// `note` is the required one-line handoff. `no_note` is an explicit opt-out
+/// for a claim that never held work; it is never inferred from a missing note.
+/// The handoff row, the session's last-seen refresh and the claim deletion
+/// commit together, so a refused or failed note cannot silently drop the claim.
+pub async fn release_claim_with_handoff(
     db: &SqlitePool,
     id: i64,
     actor_id: Option<i64>,
-) -> AppResult<Option<AgentClaim>> {
-    let claim = get_claim_by_id(db, id).await?;
-    if let Some(claim) = &claim {
-        sqlx::query("DELETE FROM agent_claims WHERE id = ?1")
-            .bind(id)
-            .execute(db)
-            .await?;
+    note: Option<&str>,
+    no_note: bool,
+) -> AppResult<AgentClaim> {
+    let claim = get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)?;
+
+    let normalized = note.and_then(normalize_handoff_note);
+    if let Some(text) = &normalized {
+        if text.chars().count() > 500 {
+            return Err(AppError::bad_request(
+                "handoff note must be 500 characters or fewer (one line: what is done, what is next, what is risky)",
+            ));
+        }
+    } else if !no_note {
+        return Err(AppError::BadRequest(RELEASE_NOTE_REQUIRED.into()));
+    } else if !claim_never_held_work(&claim) {
+        return Err(AppError::BadRequest(NO_NOTE_NOT_ALLOWED.into()));
+    }
+
+    let ts = now_rfc3339();
+    let mut tx = crate::db::begin_write(db).await?;
+    if let Some(text) = &normalized {
+        sqlx::query(
+            "INSERT INTO handoff_notes
+                (issue_id, session_id, agent_name, mode, state, note, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
+        .bind(claim.issue_id)
+        .bind(claim.session_id.as_deref())
+        .bind(&claim.agent_name)
+        .bind(claim.mode.as_str())
+        .bind(claim.state.as_str())
+        .bind(text)
+        .bind(&ts)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if let Some(session) = claim.session_id.as_deref() {
+        // Preserve the linkage: refresh rather than delete, so the issue still
+        // lists every session that touched it after the claim is gone.
+        sqlx::query(
+            "UPDATE issue_sessions SET last_seen = ?3, last_state = ?4
+              WHERE issue_id = ?1 AND session_id = ?2",
+        )
+        .bind(claim.issue_id)
+        .bind(session)
+        .bind(&ts)
+        .bind(claim.state.as_str())
+        .execute(&mut *tx)
+        .await?;
+    }
+    sqlx::query("DELETE FROM agent_claims WHERE id = ?1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    if let Some(text) = &normalized {
         crate::agent_events::record_best_effort(
             db,
             crate::agent_events::AgentEventInsert::new(
                 &claim.agent_name,
-                breadboard_core::AgentEventKind::Released,
+                breadboard_core::AgentEventKind::Handoff,
             )
             .issue(claim.issue_id, &claim.key)
-            .summary(format!("Released {} ({})", claim.key, claim.mode.as_str()))
+            .summary(text.clone())
+            .detail(format!(
+                "released {} ({}) at state {}",
+                claim.key,
+                claim.mode.as_str(),
+                claim.state.as_str()
+            ))
             .actor(actor_id),
         )
         .await;
     }
+    crate::agent_events::record_best_effort(
+        db,
+        crate::agent_events::AgentEventInsert::new(
+            &claim.agent_name,
+            breadboard_core::AgentEventKind::Released,
+        )
+        .issue(claim.issue_id, &claim.key)
+        .summary(format!("Released {} ({})", claim.key, claim.mode.as_str()))
+        .actor(actor_id),
+    )
+    .await;
     Ok(claim)
 }
 
@@ -2697,6 +3133,9 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         claim_count: 0,
         exclusive_count: 0,
         intent_count: 0,
+        exclusive_limit: 0,
+        orchestrator_exclusive_count: 0,
+        orchestrator_exclusive_limit: 0,
         user_id: None,
         login: None,
         paused_by: None,
@@ -2788,6 +3227,7 @@ pub async fn register_agent(
     db: &SqlitePool,
     user_id: i64,
     input: &AgentRegister,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentRegistration> {
     let explicit = input
         .agent_name
@@ -2894,7 +3334,9 @@ pub async fn register_agent(
         alternatives = names::pick_names(&known, 3);
     }
 
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     Ok(AgentRegistration {
         agent_name: name,
         alternatives,
@@ -3025,19 +3467,14 @@ pub async fn remove_agent(
     // One action, one row: a mass removal is not a release per claim.
     crate::agent_events::record_best_effort(
         db,
-        crate::agent_events::AgentEventInsert::new(
-            &name,
-            breadboard_core::AgentEventKind::Removed,
-        )
-        .summary(format!(
-            "Removed; {claims_released} claim(s) released"
-        ))
-        .detail(if profile_removed {
-            "profile removed".to_string()
-        } else {
-            "profile kept".to_string()
-        })
-        .actor(Some(user_id)),
+        crate::agent_events::AgentEventInsert::new(&name, breadboard_core::AgentEventKind::Removed)
+            .summary(format!("Removed; {claims_released} claim(s) released"))
+            .detail(if profile_removed {
+                "profile removed".to_string()
+            } else {
+                "profile kept".to_string()
+            })
+            .actor(Some(user_id)),
     )
     .await;
 
@@ -3055,6 +3492,7 @@ pub async fn pause_agent(
     db: &SqlitePool,
     user_id: i64,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3088,7 +3526,9 @@ pub async fn pause_agent(
         .execute(db)
         .await?;
 
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     if changed {
         crate::agent_events::record_best_effort(
             db,
@@ -3106,7 +3546,11 @@ pub async fn pause_agent(
 
 /// Resume a paused name. Idempotent; returns whether the call changed
 /// anything. Unknown names are a 404.
-pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRosterEntry, bool)> {
+pub async fn resume_agent(
+    db: &SqlitePool,
+    raw_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
     let known = known_agent_names(db).await?;
@@ -3139,7 +3583,9 @@ pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRo
         )
         .await;
     }
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     Ok((entry, changed))
 }
 
@@ -3149,6 +3595,7 @@ pub async fn hide_agent(
     db: &SqlitePool,
     user_id: i64,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(AgentRosterEntry, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3168,7 +3615,9 @@ pub async fn hide_agent(
     .await?
     .rows_affected()
         > 0;
-    let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
     if changed {
         crate::agent_events::record_best_effort(
             db,
@@ -3188,6 +3637,7 @@ pub async fn hide_agent(
 pub async fn unhide_agent(
     db: &SqlitePool,
     raw_name: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<(Option<AgentRosterEntry>, bool)> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
@@ -3197,7 +3647,7 @@ pub async fn unhide_agent(
         .await?
         .rows_affected()
         > 0;
-    let entry = roster_entry(db, &name).await?;
+    let entry = roster_entry(db, &name, limits).await?;
     if entry.is_none() && !changed {
         return Err(AppError::NotFound);
     }
@@ -3222,13 +3672,16 @@ pub async fn rename_agent(
     user_id: i64,
     raw_old: &str,
     raw_new: &str,
+    limits: &ClaimLimits,
 ) -> AppResult<AgentRosterEntry> {
     let old = names::normalize(raw_old);
     let new = names::normalize(raw_new);
     validate_agent_name(&old)?;
     validate_agent_name(&new)?;
     if old == new {
-        return roster_entry(db, &old).await?.ok_or(AppError::NotFound);
+        return roster_entry(db, &old, limits)
+            .await?
+            .ok_or(AppError::NotFound);
     }
 
     let known = known_agent_names(db).await?;
@@ -3313,6 +3766,12 @@ pub async fn rename_agent(
             }
             other => AppError::Db(other),
         })?;
+    // Keep the issue link's display name current; session ids stay the identity.
+    sqlx::query("UPDATE issue_sessions SET agent_name = ?2 WHERE lower(agent_name) = ?1")
+        .bind(&old)
+        .bind(&new)
+        .execute(&mut *tx)
+        .await?;
     sqlx::query("UPDATE agent_hidden SET agent_name = ?2 WHERE agent_name = ?1")
         .bind(&old)
         .bind(&new)
@@ -3326,13 +3785,19 @@ pub async fn rename_agent(
         })?;
     tx.commit().await?;
 
-    roster_entry(db, &new).await?.ok_or(AppError::NotFound)
+    roster_entry(db, &new, limits)
+        .await?
+        .ok_or(AppError::NotFound)
 }
 
 /// The union of sessions, profiles and claims, deduplicated by lowercased
 /// agent name. This is what the Agents page renders.
-pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
+pub async fn agent_roster(
+    db: &SqlitePool,
+    limits: &ClaimLimits,
+) -> AppResult<Vec<AgentRosterEntry>> {
     let claims = list_claims(db).await?;
+    let usage = claim_usage(db).await?;
     let profiles: Vec<AgentProfileRow> = sqlx::query_as(
         "SELECT lower(p.agent_name) AS agent_name, p.message, p.user_id,
                 u.login AS login
@@ -3456,6 +3921,11 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
             } else {
                 "stale".to_string()
             };
+            // Budget visibility: per-agent usage is `exclusive_count`, and the
+            // orchestrator roll-up counts the whole tree this name belongs to.
+            entry.exclusive_limit = limits.per_agent;
+            entry.orchestrator_exclusive_count = usage.tree_count(&entry.agent_name);
+            entry.orchestrator_exclusive_limit = limits.per_orchestrator;
             entry
         })
         .collect();
@@ -3495,9 +3965,13 @@ pub async fn agent_roster(db: &SqlitePool) -> AppResult<Vec<AgentRosterEntry>> {
     Ok(roster)
 }
 
-pub async fn roster_entry(db: &SqlitePool, name: &str) -> AppResult<Option<AgentRosterEntry>> {
+pub async fn roster_entry(
+    db: &SqlitePool,
+    name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<Option<AgentRosterEntry>> {
     let name = names::normalize(name);
-    Ok(agent_roster(db)
+    Ok(agent_roster(db, limits)
         .await?
         .into_iter()
         .find(|entry| entry.agent_name == name))
