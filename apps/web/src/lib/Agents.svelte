@@ -82,6 +82,12 @@
     parentSessionId: string | null;
     orchestrator: string | null;
     orchestratorSessionId: string | null;
+    /** Live exclusive claim budget for this name (per agent). */
+    exclusiveLimit: number;
+    /** Live exclusive claims across the orchestrator tree this name is in. */
+    treeExclusive: number;
+    /** Live exclusive claim budget for one orchestrator tree. */
+    treeLimit: number;
   }
 
   // The roster is the union of sessions, profiles and claims, so a name with
@@ -121,6 +127,9 @@
           parentSessionId: null,
           orchestrator: null,
           orchestratorSessionId: null,
+          exclusiveLimit: 10,
+          treeExclusive: 0,
+          treeLimit: 100,
         };
         map.set(id, g);
       }
@@ -166,6 +175,9 @@
       g.parentSessionId = r.parent_session_id ?? null;
       g.orchestrator = r.orchestrator ?? null;
       g.orchestratorSessionId = r.orchestrator_session_id ?? null;
+      g.exclusiveLimit = r.exclusive_limit;
+      g.treeExclusive = r.orchestrator_exclusive_count;
+      g.treeLimit = r.orchestrator_exclusive_limit;
       if (r.last_seen && (!g.lastHeartbeat || r.last_seen > g.lastHeartbeat)) {
         g.lastHeartbeat = r.last_seen;
       }
@@ -728,6 +740,20 @@
 
     <footer class="afoot">
       <span class="counts">{g.work.length} issue{g.work.length === 1 ? "" : "s"}</span>
+      <span
+        class="budget"
+        class:warn={g.exclusiveLimit > 0 && g.work.length * 5 >= g.exclusiveLimit * 4}
+        class:full={g.exclusiveLimit > 0 && g.work.length >= g.exclusiveLimit}
+        title="Live exclusive claims: {g.work.length} of {g.exclusiveLimit} allowed per agent"
+      >{g.work.length}/{g.exclusiveLimit}</span>
+      {#if isOrchestrator || parent}
+        <span
+          class="budget tree"
+          class:warn={g.treeLimit > 0 && g.treeExclusive * 5 >= g.treeLimit * 4}
+          class:full={g.treeLimit > 0 && g.treeExclusive >= g.treeLimit}
+          title="Live exclusive claims across {isOrchestrator ? "this orchestrator and its subagents" : "this agent's orchestrator tree"}: {g.treeExclusive} of {g.treeLimit}"
+        >tree {g.treeExclusive}/{g.treeLimit}</span>
+      {/if}
       <span class="grow"></span>
       {#if g.work.length}
         <span class="completion">
@@ -1072,6 +1098,14 @@
             <span>{selectedSubagents.live} live of {selectedSubagents.total}</span>
           </div>
         {/if}
+        <div class="srow">
+          <span class="slabel">claims</span>
+          <span>{selected.work.length} of {selected.exclusiveLimit} exclusive</span>
+          {#if selected.orchestrator || selectedSubagents?.total}
+            <span class="slabel">tree</span>
+            <span>{selected.treeExclusive} of {selected.treeLimit}</span>
+          {/if}
+        </div>
         {#if selected.hidden}
           <div class="hidden-note">
             Hidden{selected.hiddenBy ? ` by ${selected.hiddenBy}` : ""}{selected.hiddenAt ? ` ${ago(selected.hiddenAt, now)}` : ""}.
@@ -1742,6 +1776,25 @@
   }
   .counts {
     color: var(--ink-3);
+  }
+  .budget {
+    padding: 1px 5px;
+    border-radius: 999px;
+    border: 1px solid color-mix(in srgb, var(--ink-3) 35%, transparent);
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+  }
+  .budget.tree {
+    border-style: dashed;
+  }
+  .budget.warn {
+    border-color: color-mix(in srgb, #d69e2e 70%, transparent);
+    color: #d69e2e;
+  }
+  .budget.full {
+    border-color: color-mix(in srgb, var(--danger) 70%, transparent);
+    background: color-mix(in srgb, var(--danger) 12%, transparent);
+    color: var(--danger);
   }
   .completion {
     display: inline-flex;

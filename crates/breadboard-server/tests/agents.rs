@@ -1703,3 +1703,232 @@ async fn get_roster(c: &reqwest::Client, base: &str, auth: &str) -> Value {
         .await
         .unwrap()
 }
+
+async fn claim_as(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    key: &str,
+    agent: &str,
+    mode: &str,
+) -> reqwest::Response {
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", auth)
+        .json(&json!({ "agent_name": agent, "mode": mode }))
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn register(c: &reqwest::Client, base: &str, auth: &str, body: Value) -> reqwest::Response {
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The eleventh live exclusive claim for one name is refused, releasing one
+/// frees capacity, and the roster exposes both budgets.
+#[tokio::test]
+async fn exclusive_claim_budget_per_agent_and_release() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let mut keys = Vec::new();
+    for i in 0..11 {
+        let issue = create_issue(&c, &base, &auth, &format!("budget item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    for key in &keys[..10] {
+        let resp = claim_as(&c, &base, &auth, key, "greedy-loaf", "exclusive").await;
+        assert_eq!(resp.status(), 201, "claim {key} should be allowed");
+    }
+
+    let refused = claim_as(&c, &base, &auth, &keys[10], "greedy-loaf", "exclusive").await;
+    assert_eq!(refused.status(), 409, "eleventh claim must be refused");
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap_or("");
+    assert!(
+        message.contains("10"),
+        "limit missing from error: {message}"
+    );
+    assert!(
+        message.contains("release"),
+        "release guidance missing from error: {message}"
+    );
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "greedy-loaf");
+    assert_eq!(row["exclusive_count"], 10);
+    assert_eq!(row["exclusive_limit"], 10);
+    assert_eq!(row["orchestrator_exclusive_count"], 10);
+    assert_eq!(row["orchestrator_exclusive_limit"], 100);
+
+    // Releasing one live claim frees exactly one slot.
+    let released = c
+        .delete(format!("{base}/api/issues/{}/claim", keys[0]))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 204);
+    let allowed = claim_as(&c, &base, &auth, &keys[10], "greedy-loaf", "exclusive").await;
+    assert_eq!(allowed.status(), 201, "release should free capacity");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(roster_row(&roster, "greedy-loaf")["exclusive_count"], 10);
+}
+
+/// Intents are reservations, not work: the per-agent cap never applies.
+#[tokio::test]
+async fn intent_claims_are_not_capped() {
+    let app = tu::spawn_with_claim_limits(2, 5).await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    for i in 0..4 {
+        let issue = create_issue(&c, &base, &auth, &format!("queued item {i}")).await;
+        let key = issue["key"].as_str().unwrap();
+        let resp = claim_as(&c, &base, &auth, key, "patient-rye", "intent").await;
+        assert_eq!(resp.status(), 201, "intent {i} should be allowed");
+    }
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "patient-rye");
+    assert_eq!(row["intent_count"], 4);
+    assert_eq!(row["exclusive_count"], 0);
+}
+
+/// The hundred-and-first live exclusive claim across one orchestrator tree is
+/// refused, even when the claiming subagent is far below its own cap.
+#[tokio::test]
+async fn orchestrator_subtree_budget_refuses_hundred_and_first() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    register(
+        &c,
+        &base,
+        &auth,
+        json!({ "agent_name": "tree-root", "session_id": "ses_tree_root" }),
+    )
+    .await;
+
+    let children: Vec<String> = (0..12).map(|i| format!("tree-child-{i}")).collect();
+    for (i, child) in children.iter().enumerate() {
+        register(
+            &c,
+            &base,
+            &auth,
+            json!({
+                "agent_name": child,
+                "session_id": format!("ses_tree_child_{i}"),
+                "parent_session_id": "ses_tree_root"
+            }),
+        )
+        .await;
+    }
+
+    // 101 claimable issues plus one for the unlinked control.
+    let mut keys = Vec::new();
+    for i in 0..102 {
+        let issue = create_issue(&c, &base, &auth, &format!("tree item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    let mut next = 0usize;
+    for child in children.iter().take(11) {
+        for _ in 0..9 {
+            let resp = claim_as(&c, &base, &auth, &keys[next], child, "exclusive").await;
+            assert_eq!(resp.status(), 201, "seeding {child} claim {next}");
+            next += 1;
+        }
+    }
+    assert_eq!(next, 99);
+
+    // The hundredth claim in the tree is allowed.
+    let hundredth = claim_as(&c, &base, &auth, &keys[next], &children[11], "exclusive").await;
+    assert_eq!(hundredth.status(), 201, "hundredth tree claim should fit");
+    next += 1;
+    assert_eq!(next, 100);
+
+    // The hundred-and-first is refused by the tree budget, not the per-agent
+    // budget: this child holds only one claim.
+    let refused = claim_as(&c, &base, &auth, &keys[next], &children[11], "exclusive").await;
+    assert_eq!(refused.status(), 409, "101st tree claim must be refused");
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap_or("");
+    assert!(message.contains("100"), "tree limit missing: {message}");
+    assert!(
+        message.contains("release"),
+        "release guidance missing: {message}"
+    );
+
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(
+        roster_row(&roster, "tree-root")["orchestrator_exclusive_count"],
+        100
+    );
+    assert_eq!(
+        roster_row(&roster, &children[11])["orchestrator_exclusive_count"],
+        100
+    );
+
+    // An unlinked agent is its own tree and still has room.
+    let solo = claim_as(&c, &base, &auth, &keys[next], "solo-loaf", "exclusive").await;
+    assert_eq!(
+        solo.status(),
+        201,
+        "unlinked agent must not count in the tree"
+    );
+}
+
+/// An unlinked agent is its own root: two of them never share one budget.
+#[tokio::test]
+async fn unlinked_agents_count_under_themselves_only() {
+    let app = tu::spawn_with_claim_limits(10, 5).await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let mut keys = Vec::new();
+    for i in 0..10 {
+        let issue = create_issue(&c, &base, &auth, &format!("solo item {i}")).await;
+        keys.push(issue["key"].as_str().unwrap().to_string());
+    }
+
+    for key in &keys[..5] {
+        let resp = claim_as(&c, &base, &auth, key, "solo-one", "exclusive").await;
+        assert_eq!(resp.status(), 201);
+    }
+    // If the two names shared a root, this would already exceed the 5-claim
+    // tree budget.
+    for key in &keys[5..] {
+        let resp = claim_as(&c, &base, &auth, key, "solo-two", "exclusive").await;
+        assert_eq!(
+            resp.status(),
+            201,
+            "{key} should be under solo-two's own tree"
+        );
+    }
+
+    let roster = get_roster(&c, &base, &auth).await;
+    for name in ["solo-one", "solo-two"] {
+        let row = roster_row(&roster, name);
+        assert_eq!(row["exclusive_count"], 5);
+        assert_eq!(row["orchestrator_exclusive_count"], 5);
+        assert_eq!(row["orchestrator_exclusive_limit"], 5);
+    }
+}

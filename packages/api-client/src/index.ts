@@ -557,6 +557,12 @@ export interface AgentRosterEntry {
   claim_count: number;
   exclusive_count: number;
   intent_count: number;
+  /** Live exclusive claim cap for one agent name (default 10). */
+  exclusive_limit: number;
+  /** Live exclusive claims across this agent's orchestrator tree. */
+  orchestrator_exclusive_count: number;
+  /** Live exclusive claim cap for one orchestrator tree (default 100). */
+  orchestrator_exclusive_limit: number;
   user_id?: number | null;
   login?: string | null;
   paused_by?: number | null;
