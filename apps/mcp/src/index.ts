@@ -90,6 +90,9 @@ function rememberAgent(name: string) {
  * alternatives, which keeps the client and server in step.
  */
 let autoAgentName: string | undefined = cfg.agent?.trim().toLowerCase() || undefined;
+/** True once the server has accepted this process's current name. A name from
+ *  config alone is not safe to rename from: the server may have refused it. */
+let nameConfirmed = false;
 let nameAlternatives: string[] = [];
 let registeredAt = 0;
 let registration: Promise<string> | null = null;
@@ -101,7 +104,19 @@ const SESSION_ID =
   undefined;
 const HOST = hostname().trim();
 
-if (autoAgentName) rememberAgent(autoAgentName);
+/** Turn a name collision into a message that tells the agent what to do next.
+ *  The server names the holding session and returns free alternatives; the
+ *  plugin only learns a name from successful identity calls, so a refusal must
+ *  not be recorded as this process's name. */
+function explainRegistrationError(e: unknown): never {
+  if (e instanceof ApiError && e.status === 409) {
+    const details = e.details;
+    const alternatives = details?.alternatives ?? nameAlternatives;
+    const suffix = alternatives.length ? ` Try: ${alternatives.join(", ")}` : "";
+    throw new Error(`${e.message}${suffix}`);
+  }
+  throw e;
+}
 
 /** Register this process and refresh `last_seen`, throttled on the MCP side. */
 async function ensureRegistered(force = false): Promise<string> {
@@ -119,6 +134,7 @@ async function ensureRegistered(force = false): Promise<string> {
       note: "opencode mcp",
     });
     autoAgentName = res.agent_name;
+    nameConfirmed = true;
     nameAlternatives = res.alternatives ?? [];
     registeredAt = Date.now();
     rememberAgent(autoAgentName);
@@ -204,11 +220,8 @@ const ok = (data: unknown) => ({
 });
 const fail = (msg: string) => ({ content: [{ type: "text" as const, text: msg }], isError: true });
 
-async function run<T>(fn: () => Promise<T>) {
+async function attempt<T>(fn: () => Promise<T>) {
   try {
-    // Every tool call refreshes this session on the roster, so a brand new
-    // OpenCode session appears without naming itself first. Throttled above.
-    await ensureRegistered();
     return ok(await fn());
   } catch (e) {
     if (e instanceof ApiError && e.status === 401) {
@@ -216,6 +229,17 @@ async function run<T>(fn: () => Promise<T>) {
     }
     return fail(e instanceof Error ? e.message : String(e));
   }
+}
+
+async function run<T>(fn: () => Promise<T>) {
+  // Every tool call refreshes this session on the roster, so a brand new
+  // OpenCode session appears without naming itself first. Throttled above.
+  // name_agent uses attempt() instead: a process holding a refused name must
+  // still be able to rename itself before registering.
+  return attempt(async () => {
+    await ensureRegistered();
+    return fn();
+  });
 }
 
 // Register at startup, before the first tool call, so the chat plugin can map
@@ -1016,19 +1040,38 @@ server.tool(
       .describe("optional one-line message for the Agents view; defaults to 'Ready for work.'"),
   },
   ({ agent_name, message }) =>
-    run(async () => {
+    attempt(async () => {
       const name = agent_name.trim().toLowerCase();
       if (!name) throw new Error("agent_name is required");
       const line = message?.trim() || "Ready for work.";
       // A rename after claims exist moves them and the profile in one server
       // transaction, or is refused. Before any claims it is free.
-      const current = autoAgentName;
-      if (current && current !== name) {
-        await client.renameAgent(current, name);
+      const previous = autoAgentName;
+      const previousConfirmed = nameConfirmed;
+      let renamed = false;
+      try {
+        // Only rename from a name the server has actually accepted. A name
+        // that came from config but failed registration may belong to another
+        // live session, and renaming it would move that session's claims.
+        if (previousConfirmed && previous && previous !== name) {
+          await client.renameAgent(previous, name);
+          renamed = true;
+        }
+        autoAgentName = name;
+        registeredAt = 0;
+        await ensureRegistered(true);
+      } catch (e) {
+        // A refused registration must not strand this process (or the chat
+        // plugin) on a name another live session owns. If the rename already
+        // happened, the server moved this session to the new name, so keep it;
+        // otherwise restore the identity that was still valid.
+        if (!renamed) {
+          autoAgentName = previous;
+          nameConfirmed = previousConfirmed;
+        }
+        registeredAt = 0;
+        explainRegistrationError(e);
       }
-      autoAgentName = name;
-      registeredAt = 0;
-      await ensureRegistered(true);
       ensureChatPoller(name);
       return client.setAgentMessage(name, line);
     }),
@@ -1091,7 +1134,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Resolve a room name/id, or the DM with another agent, to a room id. */
 async function resolveChatRoom(name: string, room?: string, peer?: string): Promise<number> {
-  if (peer) return (await client.openDm(peer, name)).id;
+  if (peer) return (await client.openDm(peer, name, SESSION_ID)).id;
   const rooms = await client.listChatRooms(name);
   const want = room?.trim() || "lobby";
   const found = rooms.find((r) => String(r.id) === want || r.name === want);
@@ -1247,6 +1290,7 @@ server.tool(
         room,
         uploads,
         agent_name: chatAgent(agent_name),
+        session_id: SESSION_ID,
       });
     }),
 );
