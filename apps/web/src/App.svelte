@@ -13,6 +13,7 @@
   import Settings from "./lib/Settings.svelte";
   import IssueDrawer from "./lib/IssueDrawer.svelte";
   import CommandPalette from "./lib/CommandPalette.svelte";
+  import ReleaseHandoff from "./lib/ReleaseHandoff.svelte";
   import { closeOpenMenu } from "./lib/ui/Menu.svelte";
 
   let devLoginName = $state("riley");
@@ -155,6 +156,7 @@
 
   <IssueDrawer />
   <CommandPalette />
+  <ReleaseHandoff />
 
   {#if store.toast}
     {#key store.toast.id}

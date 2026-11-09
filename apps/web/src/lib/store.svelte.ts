@@ -170,6 +170,11 @@ class Store {
   unread = $state(0);
 
   agents = $state<AgentClaim[]>([]);
+  /** Claim awaiting a handoff note before release. Set by releaseById when no
+   *  note was supplied; the ReleaseHandoff dialog consumes it. */
+  pendingRelease = $state<AgentClaim | null>(null);
+  /** Exact server refusal shown inside the release dialog. */
+  releaseError = $state<string | null>(null);
   /** Sessions, profiles and claims, one row per lowercased name. Roster rows
    *  with no claims still render, as idle sessions. */
   roster = $state<AgentRosterEntry[]>([]);
@@ -666,20 +671,36 @@ class Store {
     }
   }
 
-  /** Release one claim by id; the card keeps its status. */
-  async releaseById(id: number, undoable = true): Promise<boolean> {
+  /** Release one claim by id; the card keeps its status. Without a handoff
+   *  note this opens the release dialog instead of calling the server, because
+   *  the server refuses a bare release for work that held anything. */
+  async releaseById(
+    id: number,
+    undoable = true,
+    note?: string,
+    noNote = false,
+  ): Promise<boolean> {
     const snapshot = this.agents;
     const claim = snapshot.find((a) => a.id === id);
+    if (!claim) return false;
+    if (note == null && !noNote) {
+      this.releaseError = null;
+      this.pendingRelease = claim;
+      return false;
+    }
     this.agents = this.agents.filter((a) => a.id !== id);
     try {
-      await api.releaseClaimById(id);
+      await api.releaseClaimById(id, note, noNote);
+      if (this.pendingRelease?.id === id) this.pendingRelease = null;
+      this.releaseError = null;
       this.info(
-        `Released ${claim?.key ?? "claim"}`,
-        undoable && claim ? () => void this.reclaim(claim) : undefined,
+        `Released ${claim.key}`,
+        undoable ? () => void this.reclaim(claim) : undefined,
       );
       return true;
     } catch (e) {
       this.agents = snapshot;
+      this.releaseError = errMsg(e);
       this.flash(`Couldn't release the claim: ${errMsg(e)}`);
       return false;
     }
@@ -782,10 +803,22 @@ class Store {
         break;
       }
       case "agent.claimed":
-      case "agent.released":
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         break;
+      case "agent.released": {
+        void this.loadAgents();
+        // A release can leave a handoff note and refresh the session links, so
+        // refetch the issue rather than only bumping the drawer tick.
+        try {
+          const fresh = await api.getIssue(ev.key);
+          this.#upsert(fresh);
+        } catch {
+          /* deleted between event and fetch */
+        }
+        this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
+        break;
+      }
       case "agent.removed":
       case "agent.paused":
       case "agent.resumed":

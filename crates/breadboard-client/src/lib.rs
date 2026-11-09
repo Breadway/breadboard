@@ -409,7 +409,8 @@ impl Client {
     // --- agent claims --------------------------------------------------
 
     pub async fn list_agents(&self) -> Result<Vec<breadboard_core::AgentClaim>> {
-        self.send(self.build(reqwest::Method::GET, "/api/agents")).await
+        self.send(self.build(reqwest::Method::GET, "/api/agents"))
+            .await
     }
 
     pub async fn agent_status(&self) -> Result<breadboard_core::dto::AgentStatusSummary> {
@@ -442,20 +443,28 @@ impl Client {
         self.send(rb.json(update)).await
     }
 
-    pub async fn release_claim(&self, key: &str, agent: Option<&str>) -> Result<()> {
+    pub async fn release_claim(
+        &self,
+        key: &str,
+        agent: Option<&str>,
+        note: Option<&str>,
+        no_note: bool,
+    ) -> Result<()> {
         let mut rb = self.build(reqwest::Method::DELETE, &format!("/api/issues/{key}/claim"));
         if let Some(agent) = agent {
             rb = rb.query(&[("agent", agent)]);
+        }
+        if let Some(note) = note {
+            rb = rb.query(&[("note", note)]);
+        }
+        if no_note {
+            rb = rb.query(&[("no_note", "true")]);
         }
         self.send_empty(rb).await
     }
 
     /// Set or clear an agent's one-line message.
-    pub async fn set_agent_message(
-        &self,
-        agent: &str,
-        message: &str,
-    ) -> Result<AgentMessageView> {
+    pub async fn set_agent_message(&self, agent: &str, message: &str) -> Result<AgentMessageView> {
         #[derive(Serialize)]
         struct Body<'a> {
             agent_name: &'a str,
@@ -463,15 +472,29 @@ impl Client {
         }
         self.send(
             self.build(reqwest::Method::PUT, "/api/agents/message")
-                .json(&Body { agent_name: agent, message }),
+                .json(&Body {
+                    agent_name: agent,
+                    message,
+                }),
         )
         .await
     }
 
     /// Release one claim by its id (multi-claim issues, Agents page).
-    pub async fn release_claim_by_id(&self, id: i64) -> Result<()> {
-        self.send_empty(self.build(reqwest::Method::DELETE, &format!("/api/claims/{id}")))
-            .await
+    pub async fn release_claim_by_id(
+        &self,
+        id: i64,
+        note: Option<&str>,
+        no_note: bool,
+    ) -> Result<()> {
+        let mut rb = self.build(reqwest::Method::DELETE, &format!("/api/claims/{id}"));
+        if let Some(note) = note {
+            rb = rb.query(&[("note", note)]);
+        }
+        if no_note {
+            rb = rb.query(&[("no_note", "true")]);
+        }
+        self.send_empty(rb).await
     }
 
     // --- device auth --------------------------------------------------

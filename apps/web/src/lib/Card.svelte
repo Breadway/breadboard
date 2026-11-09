@@ -79,6 +79,12 @@
     <span class="prio" title="{issue.priority} priority"><PriorityGlyph priority={issue.priority} /></span>
   </div>
   <div class="title" title={issue.title}>{issue.title}</div>
+  {#if !claim && issue.last_handoff}
+    <div class="handoff" title="Last handoff from {issue.last_handoff.agent_name}: {issue.last_handoff.note}">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 4.5h9M3.5 8h9M3.5 11.5h5.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+      <span>{issue.last_handoff.note}</span>
+    </div>
+  {/if}
   {#if issue.labels.length || closingPrs.length || issue.estimate != null || issue.assignee_id || issue.forgejo_ref}
     <div class="bot">
       {#each issue.labels.slice(0, MAX_LABELS) as label (label)}
@@ -237,6 +243,30 @@
     -webkit-box-orient: vertical;
     line-clamp: 3;
     overflow: hidden;
+  }
+  .handoff {
+    display: flex;
+    align-items: flex-start;
+    gap: 5px;
+    padding: 5px 7px;
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+    background: color-mix(in srgb, var(--accent) 6%, transparent);
+    color: var(--ink-2);
+    font-size: 11px;
+    line-height: 1.35;
+  }
+  .handoff svg {
+    width: 11px;
+    height: 11px;
+    flex: none;
+    margin-top: 2px;
+    color: var(--accent);
+  }
+  .handoff span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .bot {
     display: flex;

@@ -230,6 +230,12 @@ enum Command {
         /// Which claim to release when you hold more than one on the issue.
         #[arg(long)]
         agent: Option<String>,
+        /// Required handoff note: what is done; what is next; what is risky.
+        #[arg(long)]
+        note: Option<String>,
+        /// Explicitly release a claim that never held work without a note.
+        #[arg(long)]
+        no_note: bool,
     },
     /// Live agent presence: active claims and the bb-status-style roll-up.
     Agents {
@@ -520,7 +526,9 @@ async fn main() -> Result<()> {
                 head_sha: head_sha.clone().map(Some),
                 message: None,
             };
-            let claim = client.heartbeat_claim(&key, agent.as_deref(), &update).await?;
+            let claim = client
+                .heartbeat_claim(&key, agent.as_deref(), &update)
+                .await?;
             println!(
                 "heartbeat {} ({} {})",
                 claim.key,
@@ -542,15 +550,25 @@ async fn main() -> Result<()> {
                         ..Default::default()
                     };
                     // Keep the agent selector so multi-claim users do not 409.
-                    if let Err(e) = client.heartbeat_claim(&key, agent.as_deref(), &keepalive).await {
+                    if let Err(e) = client
+                        .heartbeat_claim(&key, agent.as_deref(), &keepalive)
+                        .await
+                    {
                         eprintln!("heartbeat {tick} failed for {key}: {e}");
                         break;
                     }
                 }
             }
         }
-        Command::Release { key, agent } => {
-            client.release_claim(&key, agent.as_deref()).await?;
+        Command::Release {
+            key,
+            agent,
+            note,
+            no_note,
+        } => {
+            client
+                .release_claim(&key, agent.as_deref(), note.as_deref(), no_note)
+                .await?;
             println!("released {key}");
         }
         Command::Agents { action } => agents(&client, action).await?,
@@ -876,9 +894,7 @@ async fn agents(client: &Client, action: AgentsAction) -> Result<()> {
         AgentsAction::List { stale } => {
             let mut claims = client.list_agents().await?;
             if stale {
-                claims.retain(|c| {
-                    claim_stale(&c.last_heartbeat.to_rfc3339())
-                });
+                claims.retain(|c| claim_stale(&c.last_heartbeat.to_rfc3339()));
             }
             for c in &claims {
                 let flag = if claim_stale(&c.last_heartbeat.to_rfc3339()) {
@@ -909,10 +925,7 @@ async fn agents(client: &Client, action: AgentsAction) -> Result<()> {
         AgentsAction::Status => {
             let s = client.agent_status().await?;
             println!("{}", s.line);
-            println!(
-                "live {} · stale {} · total {}",
-                s.live, s.stale, s.total
-            );
+            println!("live {} · stale {} · total {}", s.live, s.stale, s.total);
         }
     }
     Ok(())
