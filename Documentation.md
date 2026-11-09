@@ -612,7 +612,7 @@ repo with no mapped project are skipped with a warning.
 | `mv <key> <status>` | |
 | `claim <key> --agent NAME [--mode exclusive\|intent] [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | claim an issue; `exclusive` (default) is first-wins and moves backlog/todo to doing + assigns it, `intent` queues interest without moving or blocking |
 | `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID] [--every SECS]` | heartbeat / update your claim; `--every` keeps repeating until interrupted (wrap long runs so they never go stale) |
-| `release <key> [--agent NAME]` | release your claim (status stays, tint goes away) |
+| `release <key> [--agent NAME] (--note TEXT | --no-note)` | release your claim (status stays, tint goes away). `--note` is required unless `--no-note` applies to a claim that never held work |
 | `agents list [--stale]` | live agent claims with mode, state and heartbeat |
 | `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
 | `agents message <agent> "<text>"` | set (or clear, with `""`) the one-line message under an agent's name |
