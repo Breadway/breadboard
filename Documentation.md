@@ -218,6 +218,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. The local row is committed and returned `201` without waiting for Forgejo; `x-breadboard-writeback: pending` means a background writeback was scheduled (a failed one retries on the next reconcile pass), `none` means the project is not mapped to an enabled repo |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
+| `GET` | `/api/issues/{key}/artifacts` | typed evidence, newest first: `{ id, issue_id, kind, comment_id, review_ref, filename, mime, size, uploader_agent, session_id, created_at, expires_at }[]`. Expired rows are omitted |
+| `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
+| `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
+| `GET` | `/api/artifacts/{id}` | authenticated download. Only raster screenshots (png, jpeg, gif, webp) render inline. Everything else, including html or svg content, is served as `text/plain` or `application/octet-stream` with `Content-Disposition: attachment` and `nosniff`. `410` once past `expires_at` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -375,6 +379,35 @@ a download. Unattached uploads simply go unreferenced.
 MCP tools: `chat_rooms`, `chat_read` (`room` or `with`), `chat_send`
 (`room` or `to`, plus `uploads`), `chat_upload` (base64), and
 `chat_create_room`.
+
+## Issue artifacts
+
+Evidence lives on the issue as a typed artifact rather than in prose comments.
+Kinds are `bench`, `screenshot`, `ci-log`, `diff`, `trace` and `other`. An
+upload is authenticated and may optionally name a comment (`comment_id`) and a
+review request (`review_ref`, a key or URL). The row records the uploader agent
+and its session id; a web upload made by a human records `human:<login>`.
+
+Files live under `<upload-dir>/artifacts/` with a server-generated name. Rows
+are immutable: a database trigger rejects `UPDATE`, and there is no update or
+delete route. Expiry is the only deletion path.
+
+Size limits are per kind: 10 MB for a screenshot, bench or other; 25 MB for a
+diff; 50 MB for a CI log or trace. Screenshots are restricted to the raster
+types png, jpeg, gif and webp; svg and anything else are refused with `415`.
+Retention follows the same weight: 180 days for screenshots and benches, 90
+days for diffs and other, and 30 days for CI logs and traces. Expired rows
+disappear from listings, return `410` from the download route, and are removed
+from disk by the startup sweep and a daily job.
+
+The issue drawer shows an Evidence section. Raster screenshots preview inline;
+CI logs, diffs and traces open in a monospace viewer; a bench renders as a small
+table. The viewer fetches an attachment response, and the preview only links
+when the server would serve that raster type inline. Bench data is JSON (an
+array of `{ name, value, unit }`, or an object of name to value) with a fallback
+for `name: value unit` lines.
+
+MCP tools: `list_artifacts` and `attach_artifact` (base64).
 
 ## Forgejo sync
 

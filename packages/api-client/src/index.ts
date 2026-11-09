@@ -308,6 +308,47 @@ export interface ChatUpload {
   size: number;
 }
 
+export type ArtifactKind = "bench" | "screenshot" | "ci-log" | "diff" | "trace" | "other";
+
+export const ARTIFACT_KINDS: ArtifactKind[] = [
+  "bench",
+  "screenshot",
+  "ci-log",
+  "diff",
+  "trace",
+  "other",
+];
+
+/** Immutable evidence attached to an issue. */
+export interface IssueArtifact {
+  id: number;
+  issue_id: number;
+  kind: ArtifactKind;
+  /** Optional comment this evidence belongs to. */
+  comment_id: number | null;
+  /** Optional review request key or URL. */
+  review_ref: string | null;
+  filename: string;
+  mime: string;
+  size: number;
+  /** Agent name, or `human:<login>` for a web upload. */
+  uploader_agent: string;
+  session_id: string | null;
+  created_at: string;
+  expires_at: string;
+}
+
+export interface NewIssueArtifact {
+  filename: string;
+  kind: ArtifactKind;
+  data_base64: string;
+  mime?: string;
+  comment_id?: number | null;
+  review_ref?: string | null;
+  agent_name?: string;
+  session_id?: string;
+}
+
 export type ChatMessageKind = "message" | "summary";
 
 export interface ChatMention {
@@ -596,6 +637,43 @@ export class BreadboardClient {
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
   getActivity = (key: string) =>
     this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
+
+  listIssueArtifacts = (key: string) =>
+    this.req<IssueArtifact[]>("GET", `/api/issues/${key}/artifacts`);
+  /** Multipart upload from the browser (session cookie). */
+  uploadIssueArtifact = async (
+    key: string,
+    file: File,
+    opts: {
+      kind: ArtifactKind;
+      comment_id?: number | null;
+      review_ref?: string | null;
+      agent_name?: string;
+      session_id?: string;
+    },
+  ): Promise<IssueArtifact> => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", opts.kind);
+    if (opts.comment_id != null) fd.append("comment_id", String(opts.comment_id));
+    if (opts.review_ref) fd.append("review_ref", opts.review_ref);
+    if (opts.agent_name) fd.append("agent_name", opts.agent_name);
+    if (opts.session_id) fd.append("session_id", opts.session_id);
+    const headers: Record<string, string> = {};
+    if (this.#token) headers.authorization = `Bearer ${this.#token}`;
+    const res = await fetch(`${this.baseUrl}/api/issues/${key}/artifacts`, {
+      method: "POST",
+      credentials: "include",
+      headers,
+      body: fd,
+    });
+    if (!res.ok) throw new ApiError(res.status, await res.text().catch(() => res.statusText));
+    return (await res.json()) as IssueArtifact;
+  };
+  /** Base64 upload for MCP/CLI clients. */
+  uploadIssueArtifactBase64 = (key: string, artifact: NewIssueArtifact) =>
+    this.req<IssueArtifact>("POST", `/api/issues/${key}/artifacts/base64`, artifact);
+  artifactUrl = (id: number) => `${this.baseUrl}/api/artifacts/${id}`;
 
   listAgents = () => this.req<AgentClaim[]>("GET", "/api/agents");
   agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");

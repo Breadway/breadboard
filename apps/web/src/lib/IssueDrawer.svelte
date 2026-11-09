@@ -18,6 +18,7 @@
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
+  import Artifacts from "./Artifacts.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   // The issue's fields come straight from the store, so a drag on the board,
@@ -631,6 +632,8 @@
             <button class="empty-desc" onclick={startBody}>Add a description…</button>
           {/if}
         </section>
+
+        <Artifacts issueKey={issue.key} {comments} />
 
         <section class="sec">
           <h3>Activity</h3>
