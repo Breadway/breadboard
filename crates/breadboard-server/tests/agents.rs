@@ -1305,3 +1305,197 @@ async fn hide_and_unhide_publish_events() {
         .unwrap();
     assert_eq!(events.next_type().await, "agent.unhidden");
 }
+
+/// A registered parent session resolves to an orchestrator name on the child
+/// row, including when the child holds no claims at all.
+#[tokio::test]
+async fn roster_resolves_parent_session_to_orchestrator() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "big-orch", "session_id": "ses_orch" }))
+        .send()
+        .await
+        .unwrap();
+    let child: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "little-sub",
+            "session_id": "ses_sub",
+            "parent_session_id": "ses_orch"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(child["parent_session_id"], "ses_orch");
+    assert_eq!(child["orchestrator"], "big-orch");
+    assert_eq!(child["orchestrator_session_id"], "ses_orch");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let orch = roster_row(&roster, "big-orch");
+    assert!(orch.get("orchestrator").is_none() || orch["orchestrator"].is_null());
+
+    let sub = roster_row(&roster, "little-sub");
+    assert_eq!(sub["claim_count"], 0);
+    assert_eq!(sub["session_id"], "ses_sub");
+    assert_eq!(sub["parent_session_id"], "ses_orch");
+    assert_eq!(sub["orchestrator"], "big-orch");
+    assert_eq!(sub["orchestrator_session_id"], "ses_orch");
+
+    // A name is enough when the caller knows the orchestrator but not its
+    // session id; the server resolves it to the registered session.
+    let named: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "named-sub",
+            "session_id": "ses_named",
+            "orchestrator": "BIG-ORCH"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(named["parent_session_id"], "ses_orch");
+    assert_eq!(named["orchestrator"], "big-orch");
+
+    // An unknown orchestrator name is ignored, not an error.
+    let lost: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "lost-sub",
+            "session_id": "ses_lost",
+            "orchestrator": "nobody-registered"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(lost["agent_name"], "lost-sub");
+    assert!(lost.get("parent_session_id").is_none() || lost["parent_session_id"].is_null());
+}
+
+/// An unregistered parent keeps the raw session id, and resolves later when
+/// the orchestrator registers without any change to the child row.
+#[tokio::test]
+async fn unresolved_parent_keeps_raw_session_id() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "orphan-sub",
+            "session_id": "ses_orphan",
+            "parent_session_id": "ses_later"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let child = roster_row(&roster, "orphan-sub");
+    assert_eq!(child["parent_session_id"], "ses_later");
+    assert!(child.get("orchestrator").is_none() || child["orchestrator"].is_null());
+    assert!(
+        child.get("orchestrator_session_id").is_none()
+            || child["orchestrator_session_id"].is_null()
+    );
+    assert_eq!(child["claim_count"], 0);
+    assert_eq!(child["session_id"], "ses_orphan");
+
+    // Registering the parent later resolves the existing child row.
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "late-orch", "session_id": "ses_later" }))
+        .send()
+        .await
+        .unwrap();
+    let roster = get_roster(&c, &base, &auth).await;
+    let child = roster_row(&roster, "orphan-sub");
+    assert_eq!(child["orchestrator"], "late-orch");
+    assert_eq!(child["orchestrator_session_id"], "ses_later");
+}
+
+/// Hiding or killing a subagent affects only that name, never its orchestrator.
+#[tokio::test]
+async fn hiding_or_killing_child_leaves_orchestrator_alone() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "parent-orch", "session_id": "ses_parent" }))
+        .send()
+        .await
+        .unwrap();
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "child-agent",
+            "session_id": "ses_child",
+            "parent_session_id": "ses_parent"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    c.post(format!("{base}/api/agents/child-agent/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(roster_row(&roster, "child-agent")["hidden"], true);
+    assert_eq!(roster_row(&roster, "parent-orch")["hidden"], false);
+    assert_eq!(
+        roster_row(&roster, "parent-orch")["orchestrator"],
+        serde_json::Value::Null
+    );
+
+    c.post(format!("{base}/api/agents/child-agent/unhide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    c.post(format!("{base}/api/agents/child-agent/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(roster_row(&roster, "child-agent")["killed"], true);
+    assert_eq!(roster_row(&roster, "parent-orch")["killed"], false);
+    assert_eq!(
+        roster_row(&roster, "child-agent")["orchestrator"],
+        "parent-orch"
+    );
+}
+
+async fn get_roster(c: &reqwest::Client, base: &str, auth: &str) -> Value {
+    c.get(format!("{base}/api/agents/roster"))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}

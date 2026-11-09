@@ -17,6 +17,7 @@
   let now = $state(Date.now());
   let staleOnly = $state(false);
   let showHidden = $state(false);
+  let focus = $state<string | null>(null);
   let openAgentId = $state<string | null>(null);
   let copied = $state<string | null>(null);
   let panelEl: HTMLElement | undefined = $state();
@@ -74,6 +75,9 @@
     hidden: boolean;
     hiddenBy: string | null;
     hiddenAt: string | null;
+    parentSessionId: string | null;
+    orchestrator: string | null;
+    orchestratorSessionId: string | null;
   }
 
   // The roster is the union of sessions, profiles and claims, so a name with
@@ -110,6 +114,9 @@
           hidden: false,
           hiddenBy: null,
           hiddenAt: null,
+          parentSessionId: null,
+          orchestrator: null,
+          orchestratorSessionId: null,
         };
         map.set(id, g);
       }
@@ -152,6 +159,9 @@
       g.hidden = r.hidden;
       g.hiddenBy = r.hidden_by_login ?? null;
       g.hiddenAt = r.hidden_at ?? null;
+      g.parentSessionId = r.parent_session_id ?? null;
+      g.orchestrator = r.orchestrator ?? null;
+      g.orchestratorSessionId = r.orchestrator_session_id ?? null;
       if (r.last_seen && (!g.lastHeartbeat || r.last_seen > g.lastHeartbeat)) {
         g.lastHeartbeat = r.last_seen;
       }
@@ -182,13 +192,60 @@
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
 
-  const visibleGroups = $derived(staleOnly ? allGroups.filter((g) => g.stale > 0) : allGroups);
-  const groups = $derived(showHidden ? visibleGroups : visibleGroups.filter((g) => !g.hidden));
+  // Orchestrator -> direct subagents. Counts include hidden cards: hiding is
+  // display-only, so the relationship stays honest.
+  const subagentCounts = $derived.by(() => {
+    const counts = new Map<string, { total: number; live: number }>();
+    for (const g of allGroups) {
+      if (!g.orchestrator) continue;
+      const count = counts.get(g.orchestrator) ?? { total: 0, live: 0 };
+      count.total++;
+      if (g.presence === "live" && !g.killed) count.live++;
+      counts.set(g.orchestrator, count);
+    }
+    return counts;
+  });
+
+  const visibleGroups = $derived.by(() => {
+    let list = focus
+      ? allGroups.filter((g) => g.name === focus || g.orchestrator === focus)
+      : allGroups;
+    if (staleOnly) {
+      // A focused orchestrator stays visible even when it has no stale claim;
+      // the focus is an explicit request to see the relationship.
+      list = list.filter((g) => g.stale > 0 || (focus != null && g.name === focus));
+    }
+    return list;
+  });
+  // A focused orchestrator is always visible, even if hidden; hidden rows stay
+  // hidden otherwise. The focus banner makes this explicit.
+  const groups = $derived(
+    showHidden
+      ? visibleGroups
+      : visibleGroups.filter((g) => !g.hidden || g.name === focus),
+  );
   const shownCount = $derived(groups.length);
+  const focusSubagents = $derived(
+    focus ? allGroups.filter((g) => g.orchestrator === focus) : [],
+  );
   const selected = $derived(allGroups.find((g) => g.id === openAgentId));
+  const selectedSubagents = $derived(
+    selected ? subagentCounts.get(selected.name) : undefined,
+  );
 
   function openAgent(g: Group) {
     openAgentId = g.id;
+  }
+
+  function focusOn(name: string | null) {
+    if (!name) return;
+    focus = name;
+    staleOnly = false;
+    closeAgent();
+  }
+
+  function clearFocus() {
+    focus = null;
   }
 
   function closeAgent() {
@@ -349,6 +406,15 @@
     >
       {showHidden ? "Showing hidden" : "Show hidden"} <span>{hiddenCount}</span>
     </button>
+    {#if focus}
+      <span class="focus-banner">
+        <span>
+          Focused on <b>{focus}</b> · {focusSubagents.length}
+          subagent{focusSubagents.length === 1 ? "" : "s"}
+        </span>
+        <button class="btn ghost sm" onclick={clearFocus}>Clear</button>
+      </span>
+    {/if}
     <span class="legend" aria-label="Issue status colours">
       {#each STATUSES as s (s)}
         <span class="lg"><i class="dot t-{s}"></i>{statusName(s)}</span>
@@ -370,11 +436,13 @@
         <path d="M12 3v4M8.5 12.5h.01M15.5 12.5h.01M9.5 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
       <p>
-        {staleOnly
-          ? "No stale claims. Every agent heartbeated in the last 5 minutes."
-          : hiddenCount > 0 && !showHidden
-            ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
-            : "No agent is working an issue right now."}
+        {focus
+          ? `No agents are linked to ${focus}.`
+          : staleOnly
+            ? "No stale claims. Every agent heartbeated in the last 5 minutes."
+            : hiddenCount > 0 && !showHidden
+              ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
+              : "No agent is working an issue right now."}
       </p>
       <p class="hint">
         Agents claim with <code>breadboard claim KEY --agent NAME</code> or the <code>claim_issue</code> MCP tool.
@@ -385,6 +453,7 @@
     <div class="grid">
       {#each groups as g (g.id)}
         {@const ownerDiffers = g.login != null && g.login !== store.me?.login}
+        {@const subs = subagentCounts.get(g.name)}
         <div
           class="agent-card"
           class:stale={g.stale > 0}
@@ -403,7 +472,7 @@
               openAgent(g);
             }
           }}
-          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}{g.hidden ? ', hidden' : ''}"
+          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}{g.orchestrator ? `, under ${g.orchestrator}` : ''}{g.hidden ? ', hidden' : ''}"
         >
           <header class="acheck">
             <span class="avatar" aria-hidden="true">
@@ -413,8 +482,41 @@
               <span class="aname">{g.name}</span>
               {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
               {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
+              {#if g.orchestrator}
+                <button
+                  class="rel-chip under"
+                  title="Under {g.orchestrator}. Click to focus it"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    focusOn(g.orchestrator);
+                  }}
+                  onkeydown={(e) => e.stopPropagation()}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12V6a2 2 0 0 1 2-2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  under <b>{g.orchestrator}</b>
+                </button>
+              {:else if g.parentSessionId}
+                <span class="rel-chip unresolved" title="Parent session {g.parentSessionId} is not registered yet">
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12V6a2 2 0 0 1 2-2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  under <code>{g.parentSessionId}</code>
+                </span>
+              {/if}
             </div>
             <span class="badges">
+              {#if subs?.total}
+                <button
+                  class="subagent-badge"
+                  title="{subs.live} live of {subs.total} subagent{subs.total === 1 ? "" : "s"}. Click to focus this orchestrator"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    focusOn(g.name);
+                  }}
+                  onkeydown={(e) => e.stopPropagation()}
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4v5a2 2 0 0 0 2 2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                  {subs.live} live
+                </button>
+              {/if}
               {#if g.hidden}
                 <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
               {/if}
@@ -554,6 +656,25 @@
           <span class="slabel">last seen</span>
           <span>{selected.lastSeen ? ago(selected.lastSeen, now) : "never"}</span>
         </div>
+        {#if selected.orchestrator}
+          <div class="srow">
+            <span class="slabel">orchestrator</span>
+            <button class="linklike" onclick={() => focusOn(selected.orchestrator)}>
+              {selected.orchestrator}
+            </button>
+          </div>
+        {:else if selected.parentSessionId}
+          <div class="srow">
+            <span class="slabel">parent session</span>
+            <code class="sid" title="Parent session is not registered yet">{selected.parentSessionId}</code>
+          </div>
+        {/if}
+        {#if selectedSubagents?.total}
+          <div class="srow">
+            <span class="slabel">subagents</span>
+            <span>{selectedSubagents.live} live of {selectedSubagents.total}</span>
+          </div>
+        {/if}
         {#if selected.hidden}
           <div class="hidden-note">
             Hidden{selected.hiddenBy ? ` by ${selected.hiddenBy}` : ""}{selected.hiddenAt ? ` ${ago(selected.hiddenAt, now)}` : ""}.
@@ -763,6 +884,24 @@
     font: 500 10px/1 var(--font-mono);
     color: var(--ink-3);
   }
+  .focus-banner {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px 4px 10px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--line));
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    font: 400 11px/1.3 var(--font-ui);
+    color: var(--ink-dim);
+  }
+  .focus-banner b {
+    color: var(--ink);
+    font-weight: 650;
+  }
+  .focus-banner .btn {
+    height: 22px;
+  }
   .legend {
     display: flex;
     align-items: center;
@@ -902,6 +1041,54 @@
     white-space: normal;
     overflow-wrap: anywhere;
   }
+  .rel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 100%;
+    min-width: 0;
+    padding: 2px 6px;
+    border-radius: 5px;
+    border: 1px solid var(--line);
+    background: color-mix(in srgb, var(--ink) 4%, transparent);
+    font: 400 9.5px/1.35 var(--font-mono);
+    color: var(--ink-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  button.rel-chip {
+    cursor: pointer;
+  }
+  button.rel-chip:hover {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+    color: var(--ink);
+  }
+  .rel-chip svg {
+    width: 10px;
+    height: 10px;
+    flex: none;
+  }
+  .rel-chip b {
+    color: var(--ink-dim);
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .rel-chip code {
+    font: inherit;
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .rel-chip.under {
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 9%, transparent);
+    border-color: color-mix(in srgb, var(--status-review) 30%, var(--line));
+  }
+  .rel-chip.unresolved {
+    border-style: dashed;
+  }
   .mmessage {
     margin: 3px 0 0;
     font-size: 12px;
@@ -945,6 +1132,28 @@
     color: var(--status-review);
     background: color-mix(in srgb, var(--status-review) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-review) 35%, transparent);
+  }
+  .subagent-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    font: 600 9px/1 var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 3px 6px;
+    border-radius: 4px;
+    color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 10%, transparent);
+    border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+    cursor: pointer;
+  }
+  .subagent-badge svg {
+    width: 10px;
+    height: 10px;
+  }
+  .subagent-badge:hover {
+    border-color: color-mix(in srgb, var(--ok) 55%, transparent);
   }
   .idle-badge {
     color: var(--ink-3);
@@ -1149,6 +1358,17 @@
   }
   .muted {
     color: var(--ink-3);
+  }
+  .linklike {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    cursor: pointer;
+  }
+  .linklike:hover {
+    text-decoration: underline;
   }
   .killed-note {
     color: var(--danger);
