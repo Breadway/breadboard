@@ -16,6 +16,7 @@
   // pushes claim/heartbeat/release events straight into store.agents.
   let now = $state(Date.now());
   let staleOnly = $state(false);
+  let showHidden = $state(false);
   let openAgentId = $state<string | null>(null);
   let copied = $state<string | null>(null);
   let panelEl: HTMLElement | undefined = $state();
@@ -70,6 +71,9 @@
     note: string | null;
     state: AgentState | null;
     lastSeen: string | null;
+    hidden: boolean;
+    hiddenBy: string | null;
+    hiddenAt: string | null;
   }
 
   // The roster is the union of sessions, profiles and claims, so a name with
@@ -103,6 +107,9 @@
           note: null,
           state: null,
           lastSeen: null,
+          hidden: false,
+          hiddenBy: null,
+          hiddenAt: null,
         };
         map.set(id, g);
       }
@@ -142,6 +149,9 @@
       g.note = g.note ?? r.note ?? null;
       g.state = g.state ?? r.state ?? null;
       g.lastSeen = r.last_seen ?? g.lastSeen;
+      g.hidden = r.hidden;
+      g.hiddenBy = r.hidden_by_login ?? null;
+      g.hiddenAt = r.hidden_at ?? null;
       if (r.last_seen && (!g.lastHeartbeat || r.last_seen > g.lastHeartbeat)) {
         g.lastHeartbeat = r.last_seen;
       }
@@ -153,11 +163,12 @@
         return byStatus !== 0 ? byStatus : a.key.localeCompare(b.key, undefined, { numeric: true });
       });
     }
-    const rank = (g: Group) => (g.killed ? 2 : g.presence === "live" ? 0 : 1);
+    // Sort only on claim counts and name, never on live/stale: a heartbeat
+    // flips presence every few seconds and must not reorder the masonry.
+    const rank = (g: Group) => (g.killed ? 1 : 0);
     return [...map.values()].sort(
       (a, b) =>
         rank(a) - rank(b) ||
-        b.live - a.live ||
         b.work.length - a.work.length ||
         b.intents.length - a.intents.length ||
         a.name.localeCompare(b.name),
@@ -167,8 +178,13 @@
   const claimHolders = $derived(allGroups.filter((g) => g.work.length > 0).length);
   const idleSessions = $derived(allGroups.filter((g) => g.work.length === 0).length);
   const killedCount = $derived(allGroups.filter((g) => g.killed).length);
+  const hiddenGroups = $derived(allGroups.filter((g) => g.hidden));
+  const hiddenCount = $derived(hiddenGroups.length);
+  const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
 
-  const groups = $derived(staleOnly ? allGroups.filter((g) => g.stale > 0) : allGroups);
+  const visibleGroups = $derived(staleOnly ? allGroups.filter((g) => g.stale > 0) : allGroups);
+  const groups = $derived(showHidden ? visibleGroups : visibleGroups.filter((g) => !g.hidden));
+  const shownCount = $derived(groups.length);
   const selected = $derived(allGroups.find((g) => g.id === openAgentId));
 
   function openAgent(g: Group) {
@@ -208,6 +224,14 @@
 
   async function reviveGroup(g: Group) {
     await store.reviveAgent(g.name);
+  }
+
+  async function hideGroup(g: Group) {
+    await store.hideAgent(g.name);
+  }
+
+  async function unhideGroup(g: Group) {
+    await store.unhideAgent(g.name);
   }
 
   $effect(() => {
@@ -294,6 +318,8 @@
     </div>
 
     <div class="stats">
+      <div class="stat"><b>{shownCount}</b><span>shown</span></div>
+      <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
       <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live sessions</span></div>
       <div class="stat"><b>{claimHolders}</b><span>claim holders</span></div>
       <div class="stat"><b>{tallies.active}</b><span>active</span></div>
@@ -306,12 +332,23 @@
   <div class="bar">
     <div class="seg">
       <button class:on={!staleOnly} onclick={() => (staleOnly = false)}>
-        All <span>{allGroups.length} agents</span>
+        All <span>{shownCount} shown</span>
       </button>
       <button class:on={staleOnly} onclick={() => (staleOnly = true)}>
         Stale <span class:bad={staleCount > 0}>{staleCount}</span>
       </button>
     </div>
+    <button
+      class="hidden-toggle"
+      class:on={showHidden}
+      aria-pressed={showHidden}
+      title={hiddenCount
+        ? `${hiddenCount} hidden agent${hiddenCount === 1 ? "" : "s"}${hiddenWithClaims ? `, ${hiddenWithClaims} still hold claims` : ""}`
+        : "No hidden agents"}
+      onclick={() => (showHidden = !showHidden)}
+    >
+      {showHidden ? "Showing hidden" : "Show hidden"} <span>{hiddenCount}</span>
+    </button>
     <span class="legend" aria-label="Issue status colours">
       {#each STATUSES as s (s)}
         <span class="lg"><i class="dot t-{s}"></i>{statusName(s)}</span>
@@ -319,7 +356,10 @@
       <span class="lg"><i class="dot intent-dot"></i>queued</span>
     </span>
     <span class="grow"></span>
-    <span class="live-note">{liveSessions} live sessions · {liveCount} claims heartbeating · {idleSessions} idle</span>
+    <span class="live-note">
+      {shownCount} shown · {hiddenCount} hidden{#if hiddenWithClaims} ({hiddenWithClaims} still hold{hiddenWithClaims === 1 ? "s" : ""} claims){/if}
+      · {liveSessions} live sessions · {liveCount} claims heartbeating · {idleSessions} idle
+    </span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
 
@@ -330,7 +370,11 @@
         <path d="M12 3v4M8.5 12.5h.01M15.5 12.5h.01M9.5 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
       <p>
-        {staleOnly ? "No stale claims. Every agent heartbeated in the last 5 minutes." : "No agent is working an issue right now."}
+        {staleOnly
+          ? "No stale claims. Every agent heartbeated in the last 5 minutes."
+          : hiddenCount > 0 && !showHidden
+            ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
+            : "No agent is working an issue right now."}
       </p>
       <p class="hint">
         Agents claim with <code>breadboard claim KEY --agent NAME</code> or the <code>claim_issue</code> MCP tool.
@@ -341,13 +385,25 @@
     <div class="grid">
       {#each groups as g (g.id)}
         {@const ownerDiffers = g.login != null && g.login !== store.me?.login}
-        <button
+        <div
           class="agent-card"
           class:stale={g.stale > 0}
           class:killed={g.killed}
+          class:hidden={g.hidden}
           style="--agent:{agentColor(g.name)}"
+          data-agent={g.id}
+          data-claims={g.work.length}
+          data-hidden={g.hidden}
+          role="button"
+          tabindex="0"
           onclick={() => openAgent(g)}
-          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}"
+          onkeydown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              openAgent(g);
+            }
+          }}
+          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}{g.hidden ? ', hidden' : ''}"
         >
           <header class="acheck">
             <span class="avatar" aria-hidden="true">
@@ -358,17 +414,22 @@
               {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
               {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
             </div>
-            {#if g.killed}
-              <span class="killed-badge" title="Writes blocked until revived">killed</span>
-            {:else if g.stale > 0}
-              <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
-                <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
-                {g.stale}
-              </span>
-            {:else if g.presence === "stale"}
-              <span class="idle-badge" title="No recent heartbeat">stale</span>
-            {/if}
-            {#if g.intents.length}<span class="queued-badge" title="Queued intents">{g.intents.length} queued</span>{/if}
+            <span class="badges">
+              {#if g.hidden}
+                <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
+              {/if}
+              {#if g.killed}
+                <span class="killed-badge" title="Writes blocked until revived">killed</span>
+              {:else if g.stale > 0}
+                <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
+                  <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+                  {g.stale}
+                </span>
+              {:else if g.presence === "stale"}
+                <span class="idle-badge" title="No recent heartbeat">stale</span>
+              {/if}
+              {#if g.intents.length}<span class="queued-badge" title="Queued intents">{g.intents.length} queued</span>{/if}
+            </span>
           </header>
 
           {#if g.claims.length}
@@ -404,8 +465,18 @@
             <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
               {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
             </span>
+            {#if g.hidden}
+              <button
+                class="btn sm unhide-card"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  void unhideGroup(g);
+                }}
+                onkeydown={(e) => e.stopPropagation()}
+              >Unhide</button>
+            {/if}
           </footer>
-        </button>
+        </div>
       {/each}
     </div>
   {/if}
@@ -431,11 +502,13 @@
           <div class="mname">
             {selected.name}
             {#if selected.login != null && selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
+            {#if selected.hidden}<span class="hidden-badge">hidden</span>{/if}
             {#if selected.killed}<span class="killed-badge">killed</span>{/if}
           </div>
           {#if selected.message}<p class="mmessage">{selected.message}</p>{/if}
           <div class="msub">
             {selected.presence}
+            {#if selected.hidden}· hidden{/if}
             {#if selected.work.length}· {selected.work.length} exclusive{/if}
             {#if selected.intents.length}· {selected.intents.length} queued{/if}
             {#if selected.stale}· <span class="bad">{selected.stale} stale claims</span>{/if}
@@ -447,6 +520,11 @@
             <Ring done={selected.done} total={selected.work.length} color={agentColor(selected.name)} size={18} />
             <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
           </span>
+        {/if}
+        {#if selected.hidden}
+          <button class="btn sm" onclick={() => void unhideGroup(selected)}>Unhide</button>
+        {:else}
+          <button class="btn sm" onclick={() => void hideGroup(selected)}>Hide</button>
         {/if}
         {#if selected.killed}
           <button class="btn sm" onclick={() => void reviveGroup(selected)}>Revive</button>
@@ -476,6 +554,12 @@
           <span class="slabel">last seen</span>
           <span>{selected.lastSeen ? ago(selected.lastSeen, now) : "never"}</span>
         </div>
+        {#if selected.hidden}
+          <div class="hidden-note">
+            Hidden{selected.hiddenBy ? ` by ${selected.hiddenBy}` : ""}{selected.hiddenAt ? ` ${ago(selected.hiddenAt, now)}` : ""}.
+            Claims, chat identity and history are untouched.
+          </div>
+        {/if}
         {#if selected.killed}
           <div class="killed-note">
             Writes are blocked{selected.killedBy ? `; killed by ${selected.killedBy}` : ""}{selected.killedAt ? ` ${ago(selected.killedAt, now)}` : ""}.
@@ -581,6 +665,7 @@
   }
   .stats {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
   }
   .stat {
@@ -612,6 +697,13 @@
   }
   .stat.live b {
     color: var(--ok);
+  }
+  .stat.warn {
+    border-color: color-mix(in srgb, var(--status-review) 38%, transparent);
+    background: color-mix(in srgb, var(--status-review) 8%, transparent);
+  }
+  .stat.warn b {
+    color: var(--status-review);
   }
   /* --- bar ----------------------------------------------------------- */
   .bar {
@@ -650,6 +742,27 @@
   .seg span.bad {
     color: var(--danger);
   }
+  .hidden-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--sunk);
+    padding: 5px 10px;
+    font: 500 12px/1 var(--font-ui);
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+  .hidden-toggle.on {
+    background: color-mix(in srgb, var(--status-review) 14%, var(--raise));
+    border-color: color-mix(in srgb, var(--status-review) 45%, var(--line));
+    color: var(--ink);
+  }
+  .hidden-toggle span {
+    font: 500 10px/1 var(--font-mono);
+    color: var(--ink-3);
+  }
   .legend {
     display: flex;
     align-items: center;
@@ -687,24 +800,35 @@
   }
 
   /* --- agent grid ----------------------------------------------------- */
+  /* Multi-column masonry: a tall card only occupies one column, and later
+     cards flow beside it instead of leaving a dead grid cell. Cards keep
+     their DOM order (the list is sorted without live/stale) and never split
+     across columns. */
   .grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
-    gap: 10px;
-    align-items: start;
+    columns: 248px;
+    column-gap: 10px;
+    column-fill: balance;
   }
   .agent-card {
     display: flex;
     flex-direction: column;
     gap: 10px;
     width: 100%;
+    margin: 0 0 10px;
     padding: 11px 12px 9px;
     border-radius: 12px;
     border: 1px solid var(--line);
     background: var(--surface);
     text-align: left;
     cursor: pointer;
+    break-inside: avoid;
+    font: inherit;
+    color: inherit;
     transition: border-color 0.15s, background-color 0.15s, transform 0.15s;
+  }
+  .agent-card:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--agent) 70%, var(--ink));
+    outline-offset: 2px;
   }
   .agent-card:hover {
     background: var(--raise);
@@ -717,6 +841,11 @@
   .agent-card.killed {
     border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
     background: color-mix(in srgb, var(--danger) 4%, var(--surface));
+  }
+  .agent-card.hidden {
+    border-style: dashed;
+    border-color: color-mix(in srgb, var(--status-review) 45%, var(--line));
+    background: color-mix(in srgb, var(--status-review) 3%, var(--surface));
   }
   .acheck {
     display: flex;
@@ -781,11 +910,18 @@
     white-space: normal;
     overflow-wrap: anywhere;
   }
+  .badges {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+  }
   .stale-badge,
+  .hidden-badge,
   .killed-badge,
   .idle-badge,
   .queued-badge {
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 4px;
@@ -805,6 +941,11 @@
     background: color-mix(in srgb, var(--danger) 16%, transparent);
     border: 1px solid color-mix(in srgb, var(--danger) 40%, transparent);
   }
+  .hidden-badge {
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--status-review) 35%, transparent);
+  }
   .idle-badge {
     color: var(--ink-3);
     background: color-mix(in srgb, var(--ink) 7%, transparent);
@@ -813,16 +954,11 @@
     color: var(--status-review);
     background: color-mix(in srgb, var(--status-review) 12%, transparent);
   }
-  .stale-badge + .queued-badge,
-  .killed-badge + .queued-badge,
-  .idle-badge + .queued-badge {
-    margin-left: 0;
-  }
-
   .tiles {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
+    break-inside: avoid;
   }
   .idle-line {
     display: flex;
@@ -1016,6 +1152,10 @@
   }
   .killed-note {
     color: var(--danger);
+    font-size: 11px;
+  }
+  .hidden-note {
+    color: var(--status-review);
     font-size: 11px;
   }
   .no-claims {

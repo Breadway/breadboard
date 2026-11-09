@@ -1140,3 +1140,168 @@ async fn kill_publishes_event() {
     assert_eq!(event["type"], "agent.killed");
     assert_eq!(event["agent"], "event-target");
 }
+
+/// Hiding is a server-side display flag, not a delete. Claims stay, the flag
+/// survives a fresh roster read, and a rename carries it to the new name.
+#[tokio::test]
+async fn hide_and_unhide_persist_and_keep_claims() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "hide noisy agent").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "noisy-probe",
+            "session_id": "ses_noisy",
+            "message": "test probe"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let hidden: Value = c
+        .post(format!("{base}/api/agents/noisy-probe/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hidden["hidden"], true);
+    assert_eq!(hidden["hidden_by_login"], "tester");
+    assert_eq!(hidden["claim_count"], 1);
+
+    // A fresh read sees the same flag: this is server state, not local UI.
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = roster_row(&roster, "noisy-probe");
+    assert_eq!(row["hidden"], true);
+    assert_eq!(row["claim_count"], 1);
+
+    // Hiding does not release or hide claims from the claim list.
+    let claims: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claims.as_array().unwrap().len(), 1);
+    assert_eq!(claims[0]["agent_name"], "noisy-probe");
+
+    // Repeated hide is a no-op.
+    let again: Value = c
+        .post(format!("{base}/api/agents/noisy-probe/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["hidden"], true);
+    assert_eq!(again["hidden_at"], hidden["hidden_at"]);
+
+    // Renaming a hidden agent carries the flag.
+    let renamed: Value = c
+        .post(format!("{base}/api/agents/noisy-probe/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "renamed-probe" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(renamed["agent_name"], "renamed-probe");
+    assert_eq!(renamed["hidden"], true);
+
+    // Unhide is idempotent and clears the flag.
+    for _ in 0..2 {
+        let shown: Value = c
+            .post(format!("{base}/api/agents/renamed-probe/unhide"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(shown["hidden"], false);
+    }
+    assert_eq!(shown_count(&c, &base, &auth).await, 1);
+
+    // Unknown names cannot be hidden.
+    let unknown = c
+        .post(format!("{base}/api/agents/never-existed/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+}
+
+async fn shown_count(c: &reqwest::Client, base: &str, auth: &str) -> usize {
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["hidden"] == false)
+        .count()
+}
+
+/// Hiding and unhiding publish SSE events so other devices refetch the roster.
+#[tokio::test]
+async fn hide_and_unhide_publish_events() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "event-hide" }))
+        .send()
+        .await
+        .unwrap();
+
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
+    c.post(format!("{base}/api/agents/event-hide/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.next_type().await, "agent.hidden");
+
+    c.post(format!("{base}/api/agents/event-hide/unhide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(events.next_type().await, "agent.unhidden");
+}

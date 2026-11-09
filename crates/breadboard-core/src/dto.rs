@@ -536,6 +536,14 @@ pub struct AgentRosterEntry {
     pub killed_by_login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub killed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Hidden from the default Agents view. Claims and chat identity remain.
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_by: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_by_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

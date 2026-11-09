@@ -34,6 +34,15 @@ release actions. A kill button confirms that it releases every claim and
 blocks writes until the agent is revived. The header counts live sessions
 (heartbeat inside 120 seconds) separately from claim holders.
 
+Agents can be hidden from the default view without deleting them. Hidden is a
+server-side per-name flag: claims, chat identity and history stay intact, and
+every device sees the same state. The header shows how many agents are shown
+and how many are hidden, including how many hidden agents still hold claims.
+The "Show hidden" toggle reveals them, each with an Unhide control. Cards use
+CSS multi-column masonry (`columns: 248px`, `break-inside: avoid`) so a tall
+card does not leave a dead column, while DOM order stays stable across
+heartbeat updates.
+
 The server serves the built SPA at `/` when `web_dir` (or `BREADBOARD_WEB_DIR`)
 is set; unknown paths fall back to `index.html` for client-side routing.
 
@@ -210,9 +219,11 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
 | `POST` | `/api/agents/register` | `{ agent_name?, session_id?, host?, pid?, note? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name. Returns `{ agent_name, alternatives[], live, killed, session_id }`; registration never revives a killed name. `200` |
-| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed` |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, host, pid, note, first_seen, last_seen, live, killed, status, message, state, claim_count, exclusive_count, intent_count, user_id, login, killed_by, killed_by_login, killed_at, hidden, hidden_by, hidden_by_login, hidden_at }`. `live` is a heartbeat inside 120 seconds on a name that is not killed; `status` is `live`, `stale` or `killed`. Hidden rows are still returned so clients can count and reveal them |
 | `POST` | `/api/agents/{name}/kill` | mark the lowercased name killed, release every claim it holds (exclusive and intent), record the caller in `killed_by`, and emit `agent.killed`. Idempotent: a second call keeps the original killer and still returns the roster row. `200` |
 | `POST` | `/api/agents/{name}/revive` | clear a kill so the name can write again; emits `agent.revived`. Idempotent. `404` when the name was never registered |
+| `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
+| `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
@@ -277,6 +288,8 @@ after reconnecting to recover missed changes.
 | `agent.released` | `bread.board.agent.released` | `id`, `key` |
 | `agent.killed` | `bread.board.agent.killed` | `agent`, `killed_by` |
 | `agent.revived` | `bread.board.agent.revived` | `agent`, `revived_by` |
+| `agent.hidden` | `bread.board.agent.hidden` | `agent`, `hidden_by` |
+| `agent.unhidden` | `bread.board.agent.unhidden` | `agent`, `unhidden_by` |
 | `chat.message` | `bread.board.chat.message` | `room_id`, `id` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |

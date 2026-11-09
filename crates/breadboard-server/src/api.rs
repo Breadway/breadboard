@@ -1388,6 +1388,42 @@ pub async fn revive_agent(
     Ok(Json(entry))
 }
 
+/// Hide an agent from the default Agents view. Claims and chat identity stay.
+pub async fn hide_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, changed) = store::hide_agent(&app.db, user.0.id, &name).await?;
+    if changed {
+        let event = BoardEvent::AgentHidden {
+            agent: entry.agent_name.clone(),
+            hidden_by: Some(user.0.id),
+        };
+        app.bus.publish(event.clone());
+        notify::emit_bread(&app, &event);
+    }
+    Ok(Json(entry))
+}
+
+pub async fn unhide_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, changed) = store::unhide_agent(&app.db, &name).await?;
+    let entry = entry.ok_or(crate::error::AppError::NotFound)?;
+    if changed {
+        let event = BoardEvent::AgentUnhidden {
+            agent: entry.agent_name.clone(),
+            unhidden_by: Some(user.0.id),
+        };
+        app.bus.publish(event.clone());
+        notify::emit_bread(&app, &event);
+    }
+    Ok(Json(entry))
+}
+
 /// Rename an agent. Claims and profile move in one transaction; a name owned
 /// by another user or an already-used target is refused.
 pub async fn rename_agent(
