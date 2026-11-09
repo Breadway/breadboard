@@ -1779,7 +1779,15 @@ pub async fn heartbeat_claim(
     )
     .await?;
     if let Some(name) = body.agent_name.as_deref() {
-        store::ensure_agent_writable(&app.db, user.0.id, name, None).await?;
+        // A claim rename is still a claim under the target name; use the same
+        // session identity so a live name held elsewhere is refused here too.
+        store::ensure_agent_writable(
+            &app.db,
+            user.0.id,
+            name,
+            session.or(existing.session_id.as_deref()),
+        )
+        .await?;
     }
     if let (Some(Some(want_inner)), Some(have)) = (&body.session_id, &existing.session_id) {
         // Outer Some = field present, inner Some = set (not clear). A present
