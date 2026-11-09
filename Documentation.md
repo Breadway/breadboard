@@ -263,8 +263,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, models[], sessions[], spend_warn_usd, over_threshold }]`. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
 | `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, cost, tokens, models) |
 | `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share |
-| `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global spend warning threshold |
-| `POST` | `/api/usage/import` | import now. Body `{ path? }`; defaults to `usage.opencode_db`. Returns `{ path, sessions, rows, skipped_sessions }`. Importing the same session again replaces its rows, so totals never double count |
+| `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global spend warning threshold. `0` disables the warning; cost above zero then reports `over_threshold: false` |
+| `POST` | `/api/usage/import` | import now. Body `{ path? }`; defaults to `usage.opencode_db`. Returns `{ path, sessions, rows, skipped_sessions }`. Importing the same session again replaces its rows, so totals never double count. A missing database file is a `500`; no configured path is a `400` |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
@@ -276,12 +276,25 @@ issues. Markdown imports use the same issue-creation rule.
 running an agent (`session_v2` plus per-message rows in `session_message`). The
 importer reads it read-only, groups per session, model and UTC day, and resolves
 the breadboard agent name from the session id registered by
-`/api/agents/register` (falling back to a claim's session id). Configure the file
-with `usage.opencode_db`, `BREADBOARD_USAGE_OPENCODE_DB`, or the default
-`$XDG_DATA_HOME/opencode/opencode.db`; mount it read-only into the container to
-collect from that host. A missing file leaves the importer idle. Import runs every
-`usage.import_interval_mins` (default 5) and on demand through
-`/api/usage/import`. Cost is the value OpenCode reported for each assistant
+`/api/agents/register` (falling back to a claim's session id). Configure the
+directory with `usage.opencode_db`, `BREADBOARD_USAGE_OPENCODE_DB`, or the
+default `$XDG_DATA_HOME/opencode/opencode.db`. In a container, mount the whole
+OpenCode data directory read-only, for example
+`-v /home/breadway/.local/share/opencode:/var/lib/opencode:ro` with
+`BREADBOARD_USAGE_OPENCODE_DB=/var/lib/opencode/opencode.db`. A read-only
+directory mount is safe with WAL; SQLite must be able to read `opencode.db`,
+`opencode.db-wal` and `opencode.db-shm`. Do not mount the single database file:
+the directory is needed for the WAL and shared-memory sidecars, and a single-file
+mount fails or reads stale data. `immutable=1` is also wrong because it ignores
+the WAL. If a copy is ever needed, take a point-in-time snapshot with
+`sqlite3 <path> ".backup <copy>"`; never `cp` a live database.
+
+First run without the mount: the scheduled importer stays idle without an error,
+an on-demand `POST /api/usage/import` returns `500` for the missing file, and
+setting `BREADBOARD_USAGE_OPENCODE_DB` to an empty value disables the importer
+and makes the import route return `400`. Import runs every
+`usage.import_interval_mins` (default 5) and on demand. A
+`spend_warn_usd` of `0` disables the spend warning. Cost is the value OpenCode reported for each assistant
 message, in USD. An issue totals the sessions recorded as touching it: claiming
 records a permanent session-to-issue link, so releasing the claim does not erase
 history. A claim without a session id inherits the session registered for that

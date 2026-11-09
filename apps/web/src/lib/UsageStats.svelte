@@ -202,7 +202,7 @@
           <button class="btn ghost sm" disabled={saving} onclick={() => void saveThreshold()}>
             {saving ? "Saving" : "Save"}
           </button>
-          <span class="hint">per agent or issue in this range</span>
+          <span class="hint">0 disables warnings; applies to any agent or issue in this range</span>
         </div>
       {/if}
     {:else if loading}

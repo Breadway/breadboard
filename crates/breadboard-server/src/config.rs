@@ -38,9 +38,9 @@ pub struct Config {
 #[serde(default)]
 pub struct UsageConfig {
     /// Path to the OpenCode SQLite database (`opencode.db`). Defaults to
-    /// `$XDG_DATA_HOME/opencode/opencode.db`. In the container this path is
-    /// absent unless the file (or a copy) is mounted in; the importer then
-    /// stays idle instead of failing.
+    /// `$XDG_DATA_HOME/opencode/opencode.db`. In a container mount the whole
+    /// OpenCode data directory read-only (SQLite needs the db, -wal and -shm)
+    /// and point this inside it; the importer then stays idle when absent.
     pub opencode_db: Option<PathBuf>,
     /// Minutes between import passes. Minimum 1.
     pub import_interval_mins: u64,

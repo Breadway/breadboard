@@ -11,8 +11,10 @@
 -- reported and a growing session does not double count.
 --
 -- `agent_name` is resolved from `agent_sessions` / `agent_claims` by session
--- id at import time and stays nullable: usage from a session that never
--- registered is stored but not shown against an agent.
+-- id at import time. A session with no registered or claimed mapping is
+-- skipped entirely, so this table only holds usage the board can attribute.
+-- The column stays nullable so a future source can record unattributed usage
+-- explicitly.
 
 CREATE TABLE usage_sessions (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,

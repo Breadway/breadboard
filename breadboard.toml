@@ -25,8 +25,15 @@ digest_hour  = 8               # local hour 0-23 to send it (BREADBOARD_NOTIFICA
 
 [usage]
 # Token and cost stats imported from OpenCode's session database. Defaults to
-# $XDG_DATA_HOME/opencode/opencode.db. In the container, mount the file (or a
-# copy) in and point this at it; a missing file leaves the importer idle.
-# opencode_db          = "/home/breadway/.local/share/opencode/opencode.db"
+# $XDG_DATA_HOME/opencode/opencode.db. In a container mount the whole OpenCode
+# data directory read-only and point this inside it, for example:
+#   -v /home/breadway/.local/share/opencode:/var/lib/opencode:ro
+#   opencode_db = "/var/lib/opencode/opencode.db"
+# A read-only directory mount is safe with WAL; SQLite must read opencode.db,
+# opencode.db-wal and opencode.db-shm. Do not mount the single db file, and do
+# not use immutable=1. For a copy, use `sqlite3 <path> ".backup <copy>"` (a
+# point-in-time snapshot), never cp. Without the mount the importer stays idle;
+# an empty BREADBOARD_USAGE_OPENCODE_DB disables it and import returns 400.
+# opencode_db          = "/var/lib/opencode/opencode.db"
 import_interval_mins = 5       # BREADBOARD_USAGE_IMPORT_INTERVAL_MINS
-spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; the stored setting wins
+spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; 0 disables warnings

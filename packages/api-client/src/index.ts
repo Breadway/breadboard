@@ -500,6 +500,7 @@ export interface UsageSummary extends UsageTotals {
 }
 
 export interface UsageSettings {
+  /** Global spend warning threshold in USD. 0 disables warnings. */
   spend_warn_usd: number;
 }
 

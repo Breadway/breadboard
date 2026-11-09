@@ -263,6 +263,31 @@ async fn imports_per_agent_and_per_issue_and_warns_over_threshold() {
     assert!(agent["over_threshold"].as_bool().unwrap());
     approx(agent["spend_warn_usd"].as_f64().unwrap(), 0.5);
 
+    // Threshold 0 means "warnings off", not "warn on every nonzero cost".
+    let settings: Value = c
+        .put(format!("{base}/api/usage/settings"))
+        .header("authorization", &auth)
+        .json(&json!({ "spend_warn_usd": 0 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    approx(settings["spend_warn_usd"].as_f64().unwrap(), 0.0);
+    let agent: Value = c
+        .get(format!("{base}/api/usage/agents/sesame%20auditor?range=7d"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(agent["cost"].as_f64().unwrap() > 0.0);
+    assert!(!agent["over_threshold"].as_bool().unwrap());
+    approx(agent["spend_warn_usd"].as_f64().unwrap(), 0.0);
+
     // Re-import with one more message: replace, do not double count.
     let source = SqlitePoolOptions::new()
         .max_connections(1)
