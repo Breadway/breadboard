@@ -956,6 +956,25 @@ pub async fn update_issue(
     source: SyncSource,
 ) -> AppResult<Issue> {
     let before = get_issue_by_key(db, key).await?;
+
+    // Review requests gate `done` the same way CI does: only an approved
+    // request clears the card. A user-facing mutation is refused with a
+    // conflict; the sync cascade leaves the card where it is so a Forgejo
+    // close cannot bypass an outstanding review.
+    let review_hold = patch.status == Some(Status::Done)
+        && before.status != Status::Done
+        && crate::reviews::has_outstanding(db, before.id).await?;
+    if review_hold && source == SyncSource::Breadboard {
+        let reviewer = crate::reviews::first_outstanding(db, before.id)
+            .await?
+            .map(|r| format!("{} ({})", r.reviewer, r.state.as_str()))
+            .unwrap_or_else(|| "a reviewer".to_string());
+        return Err(AppError::Conflict(format!(
+            "{} has an outstanding review request from {}; resolve it before marking done",
+            before.key, reviewer
+        )));
+    }
+
     let mut tx = crate::db::begin_write(db).await?;
     let mut changed: Vec<(&str, Option<String>, Option<String>)> = Vec::new();
 
@@ -994,7 +1013,7 @@ pub async fn update_issue(
         }
     }
     if let Some(status) = patch.status {
-        if status != before.status {
+        if status != before.status && !(review_hold && status == Status::Done) {
             set_col!(
                 "status",
                 status.as_str(),
@@ -1251,6 +1270,14 @@ pub async fn sync_pr_close_target(
         .await?;
     let Some(current) = current else {
         return Ok(None);
+    };
+    // A merged PR cannot complete a target that still owes a review. Hold it
+    // in review, matching the `verify-before-done` cascade.
+    let status = match status {
+        Some(Status::Done) if crate::reviews::has_outstanding(db, target_id).await? => {
+            Some(Status::Review)
+        }
+        other => other,
     };
     let needs_status = status.is_some_and(|s| s.as_str() != current);
     if links >= 2 && !needs_status {

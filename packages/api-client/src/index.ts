@@ -117,11 +117,53 @@ export interface ActivityEntry {
   at: string;
 }
 
+export type ReviewState = "requested" | "accepted" | "changes_requested" | "approved";
+export type ReviewerKind = "human" | "agent";
+
+/** One reviewer on one issue/PR pair. Humans and agents share the record. */
+export interface ReviewRequest {
+  id: number;
+  issue_id: number;
+  issue_key: string;
+  issue_title: string;
+  issue_status: Status;
+  pr_url: string | null;
+  pr_number: number | null;
+  pr_repo: string | null;
+  requested_by: number | null;
+  requested_by_login: string | null;
+  reviewer_id: number | null;
+  reviewer: string;
+  reviewer_kind: ReviewerKind;
+  state: ReviewState;
+  note: string | null;
+  requested_at: string;
+  updated_at: string;
+  responded_at: string | null;
+  escalated_at: string | null;
+}
+
+export interface NewReviewRequest {
+  reviewer: string;
+  reviewer_kind?: ReviewerKind;
+  pr_url?: string;
+  pr_number?: number;
+  pr_repo?: string;
+  note?: string;
+}
+
+export interface ReviewRequestPatch {
+  state?: ReviewState;
+  note?: string;
+  agent_name?: string;
+}
+
 export type NotificationKind =
   | "assigned"
   | "mention"
   | "cycle_started"
   | "cycle_ended"
+  | "review"
   | "digest";
 
 export interface Notification {
@@ -504,7 +546,16 @@ export type BoardEvent =
   | { type: "agent.hidden"; agent: string; hidden_by: number | null }
   | { type: "agent.unhidden"; agent: string; unhidden_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
-  | { type: "chat.room.deleted"; id: number };
+  | { type: "chat.room.deleted"; id: number }
+  | {
+      type: "review.updated";
+      id: number;
+      issue_id: number;
+      key: string;
+      reviewer: string;
+      state: string;
+      escalated: boolean;
+    };
 
 export class ApiError extends Error {
   constructor(
@@ -638,6 +689,23 @@ export class BreadboardClient {
   getActivity = (key: string) =>
     this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
 
+  listIssueReviews = (key: string) =>
+    this.req<ReviewRequest[]>("GET", `/api/issues/${key}/reviews`);
+  listReviews = (opts: { reviewer?: string; outstanding?: boolean; issue?: string; limit?: number } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.reviewer) q.set("reviewer", opts.reviewer);
+    if (opts.outstanding) q.set("outstanding", "true");
+    if (opts.issue) q.set("issue", opts.issue);
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return this.req<ReviewRequest[]>("GET", `/api/reviews${qs ? `?${qs}` : ""}`);
+  };
+  requestReview = (key: string, request: NewReviewRequest) =>
+    this.req<ReviewRequest>("POST", `/api/issues/${key}/reviews`, request);
+  updateReview = (id: number, patch: ReviewRequestPatch) =>
+    this.req<ReviewRequest>("PATCH", `/api/reviews/${id}`, patch);
+  withdrawReview = (id: number) =>
+    this.req<void>("DELETE", `/api/reviews/${id}`);
   listIssueArtifacts = (key: string) =>
     this.req<IssueArtifact[]>("GET", `/api/issues/${key}/artifacts`);
   /** Multipart upload from the browser (session cookie). */

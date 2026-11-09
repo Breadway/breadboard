@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, artifacts, auth, device, webhook, AppState};
+use crate::{api, artifacts, auth, device, reviews, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -50,6 +50,15 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/project", put(api::move_issue_project))
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
+        .route(
+            "/issues/{key}/reviews",
+            get(reviews::list_issue_reviews).post(reviews::create_review_request),
+        )
+        .route("/reviews", get(reviews::list_reviews))
+        .route(
+            "/reviews/{id}",
+            patch(reviews::update_review_request).delete(reviews::withdraw_review_request),
+        )
         // --- issue artifacts (BB-160) ------------------------------------
         .route(
             "/issues/{key}/artifacts",

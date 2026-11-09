@@ -15,6 +15,7 @@ pub mod http;
 pub mod import;
 pub mod names;
 pub mod notify;
+pub mod reviews;
 pub mod store;
 pub mod summary;
 pub mod sync;

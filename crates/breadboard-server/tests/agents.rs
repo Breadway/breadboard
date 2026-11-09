@@ -853,7 +853,12 @@ async fn register_assigns_curated_names_with_alternatives() {
         .unwrap();
     let name = first["agent_name"].as_str().unwrap().to_string();
     assert_eq!(name, name.to_lowercase());
-    assert!(name.contains('-'), "{name} should be a curated pair");
+    // The curated list intentionally includes the single-word "doughminator",
+    // so asserting a hyphen here was a flake. Membership is the real rule.
+    assert!(
+        breadboard_server::names::CURATED.contains(&name.as_str()),
+        "{name} should be a curated name"
+    );
     let alternatives: Vec<String> = first["alternatives"]
         .as_array()
         .unwrap()
