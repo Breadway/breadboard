@@ -89,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{name}/hide", post(api::hide_agent))
         .route("/agents/{name}/unhide", post(api::unhide_agent))
         .route("/agents/{name}/rename", post(api::rename_agent))
+        .merge(crate::agent_events::routes())
         .route(
             "/chat/rooms",
             get(api::list_chat_rooms).post(api::create_chat_room),

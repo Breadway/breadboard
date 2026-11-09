@@ -30,6 +30,10 @@
   let narrow = $state(false);
   let roomsOpen = $state(true);
   let reloadTimer: ReturnType<typeof setTimeout> | undefined;
+  // Plain (not reactive) on purpose: flipping it must not retrigger the
+  // bottom-scroll effect. A deep link sets it while it waits for the target
+  // room's messages to load and scroll into view.
+  let suppressBottom = false;
 
   const selected = $derived(rooms.find((r) => r.id === selectedId));
   const shared = $derived(
@@ -236,12 +240,14 @@
     }
   }
 
-  async function loadRooms(selectFirst = false) {
+  async function loadRooms() {
     try {
       const next = await api.listChatRooms();
       rooms = next;
       store.chatUnread = next.reduce((n, r) => n + r.unread, 0);
-      if (selectFirst || selectedId == null || !next.some((r) => r.id === selectedId)) {
+      // Never steal an explicit pick. The initial load and a deep link can
+      // race; an already selected room that still exists must win.
+      if (selectedId == null || !next.some((r) => r.id === selectedId)) {
         selectedId = next.find((r) => r.name === "lobby")?.id ?? next[0]?.id ?? null;
       }
     } catch {
@@ -287,10 +293,15 @@
     }, 250);
   }
 
-  function pick(id: number) {
+  async function pick(id: number) {
     selectedId = id;
     if (narrow) roomsOpen = false;
-    void loadMessages(id).then(() => loadRooms());
+    await loadRooms();
+    // The initial room load may have resolved during the await above; the
+    // explicit pick is authoritative when the room exists.
+    if (!rooms.some((r) => r.id === id)) return;
+    selectedId = id;
+    await loadMessages(id);
   }
 
   async function onFiles(e: Event) {
@@ -394,7 +405,7 @@
     apply();
     mq.addEventListener("change", apply);
     void loadSubs();
-    void loadRooms(true).then(() => loadMessages(selectedId));
+    void loadRooms().then(() => loadMessages(selectedId));
     // SSE is the live path; this is only a fallback for a dropped stream.
     const t = setInterval(() => {
       if (document.hidden) return;
@@ -415,9 +426,36 @@
     scheduleReload();
   });
 
-  // Keep the newest message in view.
+  // Deep link from the agent activity panel: switch rooms, wait for that
+  // room's messages to load, then scroll the linked message into view. The
+  // auto-bottom effect is suppressed until that scroll finishes, otherwise a
+  // room switch would land at the newest message instead of the linked one.
+  $effect(() => {
+    const target = store.chatFocus;
+    if (!target) return;
+    store.chatFocus = null;
+    if (target.message == null) {
+      void pick(target.room).then(async () => {
+        await tick();
+        if (scroller) scroller.scrollTop = scroller.scrollHeight;
+      });
+      return;
+    }
+    suppressBottom = true;
+    void (async () => {
+      await pick(target.room);
+      await tick();
+      const element = document.getElementById(`bb-msg-${target.message}`);
+      element?.scrollIntoView({ block: "center", behavior: "smooth" });
+      suppressBottom = false;
+    })();
+  });
+
+  // Keep the newest message in view, except while a deep-link scroll is
+  // pending.
   $effect(() => {
     void messages.length;
+    if (suppressBottom) return;
     if (scroller) scroller.scrollTop = scroller.scrollHeight;
   });
 </script>
@@ -533,7 +571,7 @@
               <div class="sbody">{m.body}</div>
             </div>
           {:else}
-            <div class="msg" class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
+            <div class="msg" id={`bb-msg-${m.id}`} class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
               <span class="who" style="--tint:{m.author_kind === 'agent' ? agentColor(m.author_display) : 'var(--accent)'}">
                 {m.author_display}
                 {#if m.author_kind === "human"}<span class="tag">human</span>{/if}

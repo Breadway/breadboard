@@ -509,6 +509,59 @@ export interface AgentRosterEntry {
   orchestrator_session_id?: string | null;
 }
 
+/** One typed action in an agent's activity timeline. */
+export type AgentEventKind =
+  | "registered"
+  | "claimed"
+  | "released"
+  | "state_change"
+  | "paused"
+  | "removed"
+  | "pr_opened"
+  | "pr_merged"
+  | "ci_result"
+  | "chat_sent"
+  | "handoff";
+
+export const AGENT_EVENT_KINDS: AgentEventKind[] = [
+  "registered",
+  "claimed",
+  "released",
+  "state_change",
+  "paused",
+  "removed",
+  "pr_opened",
+  "pr_merged",
+  "ci_result",
+  "chat_sent",
+  "handoff",
+];
+
+/** `GET /api/agents/{name}/events` row. Links are optional: a state change
+ *  points at an issue, a chat event at a room/message, a PR event at its URL. */
+export interface AgentEvent {
+  id: number;
+  agent_name: string;
+  kind: AgentEventKind;
+  issue_id?: number | null;
+  issue_key?: string | null;
+  pr_url?: string | null;
+  pr_number?: number | null;
+  room_id?: number | null;
+  message_id?: number | null;
+  summary: string;
+  detail?: string | null;
+  actor?: string | null;
+  at: string;
+}
+
+/** Newest-first cursor page; pass `next_before` as `before` for the next. */
+export interface AgentEventPage {
+  events: AgentEvent[];
+  has_more: boolean;
+  next_before?: number | null;
+}
+
 /** Kill response: the name is removed, so there is no roster entry. */
 export interface AgentRemoval {
   agent_name: string;
@@ -762,6 +815,24 @@ export class BreadboardClient {
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/rename`, {
       new_name,
     });
+  /** One agent's activity timeline, newest first. `before` is the cursor from
+   *  the previous page (`next_before`). */
+  agentEvents = (
+    name: string,
+    opts: { kinds?: AgentEventKind[]; since?: string; until?: string; limit?: number; before?: number } = {},
+  ) => {
+    const q = new URLSearchParams();
+    if (opts.kinds?.length) q.set("kind", opts.kinds.join(","));
+    if (opts.since) q.set("since", opts.since);
+    if (opts.until) q.set("until", opts.until);
+    if (opts.limit) q.set("limit", String(opts.limit));
+    if (opts.before) q.set("before", String(opts.before));
+    const qs = q.toString();
+    return this.req<AgentEventPage>(
+      "GET",
+      `/api/agents/${encodeURIComponent(name)}/events${qs ? `?${qs}` : ""}`,
+    );
+  };
   claimIssue = (key: string, claim: ClaimUpsert) =>
     this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
   heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>

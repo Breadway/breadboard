@@ -2294,9 +2294,41 @@ pub async fn insert_claim(
                 )
                 .await?;
             }
-            get_claim_by_id(db, done.last_insert_rowid())
+            let claim = get_claim_by_id(db, done.last_insert_rowid())
                 .await?
-                .ok_or(AppError::NotFound)
+                .ok_or(AppError::NotFound)?;
+            // Timeline: a new claim (not an intent re-claim, which returns
+            // through update_claim_row above).
+            crate::agent_events::record_best_effort(
+                db,
+                crate::agent_events::AgentEventInsert::new(
+                    &claim.agent_name,
+                    breadboard_core::AgentEventKind::Claimed,
+                )
+                .issue(issue.id, &issue.key)
+                .summary(format!("Claimed {} ({})", issue.key, claim.mode.as_str()))
+                .detail(format!("state: {}", claim.state.as_str()))
+                .actor(Some(claimed_by)),
+            )
+            .await;
+            if claim.pr_url.is_some() {
+                crate::agent_events::record_best_effort(
+                    db,
+                    crate::agent_events::AgentEventInsert::new(
+                        &claim.agent_name,
+                        breadboard_core::AgentEventKind::PrOpened,
+                    )
+                    .issue(issue.id, &issue.key)
+                    .pr(claim.pr_url.as_deref(), claim.pr_number)
+                    .summary(match &claim.pr_url {
+                        Some(url) => format!("Opened {url}"),
+                        None => "Opened a pull request".to_string(),
+                    })
+                    .actor(Some(claimed_by)),
+                )
+                .await;
+            }
+            Ok(claim)
         }
         Err(sqlx::Error::Database(dbe)) if dbe.is_unique_violation() => {
             // Two concurrent intent claims: the loser updates the winner's
@@ -2346,6 +2378,13 @@ async fn update_claim_row(
     // half-applied claim behind, and the heartbeat is always refreshed with
     // the changes it accompanies.
     let mut tx = crate::db::begin_write(db).await?;
+    // Snapshot the fields the timeline reports as transitions. Read inside
+    // the write transaction so the comparison cannot race another writer.
+    let (before_state, before_pr_url): (String, Option<String>) =
+        sqlx::query_as("SELECT state, pr_url FROM agent_claims WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&mut *tx)
+            .await?;
 
     if let Some(agent_name) = &input.agent_name {
         let name = agent_name.trim();
@@ -2402,11 +2441,14 @@ async fn update_claim_row(
     set_nullable!("head_sha", &input.head_sha);
 
     // Refresh board_status from the live issue + heartbeat in the same tx.
-    let (issue_id, claimed_by, agent_name): (i64, i64, String) =
-        sqlx::query_as("SELECT issue_id, claimed_by, agent_name FROM agent_claims WHERE id = ?1")
-            .bind(id)
-            .fetch_one(&mut *tx)
-            .await?;
+    let (issue_id, issue_key, claimed_by, agent_name): (i64, String, i64, String) = sqlx::query_as(
+        "SELECT c.issue_id, i.key, c.claimed_by, c.agent_name
+               FROM agent_claims c JOIN issues i ON i.id = c.issue_id
+              WHERE c.id = ?1",
+    )
+    .bind(id)
+    .fetch_one(&mut *tx)
+    .await?;
     let status: String = sqlx::query_scalar("SELECT status FROM issues WHERE id = ?1")
         .bind(issue_id)
         .fetch_one(&mut *tx)
@@ -2428,7 +2470,43 @@ async fn update_claim_row(
         set_agent_message(db, claimed_by, &agent_name, normalized.as_deref()).await?;
     }
 
-    get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)
+    let claim = get_claim_by_id(db, id).await?.ok_or(AppError::NotFound)?;
+
+    if claim.state.as_str() != before_state {
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &claim.agent_name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .issue(issue_id, &issue_key)
+            .summary(format!(
+                "{}: {} -> {}",
+                issue_key,
+                before_state,
+                claim.state.as_str()
+            ))
+            .actor(Some(claimed_by)),
+        )
+        .await;
+    }
+    if let Some(url) = &claim.pr_url {
+        if before_pr_url.as_deref() != Some(url.as_str()) {
+            crate::agent_events::record_best_effort(
+                db,
+                crate::agent_events::AgentEventInsert::new(
+                    &claim.agent_name,
+                    breadboard_core::AgentEventKind::PrOpened,
+                )
+                .issue(issue_id, &issue_key)
+                .pr(Some(url.as_str()), claim.pr_number)
+                .summary(format!("Opened {url}"))
+                .actor(Some(claimed_by)),
+            )
+            .await;
+        }
+    }
+    Ok(claim)
 }
 
 pub async fn update_claim(
@@ -2440,13 +2518,32 @@ pub async fn update_claim(
 }
 
 /// Release one claim by id. Returns the claim that was removed.
-pub async fn delete_claim_by_id(db: &SqlitePool, id: i64) -> AppResult<Option<AgentClaim>> {
+///
+/// `actor_id` is the user releasing it (the timeline records who acted); it
+/// does not have to match `claimed_by`, because kill/removal also releases
+/// claims on behalf of another user.
+pub async fn delete_claim_by_id(
+    db: &SqlitePool,
+    id: i64,
+    actor_id: Option<i64>,
+) -> AppResult<Option<AgentClaim>> {
     let claim = get_claim_by_id(db, id).await?;
-    if claim.is_some() {
+    if let Some(claim) = &claim {
         sqlx::query("DELETE FROM agent_claims WHERE id = ?1")
             .bind(id)
             .execute(db)
             .await?;
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &claim.agent_name,
+                breadboard_core::AgentEventKind::Released,
+            )
+            .issue(claim.issue_id, &claim.key)
+            .summary(format!("Released {} ({})", claim.key, claim.mode.as_str()))
+            .actor(actor_id),
+        )
+        .await;
     }
     Ok(claim)
 }
@@ -2696,6 +2793,14 @@ pub async fn register_agent(
         }
     };
     validate_agent_name(&name)?;
+    // A registration that inserts the row is the agent's first appearance;
+    // refreshing an existing session is not an event worth logging.
+    let first_registration: bool =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_one(db)
+            .await?
+            == 0;
 
     // Prefer the exact parent session id from the plugin. If only an
     // orchestrator name is known, resolve that name to its registered session;
@@ -2738,6 +2843,36 @@ pub async fn register_agent(
         &ts,
     )
     .await?;
+
+    if first_registration {
+        let detail = match (
+            input.session_id.as_deref(),
+            input.host.as_deref(),
+            input.pid,
+        ) {
+            (Some(session), Some(host), Some(pid)) => {
+                Some(format!("session {session} on {host} (pid {pid})"))
+            }
+            (Some(session), Some(host), None) => Some(format!("session {session} on {host}")),
+            (Some(session), None, _) => Some(format!("session {session}")),
+            (None, Some(host), Some(pid)) => Some(format!("on {host} (pid {pid})")),
+            (None, Some(host), None) => Some(format!("on {host}")),
+            _ => None,
+        };
+        let mut event = crate::agent_events::AgentEventInsert::new(
+            &name,
+            breadboard_core::AgentEventKind::Registered,
+        )
+        .summary(match input.host.as_deref() {
+            Some(host) => format!("Registered on {host}"),
+            None => "Registered".to_string(),
+        })
+        .actor(Some(user_id));
+        if let Some(detail) = detail {
+            event = event.detail(detail);
+        }
+        crate::agent_events::record_best_effort(db, event).await;
+    }
 
     if alternatives.is_empty() {
         let known = known_agent_names(db).await?;
@@ -2872,6 +3007,25 @@ pub async fn remove_agent(
         .await?;
     tx.commit().await?;
 
+    // One action, one row: a mass removal is not a release per claim.
+    crate::agent_events::record_best_effort(
+        db,
+        crate::agent_events::AgentEventInsert::new(
+            &name,
+            breadboard_core::AgentEventKind::Removed,
+        )
+        .summary(format!(
+            "Removed; {claims_released} claim(s) released"
+        ))
+        .detail(if profile_removed {
+            "profile removed".to_string()
+        } else {
+            "profile kept".to_string()
+        })
+        .actor(Some(user_id)),
+    )
+    .await;
+
     Ok(AgentRemoval {
         agent_name: name,
         removed: true,
@@ -2920,6 +3074,18 @@ pub async fn pause_agent(
         .await?;
 
     let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    if changed {
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::Paused,
+            )
+            .summary("Paused; claims kept, new claims refused")
+            .actor(Some(user_id)),
+        )
+        .await;
+    }
     Ok((entry, changed))
 }
 
@@ -2948,6 +3114,15 @@ pub async fn resume_agent(db: &SqlitePool, raw_name: &str) -> AppResult<(AgentRo
         .bind(&name)
         .execute(db)
         .await?;
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary("Resumed after a pause"),
+        )
+        .await;
     }
     let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
     Ok((entry, changed))
@@ -2979,6 +3154,18 @@ pub async fn hide_agent(
     .rows_affected()
         > 0;
     let entry = roster_entry(db, &name).await?.ok_or(AppError::NotFound)?;
+    if changed {
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary("Hidden from the roster")
+            .actor(Some(user_id)),
+        )
+        .await;
+    }
     Ok((entry, changed))
 }
 
@@ -2998,6 +3185,17 @@ pub async fn unhide_agent(
     let entry = roster_entry(db, &name).await?;
     if entry.is_none() && !changed {
         return Err(AppError::NotFound);
+    }
+    if changed {
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary("Shown on the roster again"),
+        )
+        .await;
     }
     Ok((entry, changed))
 }
@@ -4059,6 +4257,30 @@ pub async fn post_chat_message(
         .await?
         .remove(&message.id)
         .unwrap_or_default();
+    if author_kind == ChatAuthorKind::Agent {
+        if let Some(agent_name) = author_member.strip_prefix("agent:") {
+            let summary = if body.trim().is_empty() {
+                "Sent an attachment".to_string()
+            } else {
+                let mut text: String = body.trim().chars().take(80).collect();
+                if body.trim().chars().count() > 80 {
+                    text.push_str("...");
+                }
+                text
+            };
+            crate::agent_events::record_best_effort(
+                db,
+                crate::agent_events::AgentEventInsert::new(
+                    agent_name,
+                    breadboard_core::AgentEventKind::ChatSent,
+                )
+                .chat(room_id, Some(message.id))
+                .summary(summary)
+                .actor(Some(uploader_user_id)),
+            )
+            .await;
+        }
+    }
     Ok(message)
 }
 
