@@ -20,6 +20,7 @@
   import Ring from "./ui/Ring.svelte";
   import Artifacts from "./Artifacts.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
+  import ReviewPanel from "./ReviewPanel.svelte";
 
   // The issue's fields come straight from the store, so a drag on the board,
   // a live event from someone else, or a refused save (which leaves the store
@@ -567,6 +568,8 @@
             </div>
           {/if}
         </section>
+
+        <ReviewPanel issueKey={issue.key} />
 
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>

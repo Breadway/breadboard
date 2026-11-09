@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use breadboard_server::{
-    agent_events, auth, config::Config, db, http, notify, store, sync, AppState,
+    agent_events, auth, config::Config, db, http, notify, reviews, store, sync, AppState,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -88,6 +88,12 @@ async fn main() -> anyhow::Result<()> {
             "daily digest job started"
         );
     }
+
+    reviews::spawn_escalation(state.clone());
+    tracing::info!(
+        threshold_mins = reviews::REVIEW_ESCALATION_SECS / 60,
+        "review escalation loop started"
+    );
 
     let shutdown = state.shutdown.clone();
     let app = http::router(state);

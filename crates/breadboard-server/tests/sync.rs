@@ -808,6 +808,71 @@ async fn merged_pr_with_verify_before_done_label_goes_to_review() {
 }
 
 #[tokio::test]
+async fn merged_pr_with_outstanding_review_is_held_in_review() {
+    let app = common::spawn().await;
+    let repo = "Breadway/test";
+    ensure_repo_and_project(&app, repo, "TST").await;
+
+    let target = import_target_issue(&app, repo, 104, "review gate", &[]).await;
+    assert_eq!(target.key, "TST-1");
+
+    // A reviewer is still on the hook when the PR merges.
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO review_requests
+            (issue_id, pr_number, pr_repo, requested_by, reviewer, reviewer_kind,
+             state, requested_at, updated_at)
+         VALUES (?1, 104, 'Breadway/test', (SELECT id FROM users WHERE login = 'tester'),
+             'tester', 'human', 'requested', ?2, ?2)",
+    )
+    .bind(target.id)
+    .bind(&now)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let pr = pr_issue(
+        14,
+        "land with review open",
+        true,
+        true,
+        "Closes TST-1",
+        Utc::now(),
+    );
+    sync::apply_issue(&app.state, repo, &pr, SyncSource::ForgejoWebhook)
+        .await
+        .unwrap();
+
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(
+        t.status,
+        Status::Review,
+        "an outstanding review keeps a merged PR in review"
+    );
+
+    // Approving clears the gate; the explicit completion then sticks.
+    sqlx::query("UPDATE review_requests SET state = 'approved' WHERE issue_id = ?1")
+        .bind(target.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    store::update_issue(
+        &app.db,
+        "TST-1",
+        &breadboard_core::dto::IssuePatch {
+            status: Some(Status::Done),
+            ..Default::default()
+        },
+        None,
+        SyncSource::Breadboard,
+    )
+    .await
+    .unwrap();
+    let t = store::get_issue_by_key(&app.db, "TST-1").await.unwrap();
+    assert_eq!(t.status, Status::Done);
+}
+
+#[tokio::test]
 async fn reopen_pr_does_not_cascade_done() {
     let app = common::spawn().await;
     let repo = "Breadway/test";

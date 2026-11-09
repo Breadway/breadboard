@@ -42,6 +42,9 @@ async fn deliver(
         NotificationKind::Assigned => prefs.assigned,
         NotificationKind::Mention => prefs.mention,
         NotificationKind::CycleStarted | NotificationKind::CycleEnded => prefs.cycle,
+        // Review requests are work handed directly to a person; there is no
+        // separate opt-out column, so this always delivers.
+        NotificationKind::Review => true,
         NotificationKind::Digest => prefs.digest,
     };
     if !wanted {
@@ -87,6 +90,19 @@ pub async fn mentions(state: &AppState, issue: &Issue, text: &str, actor: Option
             .await;
         }
     }
+}
+
+/// A review request or outcome for a human reviewer/requester. The body is
+/// composed by `reviews`; this only carries it through the normal bell path.
+pub async fn review(state: &AppState, user_id: i64, issue: &Issue, body: String) {
+    deliver(
+        state,
+        user_id,
+        NotificationKind::Review,
+        Some(issue.id),
+        body,
+    )
+    .await;
 }
 
 /// Everyone with an assigned issue in a cycle that just started / ended.

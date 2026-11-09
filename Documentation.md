@@ -229,6 +229,11 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
 | `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
 | `GET` | `/api/artifacts/{id}` | authenticated download. Only raster screenshots (png, jpeg, gif, webp) render inline. Everything else, including html or svg content, is served as `text/plain` or `application/octet-stream` with `Content-Disposition: attachment` and `nosniff`. `410` once past `expires_at` |
+| `GET` | `/api/issues/{key}/reviews` | review requests for the issue, newest first, joined with `issue_key`, `issue_title`, `issue_status` |
+| `POST` | `/api/issues/{key}/reviews` | `{ reviewer, reviewer_kind?, pr_url?, pr_number?, pr_repo?, note? }`: file a request against an issue and the PR under review. At least one of `pr_url` / `pr_number` is required. `reviewer` is a human login or an agent name; the kind is inferred when omitted and both kinds share one table. The reviewer gets a `review` notification (human) or a DM push (agent). One active request per issue/reviewer; a duplicate is `409`. `201` |
+| `GET` | `/api/reviews` | review queue. `?reviewer=` returns that human/agent reviewer's records, accepting either `scratch sentinel` or `scratch-sentinel`; `?outstanding=true` limits it to unresolved requests and composes with `?issue=`; `?issue=` returns one issue's requests; neither returns every outstanding request. `limit` caps the unfiltered list at 500 |
+| `PATCH` | `/api/reviews/{id}` | `{ state, note?, agent_name? }`: record `accepted`, `changes_requested` or `approved`. `agent_name` is the identity check for an agent reviewer using a shared human session. Only the named reviewer may record an outcome; the requester gets `403` and must withdraw instead. An approved request is terminal. Emits `review.updated`; an outcome notifies the requester |
+| `DELETE` | `/api/reviews/{id}` | requester withdraws an unresolved request: the record is removed so it no longer gates done. `204`. A non-requester is `403`; an approved request cannot be withdrawn (`409`). Emits `review.updated` with `state: "withdrawn"` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -274,6 +279,32 @@ issues. Markdown imports use the same issue-creation rule.
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
 `cycle_id` accept `null` to clear. `labels` and `links` replace the whole set.
 
+### Review requests
+
+A review request is a record, not a chat message. It ties one issue and the PR
+under review to one reviewer, with states `requested`, `accepted`,
+`changes_requested` and `approved`. Humans and agents use the same rows; only
+the notification path differs (the bell for a human, the existing chat DM push
+for an agent). Agent names match with spaces or hyphens, so `scratch sentinel`
+and `scratch-sentinel` are the same reviewer. Requests render on the issue and
+in the reviewer's queue.
+
+Outcomes are the reviewer's call. The requester cannot approve or request
+changes on their own request; they can only withdraw it, which removes the
+record and clears the gate. `approved` is the only resolving state. While any
+request on an issue is
+`requested`, `accepted` or `changes_requested`:
+
+- `PATCH /api/issues/{key}` with `status: "done"` returns `409` naming the
+  reviewer. The same check holds back the merged-PR cascade, which leaves the
+  card in review instead of completing it.
+- The request may still be reworked, accepted or escalated.
+
+A request that has not changed state for 60 minutes is escalated once
+(`escalated_at`), notifying the reviewer and the requester. A later state
+change clears the escalation so a new stall can escalate again. `review.updated`
+carries the change to connected clients.
+
 ### Device auth (CLI/TUI)
 
 | Method | Path | Notes |
@@ -293,7 +324,9 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET`/`PUT` | `/api/notifications/prefs` | `{ assigned, mention, cycle, digest }` bools |
 
 Generated on: an issue assigned to you (not by you), an `@login` mention in a
-comment or description, and a cycle you have assigned issues in starting/ending.
+comment or description, a cycle you have assigned issues in starting/ending, and
+a review request or outcome (`kind: "review"`; review notifications always
+deliver rather than using a preference toggle).
 A `notified` SSE event wakes the recipient's clients; the web app also raises a
 browser notification when permission is granted.
 
@@ -334,6 +367,7 @@ after reconnecting to recover missed changes.
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
 | `notified` | `bread.board.notified` | `user_id` (clients filter by their own id) |
+| `review.updated` | `bread.board.review.updated` | `id`, `issue_id`, `key`, `reviewer`, `state`, `escalated` |
 
 ---
 

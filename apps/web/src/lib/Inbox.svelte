@@ -11,6 +11,7 @@
     mention: "Mention",
     cycle_started: "Cycle",
     cycle_ended: "Cycle",
+    review: "Review",
     digest: "Digest",
   };
 

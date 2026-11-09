@@ -168,6 +168,14 @@ fn all_event_names() -> Vec<&'static str> {
             at: String::new(),
         },
         Notified { user_id: 0 },
+        ReviewUpdated {
+            id: 0,
+            issue_id: 0,
+            key: String::new(),
+            reviewer: String::new(),
+            state: String::new(),
+            escalated: false,
+        },
     ];
     samples.iter().map(|e| e.bread_event_name()).collect()
 }
