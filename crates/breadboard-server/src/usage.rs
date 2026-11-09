@@ -242,6 +242,10 @@ pub fn spawn_importer(state: AppState) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(StdDuration::from_secs(minutes * 60));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Skip the interval's immediate first tick: importing 100k+ OpenCode
+        // rows during server startup competes with migrations and health
+        // probes. The on-demand route still imports immediately.
+        tick.tick().await;
         loop {
             tick.tick().await;
             if !path.exists() {

@@ -42,7 +42,6 @@ async fn main() -> anyhow::Result<()> {
         "startup stage: database ready"
     );
     store::ensure_seed(&db).await?;
-    usage::ensure_settings(&db, config.usage.spend_warn_usd).await?;
     tracing::info!(
         elapsed_ms = elapsed_ms(started),
         "startup stage: seed checked"
