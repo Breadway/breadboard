@@ -8,10 +8,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod agent_event;
+pub mod commit;
 pub mod dto;
 pub mod event;
 
 pub use agent_event::{AgentEvent, AgentEventKind, AgentEventPage};
+pub use commit::{CommitAttribution, CommitLookup, CommitMatch, ModelSource};
 pub use event::BoardEvent;
 
 /// The single global workflow. There are no per-project workflows by design

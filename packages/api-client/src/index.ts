@@ -541,6 +541,58 @@ export interface UsageImportReport {
 
 export type UsageRange = "24h" | "7d" | "30d" | "90d" | "all";
 
+/** How the model on a commit was established. */
+export type CommitModelSource = "reported" | "session" | "unknown";
+
+/** How a commit lookup found a record for a rewritten SHA. */
+export type CommitMatch = "exact" | "patch_id" | "tree_sha";
+
+export interface CommitAttribution {
+  id: number;
+  repo: string;
+  sha: string;
+  issue_id: number | null;
+  issue_key: string | null;
+  agent_name: string;
+  session_id: string | null;
+  orchestrator: string | null;
+  orchestrator_session_id: string | null;
+  /** Raw model id, without a provider prefix. Null means unknown. */
+  model: string | null;
+  provider: string | null;
+  model_source: CommitModelSource;
+  patch_id: string | null;
+  tree_sha: string | null;
+  note: string | null;
+  created_at: string;
+}
+
+export interface CommitLookup {
+  repo: string;
+  sha: string;
+  known: boolean;
+  matched_by?: CommitMatch;
+  attribution?: CommitAttribution;
+  message?: string;
+}
+
+/** `POST /api/commits`. `issue` is a key or numeric id. */
+export interface NewCommitAttribution {
+  repo: string;
+  sha: string;
+  issue: string;
+  agent_name?: string;
+  session_id?: string;
+  /** Explicit model id; omit to resolve from this exact session or stay unknown. */
+  model?: string;
+  provider?: string;
+  /** `git patch-id --stable`, for matching a rebased commit. */
+  patch_id?: string;
+  /** Tree SHA, for matching a squash of this commit's branch tip. */
+  tree_sha?: string;
+  note?: string;
+}
+
 /** `POST /api/agents/register`. Omit `agent_name` to ask the server for a
  *  curated name. */
 export interface AgentRegister {
@@ -840,6 +892,20 @@ export class BreadboardClient {
     this.req<Comment>("POST", `/api/issues/${key}/comments`, { body });
   getActivity = (key: string) =>
     this.req<ActivityEntry[]>("GET", `/api/issues/${key}/activity`);
+  listIssueCommits = (key: string) =>
+    this.req<CommitAttribution[]>("GET", `/api/issues/${key}/commits`);
+  recordCommit = (commit: NewCommitAttribution) =>
+    this.req<CommitAttribution>("POST", "/api/commits", commit);
+  getCommitAttribution = (
+    repo: string,
+    sha: string,
+    opts: { patch_id?: string; tree_sha?: string } = {},
+  ) => {
+    const q = new URLSearchParams({ repo, sha });
+    if (opts.patch_id) q.set("patch_id", opts.patch_id);
+    if (opts.tree_sha) q.set("tree_sha", opts.tree_sha);
+    return this.req<CommitLookup>("GET", `/api/commits/lookup?${q.toString()}`);
+  };
 
   listIssueReviews = (key: string) =>
     this.req<ReviewRequest[]>("GET", `/api/issues/${key}/reviews`);

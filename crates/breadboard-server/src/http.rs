@@ -105,6 +105,7 @@ pub fn router(state: AppState) -> Router {
             get(usage::get_settings).put(usage::put_settings),
         )
         .route("/usage/import", post(usage::import_now))
+        .merge(crate::commits::routes())
         .merge(crate::agent_events::routes())
         .route(
             "/chat/rooms",

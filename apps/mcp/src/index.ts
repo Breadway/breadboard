@@ -25,6 +25,7 @@ import {
   type IssueLink,
   type IssuePatch,
 } from "@breadboard/api-client";
+import { resolveCommitMetadata } from "./git.js";
 
 const LINK_KINDS = ["blocks", "blocked-by", "relates-to"] as const;
 
@@ -608,6 +609,60 @@ server.tool(
         session_id: SESSION_ID,
       }),
     ),
+);
+
+server.tool(
+  "record_commit",
+  "Record which agent, session and model produced a commit. Call this right after committing a " +
+    "change for an issue, so a bug can be traced from issue to commit to model. The server resolves " +
+    "your agent and session from this MCP process and resolves the model from usage data for this " +
+    "exact session; it never guesses from whichever agent was last active. If this session used " +
+    "more than one model, pass model explicitly. Pass workdir (the local repo path) to fill commit " +
+    "tree_sha and patch_id from git, which lets a later rebase or squash match this record. " +
+    "When workdir is given it must be a git work tree and the commit must resolve there; otherwise " +
+    "the tool returns an explicit error and records nothing. " +
+    "If no model can be established it is stored as unknown, not invented.",
+  {
+    repo: z.string().describe("owner/name, e.g. Breadway/breadboard"),
+    sha: z.string().describe("full commit sha (a short sha is expanded when workdir is given)"),
+    issue: z.string().describe("issue key, e.g. BB-163"),
+    note: z.string().optional().describe("optional one-line context"),
+    model: z
+      .string()
+      .optional()
+      .describe("explicit model id; use it when this session switched models"),
+    provider: z.string().optional().describe("explicit provider id, e.g. opencode-go"),
+    patch_id: z.string().optional().describe("git patch-id --stable, for rebase matching"),
+    tree_sha: z.string().optional().describe("commit tree sha, for squash matching"),
+    workdir: z
+      .string()
+      .optional()
+      .describe("local repository path; fills sha, tree_sha and patch_id from git when omitted"),
+  },
+  ({ repo, sha, issue, note, model, provider, patch_id, tree_sha, workdir }) =>
+    run(async () => {
+      let resolvedSha = sha.trim();
+      let resolvedTree = tree_sha;
+      let resolvedPatch = patch_id;
+      if (workdir) {
+        const metadata = resolveCommitMetadata(workdir, resolvedSha);
+        resolvedSha = metadata.sha;
+        if (!resolvedTree) resolvedTree = metadata.tree_sha;
+        if (!resolvedPatch) resolvedPatch = metadata.patch_id;
+      }
+      return client.recordCommit({
+        repo,
+        sha: resolvedSha,
+        issue,
+        note,
+        model,
+        provider,
+        patch_id: resolvedPatch,
+        tree_sha: resolvedTree,
+        agent_name: defaultAgentName(),
+        session_id: SESSION_ID,
+      });
+    }),
 );
 
 server.tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));
