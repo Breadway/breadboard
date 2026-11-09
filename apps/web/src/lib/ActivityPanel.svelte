@@ -44,12 +44,10 @@
     handoff: "handoff",
   };
 
-  // ci_result and handoff have no emit source yet; a chip that can only ever
-  // be empty is misleading, so keep them out of the filter UI. The API still
-  // accepts every kind. paused and removed are emitted by pause/remove.
-  const CHIP_KINDS = AGENT_EVENT_KINDS.filter(
-    (k) => k !== "ci_result" && k !== "handoff",
-  );
+  // ci_result has no emit source yet; a chip that can only ever be empty is
+  // misleading, so keep it out of the filter UI. The API still accepts every
+  // kind. handoff, paused and removed are emitted by their real actions.
+  const CHIP_KINDS = AGENT_EVENT_KINDS.filter((k) => k !== "ci_result");
 
   let kind = $state<AgentEventKind | "all">("all");
   let range = $state<Range>("24h");
