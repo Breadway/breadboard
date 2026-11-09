@@ -192,42 +192,247 @@
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
 
+  interface AgentNode {
+    group: Group;
+    depth: number;
+    children: AgentNode[];
+    /** Direct children below the three-level cap, summarised as "N more". */
+    overflow: Group[];
+  }
+
+  interface AgentSection {
+    key: string;
+    kind: "orchestrator" | "independent" | "unlinked";
+    root: Group | null;
+    rawParent: string | null;
+    nodes: AgentNode[];
+    directTotal: number;
+    directLive: number;
+    rootRendered: boolean;
+  }
+
+  const byId = $derived.by(() => {
+    const map = new Map<string, Group>();
+    for (const g of allGroups) map.set(g.id, g);
+    return map;
+  });
+
+  // Hierarchy comes only from parent_session_id resolved against another
+  // roster row's session_id. A name-only orchestrator hint, a shared host or a
+  // busy neighbour never invents an edge here.
+  const bySession = $derived.by(() => {
+    const map = new Map<string, Group>();
+    for (const g of allGroups) {
+      if (g.sessionId && !map.has(g.sessionId)) map.set(g.sessionId, g);
+    }
+    return map;
+  });
+
+  const parentById = $derived.by(() => {
+    const map = new Map<string, string>();
+    for (const g of allGroups) {
+      if (!g.parentSessionId) continue;
+      const parent = bySession.get(g.parentSessionId);
+      if (parent && parent.id !== g.id) map.set(g.id, parent.id);
+    }
+    return map;
+  });
+
+  const childrenById = $derived.by(() => {
+    const map = new Map<string, Group[]>();
+    for (const g of allGroups) {
+      const parentId = parentById.get(g.id);
+      if (!parentId) continue;
+      const list = map.get(parentId) ?? [];
+      list.push(g);
+      map.set(parentId, list);
+    }
+    return map;
+  });
+
   // Orchestrator -> direct subagents. Counts include hidden cards: hiding is
   // display-only, so the relationship stays honest.
   const subagentCounts = $derived.by(() => {
     const counts = new Map<string, { total: number; live: number }>();
     for (const g of allGroups) {
-      if (!g.orchestrator) continue;
-      const count = counts.get(g.orchestrator) ?? { total: 0, live: 0 };
+      const parentId = parentById.get(g.id);
+      const parent = parentId ? byId.get(parentId) : null;
+      if (!parent) continue;
+      const count = counts.get(parent.name) ?? { total: 0, live: 0 };
       count.total++;
       if (g.presence === "live" && !g.killed) count.live++;
-      counts.set(g.orchestrator, count);
+      counts.set(parent.name, count);
     }
     return counts;
   });
 
-  const visibleGroups = $derived.by(() => {
-    let list = focus
-      ? allGroups.filter((g) => g.name === focus || g.orchestrator === focus)
-      : allGroups;
-    if (staleOnly) {
-      // A focused orchestrator stays visible even when it has no stale claim;
-      // the focus is an explicit request to see the relationship.
-      list = list.filter((g) => g.stale > 0 || (focus != null && g.name === focus));
-    }
-    return list;
+  const orchestratorCount = $derived(
+    allGroups.filter((g) => (childrenById.get(g.id)?.length ?? 0) > 0).length,
+  );
+  const subagentCount = $derived(allGroups.filter((g) => parentById.has(g.id)).length);
+  const unlinkedGroups = $derived(
+    allGroups.filter((g) => !!g.parentSessionId && !parentById.has(g.id)),
+  );
+  const unlinkedCount = $derived(unlinkedGroups.length);
+
+  // Focus keeps the whole subtree, not just direct children, so a nested
+  // orchestrator can be inspected without losing its grandchildren.
+  const focusTreeIds = $derived.by(() => {
+    const ids = new Set<string>();
+    if (!focus) return ids;
+    const start = allGroups.find((g) => g.name === focus);
+    if (!start) return ids;
+    ids.add(start.id);
+    const walk = (id: string, seen: Set<string>) => {
+      for (const child of childrenById.get(id) ?? []) {
+        if (seen.has(child.id)) continue;
+        seen.add(child.id);
+        ids.add(child.id);
+        walk(child.id, seen);
+      }
+    };
+    walk(start.id, new Set([start.id]));
+    return ids;
   });
-  // A focused orchestrator is always visible, even if hidden; hidden rows stay
-  // hidden otherwise. The focus banner makes this explicit.
-  const groups = $derived(
-    showHidden
-      ? visibleGroups
-      : visibleGroups.filter((g) => !g.hidden || g.name === focus),
+
+  const baseVisibleIds = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const g of allGroups) {
+      if (g.hidden && !showHidden && g.name !== focus) continue;
+      if (focus && !focusTreeIds.has(g.id)) continue;
+      if (staleOnly && g.stale === 0 && g.name !== focus) continue;
+      ids.add(g.id);
+    }
+    return ids;
+  });
+
+  // Keep a hidden orchestrator as a structural placeholder when a visible
+  // child needs it, instead of letting that child float unlabelled.
+  const keptIds = $derived.by(() => {
+    const keep = new Set(baseVisibleIds);
+    for (const id of baseVisibleIds) {
+      let parent = parentById.get(id);
+      const seen = new Set<string>([id]);
+      while (parent && !seen.has(parent)) {
+        keep.add(parent);
+        seen.add(parent);
+        parent = parentById.get(parent);
+      }
+    }
+    return keep;
+  });
+
+  function canRenderCard(g: Group): boolean {
+    if (!keptIds.has(g.id)) return false;
+    if (g.hidden && !showHidden && g.name !== focus) return false;
+    return true;
+  }
+
+  const shownCount = $derived(
+    allGroups.filter((g) => canRenderCard(g)).length,
   );
-  const shownCount = $derived(groups.length);
-  const focusSubagents = $derived(
-    focus ? allGroups.filter((g) => g.orchestrator === focus) : [],
-  );
+  const focusSubagentCount = $derived(focus ? Math.max(0, focusTreeIds.size - 1) : 0);
+
+  // Sections stack in roster order. Cards inside a section keep roster order
+  // too, so heartbeats and refreshes never reshuffle the tree.
+  const sections = $derived.by((): AgentSection[] => {
+    type Descriptor =
+      | { kind: "orchestrator"; root: Group }
+      | { kind: "independent" }
+      | { kind: "unlinked"; raw: string };
+
+    const descriptors: Descriptor[] = [];
+    const independent: Group[] = [];
+    const unlinked = new Map<string, Group[]>();
+    const unlinkedDescriptors = new Map<string, Descriptor>();
+    let independentDescriptor: Descriptor | null = null;
+
+    for (const g of allGroups) {
+      if (!keptIds.has(g.id)) continue;
+      const parentId = parentById.get(g.id);
+      if (parentId && keptIds.has(parentId)) continue;
+      const rawParent = g.parentSessionId && !parentId ? g.parentSessionId : null;
+      if (rawParent) {
+        let descriptor = unlinkedDescriptors.get(rawParent);
+        if (!descriptor) {
+          descriptor = { kind: "unlinked", raw: rawParent };
+          unlinkedDescriptors.set(rawParent, descriptor);
+          descriptors.push(descriptor);
+        }
+        const list = unlinked.get(rawParent) ?? [];
+        list.push(g);
+        unlinked.set(rawParent, list);
+      } else if ((childrenById.get(g.id)?.length ?? 0) > 0) {
+        descriptors.push({ kind: "orchestrator", root: g });
+      } else {
+        if (!independentDescriptor) {
+          independentDescriptor = { kind: "independent" };
+          descriptors.push(independentDescriptor);
+        }
+        independent.push(g);
+      }
+    }
+
+    const makeNode = (
+      group: Group,
+      depth: number,
+      path: Set<string>,
+    ): AgentNode => {
+      const node: AgentNode = { group, depth, children: [], overflow: [] };
+      const kids = (childrenById.get(group.id) ?? []).filter(
+        (child) => keptIds.has(child.id) && !path.has(child.id),
+      );
+      if (depth >= 3) {
+        node.overflow = kids;
+      } else {
+        const next = new Set(path);
+        next.add(group.id);
+        node.children = kids.map((child) => makeNode(child, depth + 1, next));
+      }
+      return node;
+    };
+
+    return descriptors.map((descriptor): AgentSection => {
+      if (descriptor.kind === "orchestrator") {
+        const root = descriptor.root;
+        const kids = childrenById.get(root.id) ?? [];
+        return {
+          key: `orch:${root.id}`,
+          kind: "orchestrator",
+          root,
+          rawParent: null,
+          nodes: [makeNode(root, 1, new Set([root.id]))],
+          directTotal: kids.length,
+          directLive: kids.filter((c) => c.presence === "live" && !c.killed).length,
+          rootRendered: canRenderCard(root),
+        };
+      }
+      if (descriptor.kind === "unlinked") {
+        const groups = unlinked.get(descriptor.raw) ?? [];
+        return {
+          key: `unlinked:${descriptor.raw}`,
+          kind: "unlinked",
+          root: null,
+          rawParent: descriptor.raw,
+          nodes: groups.map((g) => makeNode(g, 1, new Set([g.id]))),
+          directTotal: groups.length,
+          directLive: 0,
+          rootRendered: true,
+        };
+      }
+      return {
+        key: "independent",
+        kind: "independent",
+        root: null,
+        rawParent: null,
+        nodes: independent.map((g) => makeNode(g, 1, new Set([g.id]))),
+        directTotal: independent.length,
+        directLive: 0,
+        rootRendered: true,
+      };
+    });
+  });
+
   const selected = $derived(allGroups.find((g) => g.id === openAgentId));
   const selectedSubagents = $derived(
     selected ? subagentCounts.get(selected.name) : undefined,
@@ -242,6 +447,17 @@
     focus = name;
     staleOnly = false;
     closeAgent();
+  }
+
+  function jumpTo(g: Group) {
+    focusOn(g.name);
+    queueMicrotask(() => {
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-section="orch:${g.id}"]`)
+          ?.scrollIntoView({ block: "start", behavior: "smooth" });
+      });
+    });
   }
 
   function clearFocus() {
@@ -357,6 +573,183 @@
   </div>
 {/snippet}
 
+{#snippet agentCard(g: Group)}
+  {@const ownerDiffers = g.login != null && g.login !== store.me?.login}
+  {@const direct = childrenById.get(g.id) ?? []}
+  {@const isOrchestrator = direct.length > 0}
+  {@const parentId = parentById.get(g.id)}
+  {@const parent = parentId ? byId.get(parentId) : null}
+  {@const unlinkedParent = !parent && g.parentSessionId ? g.parentSessionId : null}
+  {@const directLive = direct.filter((c) => c.presence === "live" && !c.killed).length}
+  <div
+    class="agent-card"
+    class:stale={g.stale > 0}
+    class:killed={g.killed}
+    class:hidden={g.hidden}
+    class:orchestrator={isOrchestrator}
+    class:subagent-card={!!parent || !!unlinkedParent}
+    style="--agent:{agentColor(g.name)}"
+    data-agent={g.id}
+    data-claims={g.work.length}
+    data-hidden={g.hidden}
+    data-role={isOrchestrator ? "orchestrator" : parent ? "subagent" : unlinkedParent ? "unlinked" : "solo"}
+    data-parent={parent?.name ?? ""}
+    data-direct-subagents={direct.length}
+    role="button"
+    tabindex="0"
+    onclick={() => openAgent(g)}
+    onkeydown={(e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        openAgent(g);
+      }
+    }}
+    aria-label="Open {g.name}, {isOrchestrator ? 'orchestrator, ' : parent ? 'subagent, ' : ''}{g.work.length} issues, {g.presence}{parent ? `, under ${parent.name}` : ''}{g.hidden ? ', hidden' : ''}"
+  >
+    <header class="acheck">
+      <span class="avatar" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
+      </span>
+      <div class="aid">
+        {#if isOrchestrator}
+          <span class="role-badge orch">orchestrator</span>
+        {:else if parent}
+          <span class="role-badge sub">subagent</span>
+        {:else if unlinkedParent}
+          <span class="role-badge unlinked">unlinked</span>
+        {/if}
+        <span class="aname">{g.name}</span>
+        {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
+        {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
+      </div>
+      <span class="badges">
+        {#if isOrchestrator}
+          <span
+            class="subagent-badge"
+            title="{directLive} live of {direct.length} direct subagent{direct.length === 1 ? '' : 's'}"
+          >{directLive} live</span>
+        {/if}
+        {#if g.hidden}
+          <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
+        {/if}
+        {#if g.killed}
+          <span class="killed-badge" title="Writes blocked until revived">killed</span>
+        {:else if g.stale > 0}
+          <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
+            <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+            {g.stale}
+          </span>
+        {:else if g.presence === "stale"}
+          <span class="idle-badge" title="No recent heartbeat">stale</span>
+        {/if}
+        {#if g.intents.length}<span class="queued-badge" title="Queued intents">{g.intents.length} queued</span>{/if}
+      </span>
+    </header>
+
+    {#if parent}
+      <button
+        class="rel-link"
+        title="Jump to orchestrator {parent.name}"
+        onclick={(e) => {
+          e.stopPropagation();
+          jumpTo(parent);
+        }}
+        onkeydown={(e) => e.stopPropagation()}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12V6a2 2 0 0 1 2-2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
+        orchestrator
+      </button>
+    {:else if unlinkedParent}
+      <span class="rel-raw" title="Parent session {unlinkedParent} is not a registered roster entry">
+        parent <code>{unlinkedParent}</code>
+      </span>
+    {/if}
+
+    {#if g.claims.length}
+      <div class="tiles" aria-hidden="true">
+        {#each g.claims as c (c.id)}
+          {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
+          <span
+            class="tile t-{c.board_status}"
+            class:intent={c.mode === "intent"}
+            class:stale
+            title="{c.key} · {c.issue_title} · {c.board_status}{c.mode === 'intent' ? ' (queued)' : ''}{stale ? ' · stale' : ''}"
+          >{shortKey(c.key)}</span>
+        {/each}
+      </div>
+    {:else}
+      <div class="idle-line">
+        <span class="idle-dot" class:live={g.presence === "live"}></span>
+        idle session{g.sessionId ? ` · ${g.sessionId}` : ""}
+      </div>
+    {/if}
+
+    <footer class="afoot">
+      <span class="counts">{g.work.length} issue{g.work.length === 1 ? "" : "s"}</span>
+      <span class="grow"></span>
+      {#if g.work.length}
+        <span class="completion">
+          <Ring done={g.done} total={g.work.length} color={agentColor(g.name)} size={14} />
+          <b>{g.done}</b><span class="cslash">/</span>{g.work.length} done
+        </span>
+      {:else}
+        <span class="completion muted">{g.intents.length ? "queued only" : "idle session"}</span>
+      {/if}
+      <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
+        {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
+      </span>
+      {#if g.hidden}
+        <button
+          class="btn sm unhide-card"
+          onclick={(e) => {
+            e.stopPropagation();
+            void unhideGroup(g);
+          }}
+          onkeydown={(e) => e.stopPropagation()}
+        >Unhide</button>
+      {/if}
+    </footer>
+  </div>
+{/snippet}
+
+{#snippet hiddenGroup(g: Group)}
+  {@const kids = childrenById.get(g.id) ?? []}
+  <div class="hidden-group" data-hidden-group={g.id}>
+    <span class="role-badge orch">orchestrator</span>
+    <b class="group-name">{g.name}</b>
+    <span class="hidden-badge">hidden</span>
+    <span class="group-meta">{kids.length} subagent{kids.length === 1 ? "" : "s"} still shown</span>
+    <span class="grow"></span>
+    <button class="btn ghost sm" onclick={() => focusOn(g.name)}>Focus</button>
+    <button class="btn ghost sm" onclick={() => void unhideGroup(g)}>Unhide</button>
+  </div>
+{/snippet}
+
+{#snippet subtree(node: AgentNode)}
+  <div class="node" data-node={node.group.id} data-depth={node.depth}>
+    {#if canRenderCard(node.group)}
+      {@render agentCard(node.group)}
+    {:else}
+      {@render hiddenGroup(node.group)}
+    {/if}
+    {#if node.children.length}
+      <div class="inset" data-inset-depth={node.depth}>
+        <div class="cardgrid">
+          {#each node.children as child (child.group.id)}
+            {@render subtree(child)}
+          {/each}
+        </div>
+      </div>
+    {/if}
+    {#if node.overflow.length}
+      <div class="overflow-note" data-overflow-for={node.group.id}>
+        <span>{node.overflow.length} more under <b>{node.group.name}</b></span>
+        <button class="btn ghost sm" onclick={() => focusOn(node.group.name)}>View</button>
+      </div>
+    {/if}
+  </div>
+{/snippet}
+
 <div class="wrap">
   <header class="summary">
     <div class="progress">
@@ -378,6 +771,9 @@
       <div class="stat"><b>{shownCount}</b><span>shown</span></div>
       <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
       <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live sessions</span></div>
+      <div class="stat"><b>{orchestratorCount}</b><span>orchestrators</span></div>
+      <div class="stat"><b>{subagentCount}</b><span>subagents</span></div>
+      <div class="stat" class:warn={unlinkedCount > 0}><b>{unlinkedCount}</b><span>unlinked</span></div>
       <div class="stat"><b>{claimHolders}</b><span>claim holders</span></div>
       <div class="stat"><b>{tallies.active}</b><span>active</span></div>
       <div class="stat"><b>{tallies.review}</b><span>review</span></div>
@@ -409,8 +805,8 @@
     {#if focus}
       <span class="focus-banner">
         <span>
-          Focused on <b>{focus}</b> · {focusSubagents.length}
-          subagent{focusSubagents.length === 1 ? "" : "s"}
+          Focused on <b>{focus}</b> · {focusSubagentCount}
+          subagent{focusSubagentCount === 1 ? "" : "s"} in this tree
         </span>
         <button class="btn ghost sm" onclick={clearFocus}>Clear</button>
       </span>
@@ -429,7 +825,7 @@
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
 
-  {#if !groups.length}
+  {#if !sections.length}
     <div class="empty">
       <svg viewBox="0 0 24 24" aria-hidden="true">
         <rect x="4" y="7" width="16" height="12" rx="3" fill="none" stroke="currentColor" stroke-width="1.4" />
@@ -450,135 +846,66 @@
       </p>
     </div>
   {:else}
-    <div class="grid">
-      {#each groups as g (g.id)}
-        {@const ownerDiffers = g.login != null && g.login !== store.me?.login}
-        {@const subs = subagentCounts.get(g.name)}
-        <div
-          class="agent-card"
-          class:stale={g.stale > 0}
-          class:killed={g.killed}
-          class:hidden={g.hidden}
-          style="--agent:{agentColor(g.name)}"
-          data-agent={g.id}
-          data-claims={g.work.length}
-          data-hidden={g.hidden}
-          role="button"
-          tabindex="0"
-          onclick={() => openAgent(g)}
-          onkeydown={(e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              openAgent(g);
-            }
-          }}
-          aria-label="Open {g.name}, {g.work.length} issues, {g.presence}{g.orchestrator ? `, under ${g.orchestrator}` : ''}{g.hidden ? ', hidden' : ''}"
+    <div class="sections">
+      {#each sections as section (section.key)}
+        <section
+          class="group"
+          class:orch-section={section.kind === "orchestrator"}
+          class:unlinked-section={section.kind === "unlinked"}
+          data-section={section.key}
+          data-kind={section.kind}
+          data-orchestrator={section.root?.name ?? ""}
         >
-          <header class="acheck">
-            <span class="avatar" aria-hidden="true">
-              <svg viewBox="0 0 16 16"><rect x="3.2" y="5" width="9.6" height="7.4" rx="2" fill="none" stroke="currentColor" stroke-width="1.3" /><path d="M8 2.2v2.6M6.1 8.2h.01M9.9 8.2h.01M6.4 10.4h3.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" /></svg>
-            </span>
-            <div class="aid">
-              <span class="aname">{g.name}</span>
-              {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
-              {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
-              {#if g.orchestrator}
-                <button
-                  class="rel-chip under"
-                  title="Under {g.orchestrator}. Click to focus it"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    focusOn(g.orchestrator);
-                  }}
-                  onkeydown={(e) => e.stopPropagation()}
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12V6a2 2 0 0 1 2-2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                  under <b>{g.orchestrator}</b>
-                </button>
-              {:else if g.parentSessionId}
-                <span class="rel-chip unresolved" title="Parent session {g.parentSessionId} is not registered yet">
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12V6a2 2 0 0 1 2-2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                  under <code>{g.parentSessionId}</code>
-                </span>
+          <header class="group-head">
+            {#if section.kind === "orchestrator" && section.root}
+              {@const root = section.root}
+              <span class="role-badge orch">orchestrator</span>
+              <b class="group-name" title={root.name}>{root.name}</b>
+              {#if !section.rootRendered}<span class="hidden-badge">hidden</span>{/if}
+              {#if root.killed}<span class="killed-badge">killed</span>{/if}
+              <span class="group-meta">
+                {section.directTotal} subagent{section.directTotal === 1 ? "" : "s"} · {section.directLive} live
+              </span>
+              <span class="grow"></span>
+              {#if !section.rootRendered}
+                <button class="btn ghost sm" onclick={() => void unhideGroup(root)}>Unhide</button>
               {/if}
-            </div>
-            <span class="badges">
-              {#if subs?.total}
-                <button
-                  class="subagent-badge"
-                  title="{subs.live} live of {subs.total} subagent{subs.total === 1 ? "" : "s"}. Click to focus this orchestrator"
-                  onclick={(e) => {
-                    e.stopPropagation();
-                    focusOn(g.name);
-                  }}
-                  onkeydown={(e) => e.stopPropagation()}
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4v5a2 2 0 0 0 2 2h6m-2-2 2 2-2 2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-                  {subs.live} live
-                </button>
-              {/if}
-              {#if g.hidden}
-                <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
-              {/if}
-              {#if g.killed}
-                <span class="killed-badge" title="Writes blocked until revived">killed</span>
-              {:else if g.stale > 0}
-                <span class="stale-badge" title="No heartbeat for a while; these claims may be abandoned">
-                  <svg class="clock" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.4" /><path d="M8 4.8V8l2.2 1.4" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
-                  {g.stale}
-                </span>
-              {:else if g.presence === "stale"}
-                <span class="idle-badge" title="No recent heartbeat">stale</span>
-              {/if}
-              {#if g.intents.length}<span class="queued-badge" title="Queued intents">{g.intents.length} queued</span>{/if}
-            </span>
-          </header>
-
-          {#if g.claims.length}
-            <div class="tiles" aria-hidden="true">
-              {#each g.claims as c (c.id)}
-                {@const stale = c.mode === "exclusive" && claimStale(c.last_heartbeat, now)}
-                <span
-                  class="tile t-{c.board_status}"
-                  class:intent={c.mode === "intent"}
-                  class:stale
-                  title="{c.key} · {c.issue_title} · {c.board_status}{c.mode === 'intent' ? ' (queued)' : ''}{stale ? ' · stale' : ''}"
-                >{shortKey(c.key)}</span>
-              {/each}
-            </div>
-          {:else}
-            <div class="idle-line">
-              <span class="idle-dot" class:live={g.presence === "live"}></span>
-              idle session{g.sessionId ? ` · ${g.sessionId}` : ""}
-            </div>
-          {/if}
-
-          <footer class="afoot">
-            <span class="counts">{g.work.length} issue{g.work.length === 1 ? "" : "s"}</span>
-            <span class="grow"></span>
-            {#if g.work.length}
-              <span class="completion">
-                <Ring done={g.done} total={g.work.length} color={agentColor(g.name)} size={14} />
-                <b>{g.done}</b><span class="cslash">/</span>{g.work.length} done
+              <button class="btn ghost sm" onclick={() => focusOn(root.name)}>Focus</button>
+            {:else if section.kind === "unlinked"}
+              <span class="role-badge unlinked">unlinked</span>
+              <b class="group-name">No registered parent</b>
+              <code class="raw-parent" title="Parent session {section.rawParent}">{section.rawParent}</code>
+              <span class="group-meta">
+                {section.nodes.length} agent{section.nodes.length === 1 ? "" : "s"} · that session is not on the roster
               </span>
             {:else}
-              <span class="completion muted">{g.intents.length ? "queued only" : "idle session"}</span>
+              <b class="group-name">Independent agents</b>
+              <span class="group-meta">{section.nodes.length} with no parent session</span>
             {/if}
-            <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
-              {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
-            </span>
-            {#if g.hidden}
-              <button
-                class="btn sm unhide-card"
-                onclick={(e) => {
-                  e.stopPropagation();
-                  void unhideGroup(g);
-                }}
-                onkeydown={(e) => e.stopPropagation()}
-              >Unhide</button>
+          </header>
+
+          {#if section.kind === "orchestrator" && section.root}
+            {@const root = section.root}
+            {#if section.rootRendered}
+              <div class="root-card">{@render agentCard(root)}</div>
             {/if}
-          </footer>
-        </div>
+            {#if section.nodes[0]?.children.length}
+              <div class="inset root-inset">
+                <div class="cardgrid">
+                  {#each section.nodes[0].children as child (child.group.id)}
+                    {@render subtree(child)}
+                  {/each}
+                </div>
+              </div>
+            {/if}
+          {:else}
+            <div class="cardgrid">
+              {#each section.nodes as node (node.group.id)}
+                {@render subtree(node)}
+              {/each}
+            </div>
+          {/if}
+        </section>
       {/each}
     </div>
   {/if}
@@ -938,15 +1265,136 @@
     font-size: 11.5px;
   }
 
-  /* --- agent grid ----------------------------------------------------- */
-  /* Multi-column masonry: a tall card only occupies one column, and later
-     cards flow beside it instead of leaving a dead grid cell. Cards keep
-     their DOM order (the list is sorted without live/stale) and never split
-     across columns. */
-  .grid {
-    columns: 248px;
+  /* --- hierarchy sections ---------------------------------------------- */
+  /* Sections stack in roster order; masonry only applies inside one section,
+     so a heartbeat cannot reshuffle the tree. */
+  .sections {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .group {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-width: 0;
+    padding: 10px 12px 12px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--surface) 55%, var(--sunk));
+  }
+  .group.orch-section {
+    border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+    background: linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 5%, var(--surface)),
+      var(--surface) 180px
+    );
+  }
+  .group.unlinked-section {
+    border-style: dashed;
+  }
+  .group-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+  }
+  .group-name {
+    max-width: 46ch;
+    font: 650 13px/1.2 var(--font-display);
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .group-meta {
+    font: 400 10px/1.4 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .raw-parent {
+    max-width: 100%;
+    padding: 2px 6px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--raise);
+    font: 400 10px/1.45 var(--font-mono);
+    color: var(--ink-dim);
+    overflow-wrap: anywhere;
+    word-break: break-all;
+  }
+  .cardgrid {
+    columns: 240px;
     column-gap: 10px;
     column-fill: balance;
+  }
+  .node {
+    break-inside: avoid;
+  }
+  .root-card {
+    break-inside: avoid;
+  }
+  /* The connector line is the relationship: children read as nested under the
+     card above instead of as unrelated cards with a truncated chip. */
+  .inset {
+    margin-left: 10px;
+    padding-left: 12px;
+    border-left: 2px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  }
+  .root-inset {
+    margin-left: 14px;
+  }
+  .hidden-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+    padding: 9px 11px;
+    border: 1px dashed color-mix(in srgb, var(--status-review) 45%, var(--line));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--status-review) 4%, var(--surface));
+  }
+  .overflow-note {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0 0 10px;
+    padding: 7px 10px;
+    border: 1px dashed var(--line-2);
+    border-radius: 8px;
+    font: 400 10.5px/1.4 var(--font-mono);
+    color: var(--ink-3);
+  }
+  .overflow-note b {
+    color: var(--ink-dim);
+    font-weight: 600;
+  }
+  .role-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: none;
+    font: 700 8.5px/1 var(--font-mono);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 3px 6px;
+    border-radius: 4px;
+  }
+  .role-badge.orch {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  }
+  .role-badge.sub {
+    color: var(--ink-3);
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+  }
+  .role-badge.unlinked {
+    color: var(--status-review);
+    background: color-mix(in srgb, var(--status-review) 11%, transparent);
   }
   .agent-card {
     display: flex;
@@ -986,6 +1434,13 @@
     border-color: color-mix(in srgb, var(--status-review) 45%, var(--line));
     background: color-mix(in srgb, var(--status-review) 3%, var(--surface));
   }
+  .agent-card.orchestrator {
+    border-left: 3px solid var(--agent);
+    background: color-mix(in srgb, var(--agent) 5%, var(--surface));
+  }
+  .agent-card.subagent-card {
+    background: color-mix(in srgb, var(--sunk) 45%, var(--surface));
+  }
   .acheck {
     display: flex;
     align-items: center;
@@ -1022,6 +1477,9 @@
     gap: 2px;
     min-width: 0;
   }
+  .aid .role-badge {
+    align-self: flex-start;
+  }
   .aname {
     font-size: 13px;
     font-weight: 650;
@@ -1041,53 +1499,40 @@
     white-space: normal;
     overflow-wrap: anywhere;
   }
-  .rel-chip {
+  .rel-link {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    align-self: flex-start;
     max-width: 100%;
-    min-width: 0;
-    padding: 2px 6px;
+    padding: 3px 6px;
+    border: 1px solid color-mix(in srgb, var(--status-review) 30%, var(--line));
     border-radius: 5px;
-    border: 1px solid var(--line);
-    background: color-mix(in srgb, var(--ink) 4%, transparent);
-    font: 400 9.5px/1.35 var(--font-mono);
-    color: var(--ink-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  button.rel-chip {
+    background: color-mix(in srgb, var(--status-review) 8%, transparent);
+    font: 400 9.5px/1.2 var(--font-mono);
+    color: var(--status-review);
     cursor: pointer;
   }
-  button.rel-chip:hover {
+  .rel-link:hover {
     border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
     color: var(--ink);
   }
-  .rel-chip svg {
+  .rel-link svg {
     width: 10px;
     height: 10px;
     flex: none;
   }
-  .rel-chip b {
-    color: var(--ink-dim);
-    font-weight: 600;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .rel-chip code {
-    font: inherit;
+  .rel-raw {
+    display: block;
+    align-self: stretch;
+    font: 400 9.5px/1.5 var(--font-mono);
     color: var(--ink-3);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
+    word-break: break-all;
   }
-  .rel-chip.under {
-    color: var(--status-review);
-    background: color-mix(in srgb, var(--status-review) 9%, transparent);
-    border-color: color-mix(in srgb, var(--status-review) 30%, var(--line));
-  }
-  .rel-chip.unresolved {
-    border-style: dashed;
+  .rel-raw code {
+    font: inherit;
+    color: var(--ink-dim);
   }
   .mmessage {
     margin: 3px 0 0;
@@ -1101,8 +1546,11 @@
     margin-left: auto;
     display: inline-flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 4px;
+    flex-wrap: wrap;
     flex: none;
+    max-width: 64%;
   }
   .stale-badge,
   .hidden-badge,
@@ -1146,14 +1594,6 @@
     color: var(--ok);
     background: color-mix(in srgb, var(--ok) 10%, transparent);
     border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
-    cursor: pointer;
-  }
-  .subagent-badge svg {
-    width: 10px;
-    height: 10px;
-  }
-  .subagent-badge:hover {
-    border-color: color-mix(in srgb, var(--ok) 55%, transparent);
   }
   .idle-badge {
     color: var(--ink-3);
@@ -1570,6 +2010,29 @@
     .title {
       flex-basis: 100%;
       order: 2;
+    }
+    .group-name {
+      max-width: 100%;
+      white-space: normal;
+    }
+    .inset {
+      margin-left: 4px;
+      padding-left: 9px;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .wrap {
+      padding: 12px 12px 30px;
+    }
+    .group {
+      padding: 9px 9px 10px;
+    }
+    .root-inset {
+      margin-left: 6px;
+    }
+    .badges {
+      max-width: 100%;
     }
   }
 </style>

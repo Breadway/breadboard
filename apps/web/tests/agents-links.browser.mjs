@@ -127,8 +127,11 @@ try {
             const tr = t.getBoundingClientRect();
             return tr.x >= r.x - 1 && tr.x + tr.width <= r.x + r.width + 1;
           }),
-          under: el.querySelector(".rel-chip.under")?.textContent?.trim() ?? null,
-          unresolved: el.querySelector(".rel-chip.unresolved")?.textContent?.trim() ?? null,
+          parent: el.getAttribute("data-parent") ?? "",
+          role: el.getAttribute("data-role"),
+          relation: el.querySelector(".rel-link")?.textContent?.trim() ?? null,
+          rawParent: el.querySelector(".rel-raw")?.textContent?.trim() ?? null,
+          section: el.closest("[data-section]")?.getAttribute("data-section") ?? null,
           subs: el.querySelector(".subagent-badge")?.textContent?.trim() ?? null,
           unhide: !!el.querySelector(".unhide-card"),
         };
@@ -162,25 +165,27 @@ try {
     const byName = Object.fromEntries(before.map((c) => [c.name, c]));
     const tall = byName[names.orch];
     assert.ok(tall, `${width}: tall orchestrator card is present`);
+    assert.equal(tall.role, "orchestrator", `${width}: orchestrator card is tagged`);
     assert.equal(tall.tiles, 95, `${width}: orchestrator keeps its 95 claim tiles`);
     assert.ok(tall.tilesInCard, `${width}: claim tiles stay inside the card`);
     assert.equal(byName[names.child].claims, 0, `${width}: claimless child renders`);
-    assert.equal(byName[names.child].under, `under ${names.orch}`, `${width}: child links to orchestrator`);
-    assert.equal(byName[names.busy].under, `under ${names.orch}`, `${width}: busy child links`);
-    assert.equal(byName[names.orphan].unresolved, `under ${names.missingParent}`, `${width}: unresolved parent keeps raw id`);
+    assert.equal(byName[names.child].parent, names.orch, `${width}: child links to orchestrator`);
+    assert.equal(byName[names.child].role, "subagent", `${width}: child is tagged as a subagent`);
+    assert.equal(byName[names.busy].parent, names.orch, `${width}: busy child links`);
+    assert.equal(byName[names.orphan].parent, "", `${width}: unresolved parent is not a resolved link`);
+    assert.match(byName[names.orphan].rawParent ?? "", new RegExp(names.missingParent), `${width}: unresolved parent keeps raw id`);
     assert.equal(byName[names.hidden], undefined, `${width}: hidden child is excluded by default`);
-    assert.equal(byName[names.killed].under, `under ${names.orch}`, `${width}: killed child keeps the link`);
+    assert.equal(byName[names.killed].parent, names.orch, `${width}: killed child keeps the link`);
     assert.equal(tall.subs, "3 live", `${width}: orchestrator counts live subagents`);
 
-    const columns = new Set(before.map((c) => c.x)).size;
-    assert.ok(columns >= 2, `${width}: masonry uses ${columns} columns`);
-    const besideTall = before.filter(
-      (c) => c.name !== names.orch && c.x > tall.x + 20 && c.y < tall.y + tall.height * 0.6,
+    const siblings = before.filter(
+      (c) => c.section === tall.section && c.name !== names.orch,
     );
-    assert.ok(besideTall.length > 0, `${width}: cards tile beside the tall orchestrator`);
+    const columns = new Set(siblings.map((c) => c.x)).size;
+    assert.ok(columns >= (width === 640 ? 1 : 2), `${width}: subagents tile in ${columns} columns inside the section`);
 
-    // The chip focuses the orchestrator and its direct subagents.
-    await page.locator(`[data-agent="${names.child}"] .rel-chip.under`).click();
+    // The jump link focuses the orchestrator and its whole tree.
+    await page.locator(`[data-agent="${names.child}"] .rel-link`).click();
     await page.waitForTimeout(200);
     const focusedText = await page.locator(".wrap").innerText();
     const focused = await cardInfo();
@@ -197,7 +202,7 @@ try {
     const revealed = await cardInfo();
     const hidden = revealed.find((c) => c.name === names.hidden);
     assert.ok(hidden?.hidden, `${width}: hidden child is revealed`);
-    assert.equal(hidden?.under, `under ${names.orch}`, `${width}: hidden child keeps the link`);
+    assert.equal(hidden?.parent, names.orch, `${width}: hidden child keeps the link`);
     assert.ok(hidden?.unhide, `${width}: hidden child has Unhide`);
     assert.ok(revealed.some((c) => c.name === names.orch), `${width}: hiding the child leaves the orchestrator`);
 
@@ -205,7 +210,7 @@ try {
     await page.getByRole("button", { name: /Showing hidden/i }).click();
     await page.waitForTimeout(100);
     const order1 = (await cardInfo()).map((c) => c.name);
-    const chip1 = (await cardInfo()).find((c) => c.name === names.child)?.under;
+    const chip1 = (await cardInfo()).find((c) => c.name === names.child)?.parent;
     await page.evaluate(
       async ({ agent, sessionId, parent }) => {
         await fetch("/api/agents/register", {
@@ -219,9 +224,9 @@ try {
     await page.getByRole("button", { name: "Refresh" }).click();
     await page.waitForTimeout(400);
     const order2 = (await cardInfo()).map((c) => c.name);
-    const chip2 = (await cardInfo()).find((c) => c.name === names.child)?.under;
+    const chip2 = (await cardInfo()).find((c) => c.name === names.child)?.parent;
     assert.deepEqual(order2, order1, `${width}: card order is stable across refresh and heartbeat`);
-    assert.equal(chip2, chip1, `${width}: orchestrator chip is stable`);
+    assert.equal(chip2, chip1, `${width}: orchestrator link is stable`);
   }
   console.log("agents orchestrator-link browser regressions: passed", fixture.project);
 } finally {
