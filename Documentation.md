@@ -94,19 +94,35 @@ and `max_exclusive_per_orchestrator`, env
 `BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR`) so they can be tuned
 without a migration.
 
-Releasing keeps the status and only removes the tint. A claim with no
-heartbeat for 5+ minutes reads as **stale** for exclusive work on the Agents
-page but never auto-expires: only an explicit release (or a new claim after
-release) removes it. Claim, state, PR and release transitions are appended to
-the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
-`agent_release`; routine heartbeats that change nothing are not logged.
+Releasing keeps the status and only removes the tint. A release requires a
+handoff note: one line covering what is done, what is next and what is risky.
+The server refuses a release without it; the error states the rule. The note is
+stored on release, shown on the board card and the issue drawer, written to the
+agent activity timeline as a `handoff` event, and returned as context when a
+session resumes the issue. The only exception is an explicit `no_note=true` for
+a claim that never held work: an `intent` claim, or an exclusive claim still in
+`planned` state with no branch, worktree, repo, PR or head commit. A bare
+missing note is never treated as `no_note`.
+
+Every claim also records a session link: which session touched the issue, when
+it first and last acted, and the last lifecycle state. The link is created on
+claim, refreshed on heartbeat and release, and never deleted by a release, so
+the next session can see who worked the issue before it. Session ids are the
+same ones the roster and usage stats already use.
+
+A claim with no heartbeat for 5+ minutes reads as **stale** for exclusive work
+on the Agents page but never auto-expires: only an explicit release (or a new
+claim after release) removes it. Claim, state, PR and release transitions are
+appended to the issue's activity timeline as `agent_claim`, `agent_state`,
+`agent_pr` and `agent_release`; routine heartbeats that change nothing are not
+logged.
 
 The Agents modal also shows a per-agent timeline (`GET
 /api/agents/{name}/events`): typed `registered`, `claimed`, `released`,
-`state_change`, `paused`, `removed`, `pr_opened`, `pr_merged` and `chat_sent`
-rows with filters, paging and links back to the issue, PR or chat message.
-`ci_result` and `handoff` are accepted by the API but have no source yet, so
-the panel does not offer filters that could only ever be empty.
+`state_change`, `paused`, `removed`, `pr_opened`, `pr_merged`, `ci_result`,
+`chat_sent` and `handoff` rows with filters, paging and links back to the issue,
+PR or chat message. A release that carried a handoff note writes both a
+`handoff` row (the note) and a `released` row.
 
 ### Agent ownership and orchestration
 
@@ -258,8 +274,11 @@ open cycles return `409 conflict`; callers must provide `cycle_id`. Explicit cyc
 assignment always takes precedence. Changing project selections never moves existing
 issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. The local row is committed and returned `201` without waiting for Forgejo; `x-breadboard-writeback: pending` means a background writeback was scheduled (a failed one retries on the next reconcile pass), `none` means the project is not mapped to an enabled repo |
-| `GET` | `/api/issues/{key}` | issue + `comments[]` |
+| `GET` | `/api/issues/{key}` | issue + `comments[]` + `sessions[]` (`{ issue_id, key, title, status, session_id, agent_name, first_seen, last_seen, last_state }`, most recent action first). The issue also carries `last_handoff` when a release note exists |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
+| `GET` | `/api/issues/{key}/sessions` | sessions that touched the issue, most recent action first. The link survives release |
+| `GET` | `/api/issues/{key}/handoffs` | release handoff notes for the issue, newest first: `{ id, issue_id, key, session_id, agent_name, mode, state, note, created_at }[]` (up to 50) |
+| `GET` | `/api/sessions/{session_id}/issues` | back-link: the issues one session touched, most recent action first |
 | `GET` | `/api/issues/{key}/artifacts` | typed evidence, newest first: `{ id, issue_id, kind, comment_id, review_ref, filename, mime, size, uploader_agent, session_id, created_at, expires_at }[]`. Expired rows are omitted |
 | `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
 | `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
@@ -273,10 +292,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
 | `POST` | `/api/issues/{key}/comments` | `{ body }`: adds a comment; pushed to Forgejo if the issue is linked. `201` |
-| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, message?, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Exclusive also enforces the live budgets (10 per agent name, 100 per orchestrator tree) and returns `409` naming the limit and what to release; intents are not capped. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. Emits `agent.claimed`. `201` |
+| `POST` | `/api/issues/{key}/claim` | agent claim: `{ agent_name, message?, mode?, session_id?, state?, note?, branch?, worktree?, repo?, pr_url?, pr_number?, head_sha? }`. `mode` is `exclusive` (default) or `intent`. Exclusive is first-wins (`409` on conflict) and moves a `backlog`/`todo` card to `doing` plus assigns it; taking the work also removes that same agent's queued intent. Exclusive also enforces the live budgets (10 per agent name, 100 per orchestrator tree) and returns `409` naming the limit and what to release; intents are not capped. Intent is a soft reservation that never blocks, moves or assigns. `pr_url`, when present, must be an absolute http(s) URL. Re-claiming your own intent updates it. A claim carrying a `session_id` also upserts that session's link on the issue. Emits `agent.claimed`. `201` |
 | `PUT` | `/api/issues/{key}/claim` | heartbeat / update your claim (any field optional; `null` clears a nullable one); refreshes `last_heartbeat`. `?agent=` / `?mode=exclusive|intent` pick one when you hold several; with neither, the exclusive claim wins over an intent and the freshest wins otherwise. Only the claiming user may update, and a mismatched `session_id` is `409`. `pr_url` must be an absolute http(s) URL. A newly set `pr_url` also comments the link on the issue once (synced to Forgejo). Emits `agent.updated` |
-| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. The card keeps its status. Emits `agent.released`. `204` |
-| `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Emits `agent.released`. `204` |
+| `DELETE` | `/api/issues/{key}/claim` | release your claim (only the claiming user); `?agent=` / `?mode=` select one when you hold several. `note=` is required (one line, 500 chars max: done, next, risky); `?no_note=true` is allowed only for a claim that never held work (an `intent`, or a `planned` exclusive claim with no branch/worktree/repo/PR/head commit). A missing note is `400` with the exact rule. The card keeps its status; the session link survives. Emits `agent.released` and a `handoff` agent event when a note was stored. `204` |
+| `DELETE` | `/api/claims/{id}` | release one claim by id (owner only): how the Agents page releases individual exclusive/intent rows. Same required `note` / explicit `no_note` rule as above. Emits `agent.released`. `204` |
 | `PUT` | `/api/agents/message` | `{ agent_name, message }`: set the signed-in agent's one-line message (collapsed to one line, max 120 chars; empty clears). Shown under the agent's name |
 | `GET` | `/api/chat/rooms` | rooms and DMs: `{ id, kind, name, description, members[], unread, last_message }`. Without `agent` (a human) returns everything, including every DM; with `?agent=` returns shared rooms plus that agent's DMs |
 | `POST` | `/api/chat/rooms` | `{ name, description? }`: create a shared room. Names are slugified (`Bread Puns!` → `bread-puns`), globally unique, 40 chars max; `409` on duplicate. `201` |
@@ -613,7 +632,7 @@ repo with no mapped project are skipped with a warning.
 | `mv <key> <status>` | |
 | `claim <key> --agent NAME [--mode exclusive\|intent] [--session ID] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H]` | claim an issue; `exclusive` (default) is first-wins and moves backlog/todo to doing + assigns it, `intent` queues interest without moving or blocking |
 | `heartbeat <key> [--agent NAME] [--state S] [--note N] [--branch B] [--worktree W] [--repo R] [--pr-url U] [--pr-number N] [--head-sha H] [--session ID] [--every SECS]` | heartbeat / update your claim; `--every` keeps repeating until interrupted (wrap long runs so they never go stale) |
-| `release <key> [--agent NAME]` | release your claim (status stays, tint goes away) |
+| `release <key> [--agent NAME] (--note TEXT | --no-note)` | release your claim (status stays, tint goes away). `--note` is required unless `--no-note` applies to a claim that never held work |
 | `agents list [--stale]` | live agent claims with mode, state and heartbeat |
 | `agents status` | server roll-up in the `bb-status` widget shape (`BB x/y done, …`) |
 | `agents message <agent> "<text>"` | set (or clear, with `""`) the one-line message under an agent's name |

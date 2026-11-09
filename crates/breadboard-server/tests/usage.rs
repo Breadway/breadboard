@@ -219,8 +219,10 @@ async fn imports_per_agent_and_per_issue_and_warns_over_threshold() {
 
     // Releasing the claim must not erase the issue's historical total: the
     // session-to-issue link is permanent, not derived from the live claim.
-    c.delete(format!("{base}/api/issues/{key}/claim"))
-        .header("authorization", &auth)
+    c.delete(format!(
+        "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+    ))
+    .header("authorization", &auth)
         .send()
         .await
         .unwrap()

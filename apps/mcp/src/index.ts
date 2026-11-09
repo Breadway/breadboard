@@ -20,6 +20,7 @@ import {
   STATUSES,
   PRIORITIES,
   type ArtifactKind,
+  type HandoffNote,
   type IssueFilter,
   type IssueLink,
   type IssuePatch,
@@ -830,7 +831,8 @@ server.tool(
     "mode=intent is a soft reservation for work you plan to take later: it " +
     "never moves the card and never blocks anyone. " +
     "The MCP server auto-heartbeats your claim every 60s while this process is alive, so it stays live; " +
-    "call release_claim when done and update_claim to report state/PR progress.",
+    "the result includes the issue's latest handoff note when one exists, so a resuming session can pick " +
+    "up context. call release_claim with a handoff note when done and update_claim to report state/PR progress.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z
@@ -860,7 +862,8 @@ server.tool(
         const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
         startKeepalive(key, created.agent_name);
         ensureChatPoller(created.agent_name);
-        return created;
+        const issue = await client.getIssue(key).catch(() => null);
+        return { ...created, last_handoff: issue?.last_handoff ?? null };
       } catch (e) {
         // Re-claiming your own claim after a restart is not a conflict: find
         // it, heartbeat it, and re-arm the keepalive. Only resume a claim of
@@ -874,7 +877,12 @@ server.tool(
             const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
             startKeepalive(key, resumed.agent_name);
             ensureChatPoller(resumed.agent_name);
-            return { ...resumed, resumed: true };
+            const issue = await client.getIssue(key).catch(() => null);
+            return {
+              ...resumed,
+              resumed: true,
+              last_handoff: issue?.last_handoff ?? null,
+            };
           }
         }
         throw e;
@@ -905,15 +913,31 @@ server.tool(
 server.tool(
   "release_claim",
   "Release your claim (exclusive or intent). The card keeps its status; only the agent tint goes away. " +
+    "REQUIRED: pass note, one line covering what is done, what is next and what is risky, so the next " +
+    "session can pick the issue up. The server refuses a release without it (400), and the error names " +
+    "the rule. The only exception is an explicit no_note=true for a claim that never held work: an intent " +
+    "claim, or an exclusive claim still in planned state with no branch, worktree, repo, PR or head commit. " +
     "Pass agent_name when you hold more than one claim on the issue.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     agent_name: z.string().optional().describe("which of your claims to release"),
+    note: z
+      .string()
+      .optional()
+      .describe(
+        "REQUIRED handoff: done, next and risky in one line (500 chars max). Refused without it unless no_note is true and the claim never held work.",
+      ),
+    no_note: z
+      .boolean()
+      .optional()
+      .describe(
+        "Explicitly release a claim that never held work without a handoff. Only valid for an intent claim or a planned exclusive claim with no branch, worktree, repo, PR or commit; otherwise the server refuses.",
+      ),
   },
-  ({ key, agent_name }) =>
+  ({ key, agent_name, note, no_note }) =>
     run(async () => {
       const who = agent_name?.trim() || autoAgentName;
-      await client.releaseClaim(key, who);
+      await client.releaseClaim(key, who, note, no_note === true);
       stopKeepalive(key, who);
       return `released ${key}`;
     }),
@@ -994,7 +1018,9 @@ server.tool(
   "resume_claims",
   "Re-attach to work you already own after a restart. Heartbeats every claim owned by you under " +
     "this agent name and re-arms the keepalive for each, so they stop looking abandoned/stale. " +
-    "Call this when an MCP session starts and you intend to continue previous work.",
+    "Returns each claim's latest handoff note, which is the note the previous session left when it " +
+    "released: read it as context before continuing. Call this when an MCP session starts and you " +
+    "intend to continue previous work.",
   {
     agent_name: z
       .string()
@@ -1011,13 +1037,14 @@ server.tool(
       if (mine.length === 0) {
         return `no claims found for ${name}`;
       }
-      const resumed: string[] = [];
+      const resumed: Array<{ key: string; last_handoff: HandoffNote | null }> = [];
       const failed: string[] = [];
       for (const c of mine) {
         try {
           await client.heartbeatClaim(c.key, { agent_name: name }, name);
           startKeepalive(c.key, name);
-          resumed.push(c.key);
+          const issue = await client.getIssue(c.key).catch(() => null);
+          resumed.push({ key: c.key, last_handoff: issue?.last_handoff ?? null });
         } catch {
           failed.push(c.key);
         }

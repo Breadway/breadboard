@@ -50,6 +50,12 @@ pub fn router(state: AppState) -> Router {
         .route("/issues/{key}/project", put(api::move_issue_project))
         .route("/issues/{key}/comments", post(api::add_comment))
         .route("/issues/{key}/activity", get(api::issue_activity))
+        .route("/issues/{key}/sessions", get(api::get_issue_sessions))
+        .route("/issues/{key}/handoffs", get(api::get_issue_handoffs))
+        .route(
+            "/sessions/{session_id}/issues",
+            get(api::get_session_issues),
+        )
         .route(
             "/issues/{key}/reviews",
             get(reviews::list_issue_reviews).post(reviews::create_review_request),

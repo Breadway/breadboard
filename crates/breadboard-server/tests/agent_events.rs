@@ -217,7 +217,9 @@ async fn claim_state_pr_release_timeline_with_filters_and_paging() {
 
     // Release lands at the top with its actor.
     let released = c
-        .delete(format!("{base}/api/issues/{key}/claim"))
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+        ))
         .header("authorization", &auth)
         .send()
         .await
