@@ -26,9 +26,11 @@
 
   onMount(() => {
     void store.loadAgents();
+    void store.loadChatRooms().catch(() => {});
     const t = setInterval(() => {
       now = Date.now();
       void store.loadAgents();
+      void store.loadChatRooms().catch(() => {});
     }, 15_000);
     return () => clearInterval(t);
   });
@@ -451,9 +453,36 @@
   const selectedSubagents = $derived(
     selected ? subagentCounts.get(selected.name) : undefined,
   );
+  const selectedDm = $derived(selected ? store.dmRoomFor(selected.name) : undefined);
+  const selectedDmUnread = $derived(selectedDm?.unread ?? 0);
+  const selectedDmHref = $derived(selected ? store.chatDmHref(selected.name) : "");
+  const selectedDmUrl = $derived(
+    selected ? new URL(selectedDmHref, location.origin).toString() : "",
+  );
 
   function openAgent(g: Group) {
     openAgentId = g.id;
+    // The DM may have been created or read since the page loaded.
+    void store.loadChatRooms().catch(() => {});
+  }
+
+  /** Land on the DM with this agent; Chat opens or creates it. */
+  function messageAgent(g: Group) {
+    store.openAgentDm(g.name);
+    closeAgent();
+  }
+
+  async function copyDmLink() {
+    if (!selected) return;
+    try {
+      await navigator.clipboard.writeText(selectedDmUrl);
+      copied = selectedDmUrl;
+      setTimeout(() => {
+        if (copied === selectedDmUrl) copied = null;
+      }, 1500);
+    } catch {
+      /* the link is still selectable and copyable by hand */
+    }
   }
 
   function focusOn(name: string | null) {
@@ -989,6 +1018,11 @@
             <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
           </span>
         {/if}
+        <button
+          class="btn sm message-agent"
+          title="Open the DM with {selected.name}"
+          onclick={() => messageAgent(selected)}
+        >Message</button>
         {#if selected.hidden}
           <button class="btn sm" onclick={() => void unhideGroup(selected)}>Unhide</button>
         {:else}
@@ -1006,6 +1040,28 @@
       </header>
 
       <div class="session">
+        <div class="srow chat-row" data-dm-agent={selected.name} data-dm-unread={selectedDmUnread}>
+          <span class="slabel">chat</span>
+          <a
+            class="dm-link"
+            href={selectedDmHref}
+            title="Open the DM with {selected.name}"
+            onclick={(e) => {
+              e.preventDefault();
+              messageAgent(selected);
+            }}
+          >{selectedDmHref}</a>
+          <span
+            class="dm-unread"
+            class:on={selectedDmUnread > 0}
+            title={selectedDmUnread
+              ? `${selectedDmUnread} unread message${selectedDmUnread === 1 ? "" : "s"} from ${selected.name}`
+              : "No unread messages"}
+          >{selectedDmUnread ? `${selectedDmUnread} unread` : "no unread"}</span>
+          <button class="btn ghost sm" onclick={() => void copyDmLink()}>
+            {copied === selectedDmUrl ? "Copied" : "Copy link"}
+          </button>
+        </div>
         <div class="srow">
           <span class="slabel">session</span>
           {#if selected.sessionId}
@@ -1879,6 +1935,26 @@
   }
   .linklike:hover {
     text-decoration: underline;
+  }
+  .dm-link {
+    color: var(--accent);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+  }
+  .dm-link:hover {
+    text-decoration: underline;
+  }
+  .dm-unread {
+    padding: 1px 6px;
+    border-radius: 99px;
+    border: 1px solid var(--line-2);
+    color: var(--ink-3);
+    font: 500 9.5px/1.5 var(--font-mono);
+  }
+  .dm-unread.on {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
   .paused-note {
     color: var(--status-doing);

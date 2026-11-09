@@ -51,6 +51,8 @@
 
   function go(v: View) {
     store.view = v;
+    // Do not leave a /chat?dm=... address behind when leaving Chat.
+    if (v !== "chat") store.updateChatUrl(null);
   }
 
   function pickCycle(id: number) {
