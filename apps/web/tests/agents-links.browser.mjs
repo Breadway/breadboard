@@ -314,7 +314,7 @@ try {
   await chatLink.waitFor({ state: "visible" });
   const chipLabels = (await page.locator(".activity .chip").allTextContents()).map((s) => s.trim());
   assert.ok(!chipLabels.includes("CI"), `ci_result chip is hidden until it has a source: ${chipLabels}`);
-  assert.ok(!chipLabels.includes("handoff"), `handoff chip is hidden until it has a source: ${chipLabels}`);
+  assert.ok(chipLabels.includes("handoff"), `handoff chip is shown now that releases emit it: ${chipLabels}`);
   assert.ok(chipLabels.includes("paused"), `paused chip is shown: ${chipLabels}`);
   assert.ok(chipLabels.includes("removed"), `removed chip is shown: ${chipLabels}`);
   await chatLink.click();
