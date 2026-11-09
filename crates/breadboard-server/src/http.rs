@@ -60,7 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/issues/{key}/artifacts/base64",
             post(artifacts::upload_base64).layer(axum::extract::DefaultBodyLimit::max(
-                artifacts::MAX_BODY_BYTES,
+                artifacts::MAX_BASE64_BODY_BYTES,
             )),
         )
         .route("/artifacts/{id}", get(artifacts::download))

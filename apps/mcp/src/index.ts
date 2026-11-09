@@ -560,10 +560,11 @@ server.tool(
 server.tool(
   "attach_artifact",
   "Attach immutable evidence to an issue. Pass base64 data (raw or a data: URL). " +
-    "Kinds: bench, screenshot, ci-log, diff, trace, other. Limits: 10 MB for a screenshot, " +
-    "bench or other; 25 MB for a diff; 50 MB for a CI log or trace. Optionally tie it to a " +
-    "comment_id or a review_ref (review key or URL). The row records the agent name and " +
-    "session id that produced it.",
+    "Kinds: bench, screenshot, ci-log, diff, trace, other. A screenshot must be png, jpeg, gif " +
+    "or webp; svg and other types are refused. Limits: 10 MB for a screenshot, bench or other; " +
+    "25 MB for a diff; 50 MB for a CI log or trace. Optionally tie it to a comment_id or a " +
+    "review_ref (review key or URL). The row records the agent name and session id that " +
+    "produced it.",
   {
     key: z.string().describe("issue key, e.g. BREAD-42"),
     kind: z.enum(ARTIFACT_KINDS as [string, ...string[]]).describe("artifact kind"),

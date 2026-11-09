@@ -197,8 +197,10 @@
     }
   }
 
+  const RASTER_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
   const previewable = (a: IssueArtifact) =>
-    a.kind === "screenshot" || a.mime.startsWith("image/");
+    a.kind === "screenshot" &&
+    RASTER_MIMES.has(a.mime.split(";")[0].trim().toLowerCase());
   const viewable = (a: IssueArtifact) =>
     a.kind === "bench" || a.kind === "ci-log" || a.kind === "diff" || a.kind === "trace";
 </script>

@@ -25,8 +25,26 @@ use crate::{store, AppState};
 /// Absolute ceiling for one artifact, matching the largest per-kind limit.
 pub const MAX_ARTIFACT_BYTES: usize = 50 * 1024 * 1024;
 
-/// Route body allowance: max artifact plus multipart framing.
+/// Multipart body allowance: max artifact plus multipart framing.
 pub const MAX_BODY_BYTES: usize = MAX_ARTIFACT_BYTES + 2 * 1024 * 1024;
+
+/// Base64 grows by 4/3, so a full 50 MiB CI log needs about 70 MiB of request
+/// body. Keep a little room for JSON framing.
+pub const MAX_BASE64_BODY_BYTES: usize = 72 * 1024 * 1024;
+
+/// Only these raster types are served inline. SVG is deliberately excluded:
+/// inline SVG executes script same-origin and would defeat the session cookie.
+pub const RASTER_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+pub fn is_raster_mime(mime: &str) -> bool {
+    let base = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    RASTER_MIMES.contains(&base.as_str())
+}
 
 /// Per-kind byte caps. Large CI logs get room; small evidence stays small.
 pub fn kind_limit(kind: ArtifactKind) -> usize {
@@ -268,6 +286,14 @@ fn guess_mime(filename: &str, provided: Option<&str>) -> String {
     .to_string()
 }
 
+fn normalize_mime(mime: &str) -> String {
+    mime.split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
 fn storage_ext(filename: &str, kind: ArtifactKind) -> String {
     let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
     if !ext.is_empty() && ext.len() <= 10 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
@@ -313,10 +339,10 @@ async fn save_artifact(
         )));
     }
     let display = safe_display_name(&input.filename);
-    let mime = guess_mime(&display, input.mime.as_deref());
-    if input.kind == ArtifactKind::Screenshot && !mime.starts_with("image/") {
-        return Err(AppError::bad_request(
-            "a screenshot artifact must be an image (png, jpeg, gif or webp)",
+    let mime = normalize_mime(&guess_mime(&display, input.mime.as_deref()));
+    if input.kind == ArtifactKind::Screenshot && !is_raster_mime(&mime) {
+        return Err(AppError::unsupported_media_type(
+            "a screenshot artifact must be png, jpeg, gif or webp; svg and other types are refused",
         ));
     }
     if let Some(comment_id) = input.comment_id {
@@ -595,14 +621,20 @@ pub async fn download(
     let bytes = tokio::fs::read(&path)
         .await
         .map_err(|_| AppError::NotFound)?;
-    let inline = stored.artifact.kind.is_image()
-        || stored.artifact.kind.is_text()
-        || stored.artifact.mime.starts_with("text/");
+    let raster =
+        stored.artifact.kind == ArtifactKind::Screenshot && is_raster_mime(&stored.artifact.mime);
+    let content_type = if raster {
+        stored.artifact.mime.as_str()
+    } else if stored.artifact.kind.is_text() || stored.artifact.kind == ArtifactKind::Bench {
+        "text/plain"
+    } else {
+        "application/octet-stream"
+    };
     let mut builder = Response::builder()
-        .header(header::CONTENT_TYPE, &stored.artifact.mime)
+        .header(header::CONTENT_TYPE, content_type)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::CACHE_CONTROL, "private, max-age=3600");
-    if inline {
+    if raster {
         builder = builder.header(header::CONTENT_DISPOSITION, "inline");
     } else {
         let name = safe_display_name(&stored.artifact.filename);

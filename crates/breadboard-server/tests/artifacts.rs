@@ -96,6 +96,10 @@ async fn upload_list_download_and_immutability() {
             .unwrap(),
         "nosniff"
     );
+    assert_eq!(
+        download.headers()["content-disposition"].to_str().unwrap(),
+        "inline"
+    );
 
     // The row is immutable at the database level, not merely by API.
     let update = sqlx::query("UPDATE issue_artifacts SET kind = 'diff' WHERE id = ?1")
@@ -123,7 +127,7 @@ async fn upload_list_download_and_immutability() {
         .unwrap();
     assert_eq!(bad_comment.status(), 400);
 
-    // A screenshot must actually look like an image.
+    // A screenshot must be a raster image. Text is refused.
     let bad_mime = c
         .post(format!("{base}/api/issues/{key}/artifacts/base64"))
         .header("authorization", &auth)
@@ -136,7 +140,33 @@ async fn upload_list_download_and_immutability() {
         .send()
         .await
         .unwrap();
-    assert_eq!(bad_mime.status(), 400);
+    assert_eq!(bad_mime.status(), 415);
+
+    // SVG is not in the raster allowlist; it must never become an inline
+    // same-origin document.
+    let svg = base64::engine::general_purpose::STANDARD
+        .encode(br#"<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>"#);
+    let bad_svg = c
+        .post(format!("{base}/api/issues/{key}/artifacts/base64"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "filename": "x.svg",
+            "mime": "image/svg+xml",
+            "kind": "screenshot",
+            "data_base64": svg
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_svg.status(), 415);
+    assert!(
+        bad_svg
+            .text()
+            .await
+            .unwrap()
+            .contains("png, jpeg, gif or webp"),
+        "the rejection should name the raster allowlist"
+    );
 }
 
 #[tokio::test]
@@ -188,6 +218,66 @@ async fn multipart_upload_records_human_uploader() {
         .await
         .unwrap();
     assert_eq!(missing.status(), 400);
+}
+
+#[tokio::test]
+async fn html_and_text_artifacts_download_as_attachments_with_nosniff() {
+    let (_app, c, base, auth, key) = setup().await;
+    let html =
+        base64::engine::general_purpose::STANDARD.encode(b"<html><script>alert(1)</script></html>");
+
+    let mut ids = Vec::new();
+    for (kind, filename) in [("ci-log", "run.log"), ("other", "page.html")] {
+        let created: Value = c
+            .post(format!("{base}/api/issues/{key}/artifacts/base64"))
+            .header("authorization", &auth)
+            .json(&json!({
+                "filename": filename,
+                "mime": "text/html",
+                "kind": kind,
+                "data_base64": html
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push((kind, created["id"].as_i64().unwrap()));
+    }
+
+    for (kind, id) in ids {
+        let response = c
+            .get(format!("{base}/api/artifacts/{id}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "{kind} download");
+        let expected = if kind == "ci-log" {
+            "text/plain"
+        } else {
+            "application/octet-stream"
+        };
+        assert_eq!(
+            response.headers()["content-type"].to_str().unwrap(),
+            expected,
+            "{kind} must not be served as html"
+        );
+        assert_eq!(
+            response.headers()["x-content-type-options"]
+                .to_str()
+                .unwrap(),
+            "nosniff"
+        );
+        assert!(
+            response.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment"),
+            "{kind} must download, not render inline"
+        );
+    }
 }
 
 #[tokio::test]
@@ -267,4 +357,13 @@ fn limits_and_retention_are_explicit() {
         artifacts::retention(ArtifactKind::Screenshot).num_days(),
         180
     );
+    const {
+        assert!(
+            artifacts::MAX_BASE64_BODY_BYTES > artifacts::MAX_ARTIFACT_BYTES * 4 / 3 + 1024 * 1024
+        );
+    }
+    assert!(artifacts::is_raster_mime("image/png"));
+    assert!(artifacts::is_raster_mime("IMAGE/WEBP; charset=binary"));
+    assert!(!artifacts::is_raster_mime("image/svg+xml"));
+    assert!(!artifacts::is_raster_mime("text/html"));
 }

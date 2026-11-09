@@ -26,6 +26,7 @@ assert.ok(artifacts.includes('class="viewer"'), "logs and diffs render in a view
 assert.ok(artifacts.includes("{a.uploader_agent}"), "each artifact shows who produced it");
 assert.ok(artifacts.includes("{a.session_id.slice(0, 10)}"), "each artifact shows the session that produced it");
 assert.ok(artifacts.includes("ARTIFACT_KINDS"), "kind options come from the shared list");
+assert.ok(artifacts.includes("RASTER_MIMES"), "preview is limited to the server's raster allowlist");
 assert.ok(artifacts.includes("50 MB"), "upload UI states the CI log size limit");
 assert.ok(artifacts.includes("expires {fmtDate(a.expires_at)}"), "expiry is visible on each artifact");
 

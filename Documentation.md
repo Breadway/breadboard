@@ -205,8 +205,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
 | `GET` | `/api/issues/{key}/artifacts` | typed evidence, newest first: `{ id, issue_id, kind, comment_id, review_ref, filename, mime, size, uploader_agent, session_id, created_at, expires_at }[]`. Expired rows are omitted |
 | `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
-| `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients |
-| `GET` | `/api/artifacts/{id}` | authenticated download. Images and text evidence render inline; other files are attachments with `nosniff`. `410` once past `expires_at` |
+| `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
+| `GET` | `/api/artifacts/{id}` | authenticated download. Only raster screenshots (png, jpeg, gif, webp) render inline. Everything else, including html or svg content, is served as `text/plain` or `application/octet-stream` with `Content-Disposition: attachment` and `nosniff`. `410` once past `expires_at` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -374,15 +374,19 @@ are immutable: a database trigger rejects `UPDATE`, and there is no update or
 delete route. Expiry is the only deletion path.
 
 Size limits are per kind: 10 MB for a screenshot, bench or other; 25 MB for a
-diff; 50 MB for a CI log or trace. Retention follows the same weight: 180 days
-for screenshots and benches, 90 days for diffs and other, and 30 days for CI
-logs and traces. Expired rows disappear from listings, return `410` from the
-download route, and are removed from disk by the startup sweep and a daily job.
+diff; 50 MB for a CI log or trace. Screenshots are restricted to the raster
+types png, jpeg, gif and webp; svg and anything else are refused with `415`.
+Retention follows the same weight: 180 days for screenshots and benches, 90
+days for diffs and other, and 30 days for CI logs and traces. Expired rows
+disappear from listings, return `410` from the download route, and are removed
+from disk by the startup sweep and a daily job.
 
-The issue drawer shows an Evidence section. Images preview inline; CI logs,
-diffs and traces open in a monospace viewer; a bench renders as a small table.
-Bench data is JSON (an array of `{ name, value, unit }`, or an object of name to
-value) with a fallback for `name: value unit` lines.
+The issue drawer shows an Evidence section. Raster screenshots preview inline;
+CI logs, diffs and traces open in a monospace viewer; a bench renders as a small
+table. The viewer fetches an attachment response, and the preview only links
+when the server would serve that raster type inline. Bench data is JSON (an
+array of `{ name, value, unit }`, or an object of name to value) with a fallback
+for `name: value unit` lines.
 
 MCP tools: `list_artifacts` and `attach_artifact` (base64).
 

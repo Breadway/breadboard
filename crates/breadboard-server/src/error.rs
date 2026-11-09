@@ -21,6 +21,8 @@ pub enum AppError {
     Conflict(String),
     #[error("{0}")]
     TooLarge(String),
+    #[error("{0}")]
+    UnsupportedMediaType(String),
     #[error("expired")]
     Expired,
     #[error("upstream: {0}")]
@@ -43,6 +45,9 @@ impl AppError {
     pub fn forbidden_msg(msg: impl Into<String>) -> Self {
         AppError::ForbiddenMsg(msg.into())
     }
+    pub fn unsupported_media_type(msg: impl Into<String>) -> Self {
+        AppError::UnsupportedMediaType(msg.into())
+    }
 }
 
 impl IntoResponse for AppError {
@@ -55,6 +60,7 @@ impl IntoResponse for AppError {
             AppError::ForbiddenMsg(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
             AppError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
+            AppError::UnsupportedMediaType(m) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, m.clone()),
             AppError::Expired => (StatusCode::GONE, "expired".to_string()),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Db(sqlx::Error::RowNotFound) => {
