@@ -961,22 +961,27 @@ server.tool(
       // transaction, or is refused. Before any claims it is free.
       const previous = autoAgentName;
       const previousConfirmed = nameConfirmed;
+      let renamed = false;
       try {
         // Only rename from a name the server has actually accepted. A name
         // that came from config but failed registration may belong to another
         // live session, and renaming it would move that session's claims.
         if (previousConfirmed && previous && previous !== name) {
           await client.renameAgent(previous, name);
+          renamed = true;
         }
         autoAgentName = name;
         registeredAt = 0;
         await ensureRegistered(true);
       } catch (e) {
         // A refused registration must not strand this process (or the chat
-        // plugin) on a name another live session owns. Restore the identity
-        // that was still valid and let the caller pick another name.
-        autoAgentName = previous;
-        nameConfirmed = previousConfirmed;
+        // plugin) on a name another live session owns. If the rename already
+        // happened, the server moved this session to the new name, so keep it;
+        // otherwise restore the identity that was still valid.
+        if (!renamed) {
+          autoAgentName = previous;
+          nameConfirmed = previousConfirmed;
+        }
         registeredAt = 0;
         explainRegistrationError(e);
       }

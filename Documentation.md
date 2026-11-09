@@ -136,6 +136,26 @@ rename is free; once it holds claims the server moves the claims, profile and
 session row in one transaction or refuses with a clear conflict. An old name
 never keeps orphaned claims.
 
+One live name belongs to exactly one session. The liveness window is the same
+**120 seconds** the roster uses: while the holder heartbeat is inside it, a
+registration, claim or chat write from a different session id is refused with
+`409`, naming the holding session id and returning free name alternatives. The
+refusal never overwrites the holder's session id or claims. Once the holder
+has not heartbeated for 120 seconds the name is reclaimable: the next
+registration replaces the stale session row, while every claim that carried
+the old session id stays in `agent_claims` under that id. Registration,
+claiming and chat accept an optional `session_id`; a client that omits it is
+treated as the current holder for backward compatibility.
+
+Existing duplicate sessions were resolved once by migration `0028`. For each
+name the holder is the most recently active session across the session row and
+its claim heartbeats, with the session id as a deterministic tie-break. Every
+other session id found on the name is recorded in `agent_name_conflicts`; no
+claim is moved, reattributed or deleted. A refused registration must not leave
+the client or its chat poller on a name it cannot own, so `apps/mcp` records its
+name only after the server accepts it and restores the previous identity when a
+rename or registration is refused.
+
 Kill is a removal, not a tombstone. The name leaves the roster, profile, hidden
 set, claim tables and chat notification state, and one server-side
 `agent_removals` audit row records who removed it and how many claims were
