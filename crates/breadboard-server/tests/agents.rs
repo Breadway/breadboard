@@ -745,7 +745,7 @@ async fn roster_unions_sessions_profiles_and_claims() {
         .await
         .unwrap();
     assert_eq!(reg["agent_name"], "brioche-bridge");
-    assert_eq!(reg["killed"], false);
+    assert_eq!(reg["paused"], false);
 
     // A profile with no session and no claim (historical agent).
     sqlx::query(
@@ -893,9 +893,11 @@ async fn register_assigns_curated_names_with_alternatives() {
     assert!(!explicit["alternatives"].as_array().unwrap().is_empty());
 }
 
-/// Kill releases every claim, blocks writes, is idempotent, and revives.
+/// Kill removes the agent completely: claims released, roster row, profile and
+/// hidden flag gone, and the name immediately reusable. Unknown names 404
+/// without creating the phantom row from BB-145.
 #[tokio::test]
-async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
+async fn kill_removes_agent_frees_name_and_unknown_is_404() {
     let app = tu::spawn().await;
     let c = reqwest::Client::new();
     let base = format!("http://{}", app.addr);
@@ -916,7 +918,7 @@ async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
         .await
         .unwrap();
 
-    let killed: Value = c
+    let removed: Value = c
         .post(format!("{base}/api/agents/victim/kill"))
         .header("authorization", &auth)
         .send()
@@ -925,12 +927,12 @@ async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
         .json()
         .await
         .unwrap();
-    assert_eq!(killed["killed"], true);
-    assert_eq!(killed["status"], "killed");
-    assert_eq!(killed["killed_by_login"], "tester");
-    assert_eq!(killed["claim_count"], 0);
+    assert_eq!(removed["agent_name"], "victim");
+    assert_eq!(removed["removed"], true);
+    assert_eq!(removed["claims_released"], 1);
+    assert_eq!(removed["profile_removed"], true);
 
-    // Claims are gone.
+    // Claims and every roster source are gone.
     let claims: Value = c
         .get(format!("{base}/api/agents"))
         .header("authorization", &auth)
@@ -941,68 +943,78 @@ async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(claims.as_array().unwrap().len(), 0);
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["agent_name"] != "victim"),
+        "removed agent still on roster: {roster}"
+    );
+    let profile_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_profiles WHERE agent_name = 'victim'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(profile_count, 0);
 
-    // Second kill is a no-op and keeps the original killer.
-    let again: Value = c
+    // Kill is no longer idempotent: the name is gone, so a second call is 404.
+    let again = c
         .post(format!("{base}/api/agents/victim/kill"))
         .header("authorization", &auth)
         .send()
         .await
+        .unwrap();
+    assert_eq!(again.status(), 404);
+
+    // Unknown names are 404 and never create a phantom roster row (BB-145).
+    let before = roster.as_array().unwrap().len();
+    let unknown = c
+        .post(format!("{base}/api/agents/no-such-agent-zz/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), 404);
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(again["killed"], true);
-    assert_eq!(again["killed_by_login"], "tester");
-    assert_eq!(again["killed_at"], killed["killed_at"]);
+    assert_eq!(roster.as_array().unwrap().len(), before);
+    assert!(roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|row| row["agent_name"] != "no-such-agent-zz"));
 
-    // The next agent-scoped writes are refused with a clear message.
-    let blocked_claim = c
-        .post(format!("{base}/api/issues/{key}/claim"))
-        .header("authorization", &auth)
-        .json(&json!({ "agent_name": "victim" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(blocked_claim.status(), 403);
-    let body: Value = blocked_claim.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("killed"), "{body}");
-
-    let blocked_message = c
-        .put(format!("{base}/api/agents/message"))
-        .header("authorization", &auth)
-        .json(&json!({ "agent_name": "victim", "message": "still here" }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(blocked_message.status(), 403);
-
-    // Registration still refreshes the row, but does not revive it.
+    // The name is free: a fresh registration starts clean and can claim.
     let reg: Value = c
         .post(format!("{base}/api/agents/register"))
         .header("authorization", &auth)
-        .json(&json!({ "agent_name": "victim", "session_id": "ses_victim" }))
+        .json(&json!({ "agent_name": "victim", "session_id": "ses_victim_2" }))
         .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
-    assert_eq!(reg["killed"], true);
-
-    // Revive is idempotent and the name can claim again.
-    for _ in 0..2 {
-        let revived: Value = c
-            .post(format!("{base}/api/agents/victim/revive"))
-            .header("authorization", &auth)
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        assert_eq!(revived["killed"], false);
-    }
+    assert_eq!(reg["agent_name"], "victim");
+    assert_eq!(reg["paused"], false);
+    assert_eq!(reg["session_id"], "ses_victim_2");
     let reclaimed = c
         .post(format!("{base}/api/issues/{key}/claim"))
         .header("authorization", &auth)
@@ -1011,6 +1023,169 @@ async fn kill_releases_claims_blocks_writes_and_is_idempotent() {
         .await
         .unwrap();
     assert_eq!(reclaimed.status(), 201);
+}
+
+/// Pause keeps claims and the roster row, refuses new claims, suppresses chat
+/// pushes and survives registration; resume restores claiming.
+#[tokio::test]
+async fn pause_keeps_claims_blocks_new_work_and_resumes() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let first = create_issue(&c, &base, &auth, "paused work").await;
+    let first_key = first["key"].as_str().unwrap().to_string();
+    let second = create_issue(&c, &base, &auth, "new work").await;
+    let second_key = second["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/issues/{first_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "napper",
+            "session_id": "ses_napper",
+            "message": "halfway through"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let paused: Value = c
+        .post(format!("{base}/api/agents/napper/pause"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(paused["paused"], true);
+    assert_eq!(paused["status"], "paused");
+    assert_eq!(paused["live"], false);
+    assert_eq!(paused["paused_by_login"], "tester");
+    assert_eq!(paused["claim_count"], 1);
+
+    // The claim survives and the roster still shows the paused agent.
+    let claims: Value = c
+        .get(format!("{base}/api/agents"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(claims.as_array().unwrap().len(), 1);
+    assert_eq!(claims[0]["agent_name"], "napper");
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paused_row = roster_row(&roster, "napper");
+    assert_eq!(paused_row["status"], "paused");
+    assert_eq!(paused_row["paused"], true);
+    assert_eq!(paused_row["claim_count"], 1);
+
+    // A new claim is refused with the pause reason.
+    let blocked = c
+        .post(format!("{base}/api/issues/{second_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "napper" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 403);
+    let body: Value = blocked.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("paused"), "{body}");
+
+    // Chat pushes are suppressed while paused. A DM from another agent would
+    // normally push to napper, but pause drops it.
+    c.post(format!("{base}/api/chat/messages"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "sender", "to": "napper", "body": "wake up" }))
+        .send()
+        .await
+        .unwrap();
+    let pushes: Value = c
+        .get(format!("{base}/api/chat/pushes?agent=napper"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pushes.as_array().unwrap().len(), 0);
+
+    // Registration refreshes the session but does not unpause it.
+    let reg: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "napper", "session_id": "ses_napper" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reg["paused"], true);
+
+    // Resume is idempotent and restores claiming.
+    for _ in 0..2 {
+        let resumed: Value = c
+            .post(format!("{base}/api/agents/napper/resume"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(resumed["paused"], false);
+    }
+    let claimed = c
+        .post(format!("{base}/api/issues/{second_key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "napper" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(), 201);
+}
+
+/// Pausing or resuming an unknown name is 404, not a phantom row.
+#[tokio::test]
+async fn pause_and_resume_unknown_are_404() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    for action in ["pause", "resume"] {
+        let resp = c
+            .post(format!("{base}/api/agents/no-such-agent-zz/{action}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404, "{action}");
+    }
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(roster.as_array().unwrap().len(), 0);
 }
 
 /// A rename before claims is free; after claims it moves the claims, profile
@@ -1122,23 +1297,40 @@ async fn rename_moves_claims_and_profile_or_refuses() {
     assert_eq!(conflict.status(), 409);
 }
 
-/// Killing publishes `agent.killed` on the SSE stream.
+/// Killing publishes `agent.removed`; pausing publishes `agent.paused`.
 #[tokio::test]
-async fn kill_publishes_event() {
+async fn removal_and_pause_publish_events() {
     let app = tu::spawn().await;
     let c = reqwest::Client::new();
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);
 
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "event-target", "session_id": "ses_event" }))
+        .send()
+        .await
+        .unwrap();
+
     let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
+    c.post(format!("{base}/api/agents/event-target/pause"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let event = events.next_event().await;
+    assert_eq!(event["type"], "agent.paused");
+    assert_eq!(event["agent"], "event-target");
+
     c.post(format!("{base}/api/agents/event-target/kill"))
         .header("authorization", &auth)
         .send()
         .await
         .unwrap();
     let event = events.next_event().await;
-    assert_eq!(event["type"], "agent.killed");
+    assert_eq!(event["type"], "agent.removed");
     assert_eq!(event["agent"], "event-target");
+    assert_eq!(event["claims_released"], 0);
 }
 
 /// Hiding is a server-side display flag, not a delete. Claims stay, the flag
@@ -1481,11 +1673,18 @@ async fn hiding_or_killing_child_leaves_orchestrator_alone() {
         .await
         .unwrap();
     let roster = get_roster(&c, &base, &auth).await;
-    assert_eq!(roster_row(&roster, "child-agent")["killed"], true);
-    assert_eq!(roster_row(&roster, "parent-orch")["killed"], false);
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["agent_name"] != "child-agent"),
+        "removed child still on roster: {roster}"
+    );
+    assert_eq!(roster_row(&roster, "parent-orch")["paused"], false);
     assert_eq!(
-        roster_row(&roster, "child-agent")["orchestrator"],
-        "parent-orch"
+        roster_row(&roster, "parent-orch")["orchestrator"],
+        serde_json::Value::Null
     );
 }
 
