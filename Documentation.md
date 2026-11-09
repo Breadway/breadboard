@@ -87,6 +87,13 @@ release) removes it. Claim, state, PR and release transitions are appended to
 the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
 `agent_release`; routine heartbeats that change nothing are not logged.
 
+The Agents modal also shows a per-agent timeline (`GET
+/api/agents/{name}/events`): typed `registered`, `claimed`, `released`,
+`state_change`, `paused`, `removed`, `pr_opened`, `pr_merged` and `chat_sent`
+rows with filters, paging and links back to the issue, PR or chat message.
+`ci_result` and `handoff` are accepted by the API but have no source yet, so
+the panel does not offer filters that could only ever be empty.
+
 ### Agent ownership and orchestration
 
 Ownership is per issue, not per agent: one agent may hold many exclusive
@@ -265,6 +272,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share |
 | `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global spend warning threshold. `0` disables the warning; cost above zero then reports `over_threshold: false` |
 | `POST` | `/api/usage/import` | import now. Body `{ path? }`; defaults to `usage.opencode_db`. Returns `{ path, sessions, rows, skipped_sessions }`. Importing the same session again replaces its rows, so totals never double count. A missing database file is a `500`; no configured path is a `400` |
+| `GET` | `/api/agents/{name}/events` | per-agent activity timeline, newest first: `{ events[], has_more, next_before }`; each event is `{ id, agent_name, kind, issue_id?, issue_key?, pr_url?, pr_number?, room_id?, message_id?, summary, detail?, actor?, at }`. `kind` is `registered`, `claimed`, `released`, `state_change`, `paused`, `removed`, `pr_opened`, `pr_merged`, `ci_result`, `chat_sent` or `handoff`. Filter with a comma-separated `kind`, bound with RFC 3339 `since` / `until`, and page with `limit` (1-200, default 50) plus `before` from the previous page's `next_before`. Rows are written where the action happens and retained for 90 days; a kind whose action does not exist yet simply has no rows |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |

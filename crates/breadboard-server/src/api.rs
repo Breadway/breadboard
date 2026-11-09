@@ -1786,7 +1786,7 @@ pub async fn release_claim(
     let issue = store::get_issue_by_key(&app.db, &key).await?;
     let claim =
         resolve_own_claim(&app, issue.id, user.0.id, q.agent.as_deref(), q.mode, None).await?;
-    store::delete_claim_by_id(&app.db, claim.id).await?;
+    store::delete_claim_by_id(&app.db, claim.id, Some(user.0.id)).await?;
     let _ = store::log_claim_event(
         &app.db,
         issue.id,
@@ -1823,7 +1823,7 @@ pub async fn release_claim_by_id(
     if claim.claimed_by != user.0.id {
         return Err(crate::error::AppError::forbidden());
     }
-    store::delete_claim_by_id(&app.db, id).await?;
+    store::delete_claim_by_id(&app.db, id, Some(user.0.id)).await?;
     let _ = store::log_claim_event(
         &app.db,
         claim.issue_id,
