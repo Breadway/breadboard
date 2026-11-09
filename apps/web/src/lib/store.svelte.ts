@@ -564,13 +564,16 @@ class Store {
     }
   }
 
-  /** Kill an agent: releases every claim and blocks further writes. */
+  /** Kill an agent: removes it from the roster, every view and its name. */
   async killAgent(name: string): Promise<boolean> {
     try {
-      const entry = await api.killAgent(name);
-      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
-      this.agents = this.agents.filter((a) => a.agent_name.toLowerCase() !== entry.agent_name);
-      this.info(`Killed ${entry.agent_name}; claims released and writes blocked`);
+      const removal = await api.killAgent(name);
+      this.roster = this.roster.filter((r) => r.agent_name !== removal.agent_name);
+      this.agents = this.agents.filter((a) => a.agent_name.toLowerCase() !== removal.agent_name);
+      const claims = removal.claims_released
+        ? `; released ${removal.claims_released} claim${removal.claims_released === 1 ? "" : "s"}`
+        : "";
+      this.info(`Removed ${removal.agent_name}${claims}`);
       return true;
     } catch (e) {
       this.flash(`Couldn't kill ${name}: ${errMsg(e)}`);
@@ -578,14 +581,27 @@ class Store {
     }
   }
 
-  async reviveAgent(name: string): Promise<boolean> {
+  /** Pause: keeps claims and the roster row, blocks new claims and chat wakeups. */
+  async pauseAgent(name: string): Promise<boolean> {
     try {
-      const entry = await api.reviveAgent(name);
+      const entry = await api.pauseAgent(name);
       this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
-      this.info(`Revived ${entry.agent_name}`);
+      this.info(`Paused ${entry.agent_name}; claims kept, new claims blocked`);
       return true;
     } catch (e) {
-      this.flash(`Couldn't revive ${name}: ${errMsg(e)}`);
+      this.flash(`Couldn't pause ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  async resumeAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.resumeAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.info(`Resumed ${entry.agent_name}`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't resume ${name}: ${errMsg(e)}`);
       return false;
     }
   }
@@ -767,8 +783,9 @@ class Store {
         void this.loadAgents();
         this.issueTick = { key: ev.key, n: this.issueTick.n + 1 };
         break;
-      case "agent.killed":
-      case "agent.revived":
+      case "agent.removed":
+      case "agent.paused":
+      case "agent.resumed":
       case "agent.hidden":
       case "agent.unhidden":
         void this.loadAgents();

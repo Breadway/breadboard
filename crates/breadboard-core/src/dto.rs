@@ -493,7 +493,8 @@ pub struct AgentRegistration {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<String>,
     pub live: bool,
-    pub killed: bool,
+    /// Paused agents stay registered but cannot claim new work.
+    pub paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,10 +529,12 @@ pub struct AgentRosterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<chrono::DateTime<chrono::Utc>>,
     /// True only for a heartbeat inside the last 120 seconds on a name that is
-    /// not killed.
+    /// not paused.
     pub live: bool,
-    pub killed: bool,
-    /// `live`, `stale` or `killed`.
+    /// Paused agents keep their claims and stay on the roster, but cannot
+    /// claim new work and are not woken by chat pushes.
+    pub paused: bool,
+    /// `live`, `stale` or `paused`.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -545,11 +548,11 @@ pub struct AgentRosterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub killed_by: Option<i64>,
+    pub paused_by: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub killed_by_login: Option<String>,
+    pub paused_by_login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub killed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub paused_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Hidden from the default Agents view. Claims and chat identity remain.
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -568,6 +571,16 @@ pub struct AgentRosterEntry {
     /// resolution succeeded).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator_session_id: Option<String>,
+}
+
+/// `POST /api/agents/{name}/kill` response. Kill removes the name instead of
+/// leaving a killed roster row, so there is no roster entry to return.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentRemoval {
+    pub agent_name: String,
+    pub removed: bool,
+    pub claims_released: i64,
+    pub profile_removed: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
