@@ -109,6 +109,17 @@ pub enum BoardEvent {
     /// A shared room or DM was deleted; clients refetch the room list.
     #[serde(rename = "chat.room.deleted")]
     ChatRoomDeleted { id: i64 },
+    /// A review request was created, changed state, or escalated. Clients
+    /// refetch the issue's review panel and, for `reviewer`, its queue.
+    #[serde(rename = "review.updated")]
+    ReviewUpdated {
+        id: i64,
+        issue_id: i64,
+        key: String,
+        reviewer: String,
+        state: String,
+        escalated: bool,
+    },
 }
 
 impl BoardEvent {
@@ -133,6 +144,7 @@ impl BoardEvent {
             BoardEvent::AgentUnhidden { .. } => "bread.board.agent.unhidden",
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
             BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
+            BoardEvent::ReviewUpdated { .. } => "bread.board.review.updated",
         }
     }
 }

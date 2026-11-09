@@ -179,6 +179,10 @@ class Store {
   // knows to refetch its comments and activity.
   issueTick = $state<{ key: string; n: number }>({ key: "", n: 0 });
 
+  // Bumped whenever a review record changes, so an issue's review panel and a
+  // reviewer's queue both refetch without a full board reload.
+  reviewTick = $state(0);
+
   // UI state
   view = $state<View>("board");
   selectedKey = $state<string | null>(null);
@@ -792,6 +796,9 @@ class Store {
         this.agents[idx] = claim;
         break;
       }
+      case "review.updated":
+        this.reviewTick++;
+        break;
       case "chat.message":
         this.chatRoom = ev.room_id;
         this.chatTick++;

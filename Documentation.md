@@ -203,6 +203,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. The local row is committed and returned `201` without waiting for Forgejo; `x-breadboard-writeback: pending` means a background writeback was scheduled (a failed one retries on the next reconcile pass), `none` means the project is not mapped to an enabled repo |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
+| `GET` | `/api/issues/{key}/reviews` | review requests for the issue, newest first, joined with `issue_key`, `issue_title`, `issue_status` |
+| `POST` | `/api/issues/{key}/reviews` | `{ reviewer, reviewer_kind?, pr_url?, pr_number?, pr_repo?, note? }`: file a request against an issue and the PR under review. At least one of `pr_url` / `pr_number` is required. `reviewer` is a human login or an agent name; the kind is inferred when omitted and both kinds share one table. The reviewer gets a `review` notification (human) or a DM push (agent). One active request per issue/reviewer; a duplicate is `409`. `201` |
+| `GET` | `/api/reviews` | review queue. `?reviewer=` returns that human/agent reviewer's records, `?outstanding=true` limits it to unresolved requests; `?issue=` returns one issue's requests; neither returns every outstanding request. `limit` caps the unfiltered list at 500 |
+| `PATCH` | `/api/reviews/{id}` | `{ state, note?, agent_name? }`: record `accepted`, `changes_requested` or `approved`. `agent_name` is the identity check for an agent reviewer using a shared human session. Only the requester or the named reviewer may update. An approved request is terminal. Emits `review.updated`; an outcome notifies the requester |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -246,6 +250,27 @@ issues. Markdown imports use the same issue-creation rule.
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,
 `cycle_id` accept `null` to clear. `labels` and `links` replace the whole set.
 
+### Review requests
+
+A review request is a record, not a chat message. It ties one issue and the PR
+under review to one reviewer, with states `requested`, `accepted`,
+`changes_requested` and `approved`. Humans and agents use the same rows; only
+the notification path differs (the bell for a human, the existing chat DM push
+for an agent). Requests render on the issue and in the reviewer's queue.
+
+`approved` is the only resolving state. While any request on an issue is
+`requested`, `accepted` or `changes_requested`:
+
+- `PATCH /api/issues/{key}` with `status: "done"` returns `409` naming the
+  reviewer. The same check holds back the merged-PR cascade, which leaves the
+  card in review instead of completing it.
+- The request may still be reworked, accepted or escalated.
+
+A request that has not changed state for 60 minutes is escalated once
+(`escalated_at`), notifying the reviewer and the requester. A later state
+change clears the escalation so a new stall can escalate again. `review.updated`
+carries the change to connected clients.
+
 ### Device auth (CLI/TUI)
 
 | Method | Path | Notes |
@@ -265,7 +290,9 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET`/`PUT` | `/api/notifications/prefs` | `{ assigned, mention, cycle, digest }` bools |
 
 Generated on: an issue assigned to you (not by you), an `@login` mention in a
-comment or description, and a cycle you have assigned issues in starting/ending.
+comment or description, a cycle you have assigned issues in starting/ending, and
+a review request or outcome (`kind: "review"`; review notifications always
+deliver rather than using a preference toggle).
 A `notified` SSE event wakes the recipient's clients; the web app also raises a
 browser notification when permission is granted.
 
@@ -305,6 +332,7 @@ after reconnecting to recover missed changes.
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
 | `notified` | `bread.board.notified` | `user_id` (clients filter by their own id) |
+| `review.updated` | `bread.board.review.updated` | `id`, `issue_id`, `key`, `reviewer`, `state`, `escalated` |
 
 ---
 

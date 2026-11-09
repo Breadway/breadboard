@@ -591,3 +591,76 @@ pub struct IssueFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub offset: Option<u32>,
 }
+
+/// File a review request against an issue and the PR under review.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewReviewRequest {
+    /// Human login or agent name. Shared records, one field.
+    pub reviewer: String,
+    /// When omitted the server infers it from a known user, then a known
+    /// agent name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_kind: Option<crate::ReviewerKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_number: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl NewReviewRequest {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.reviewer)?;
+        if self.reviewer.trim().chars().count() > 120 {
+            return Err("reviewer must be 120 characters or fewer".into());
+        }
+        if self.pr_url.is_none() && self.pr_number.is_none() {
+            return Err("a review request needs a pr_url or pr_number".into());
+        }
+        if let Some(url) = &self.pr_url {
+            if !is_safe_http_url(url) {
+                return Err("pr_url must be an absolute http(s) URL".into());
+            }
+        }
+        if let Some(repo) = &self.pr_repo {
+            if !repo.contains('/') || repo.split('/').filter(|s| !s.is_empty()).count() != 2 {
+                return Err("pr_repo must be owner/name".into());
+            }
+        }
+        if let Some(note) = &self.note {
+            if note.chars().count() > 4000 {
+                return Err("note must be 4000 characters or fewer".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Record a review outcome. `agent_name` is optional identity for an agent
+/// reviewer using a human session; humans omit it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReviewRequestPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::ReviewState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+}
+
+impl ReviewRequestPatch {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.state.is_none() && self.note.is_none() {
+            return Err("nothing to update".into());
+        }
+        if let Some(note) = &self.note {
+            if note.chars().count() > 4000 {
+                return Err("note must be 4000 characters or fewer".into());
+            }
+        }
+        Ok(())
+    }
+}
