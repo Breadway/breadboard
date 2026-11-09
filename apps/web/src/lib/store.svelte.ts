@@ -182,6 +182,9 @@ class Store {
   // UI state
   view = $state<View>("board");
   selectedKey = $state<string | null>(null);
+  /** Set by the agent activity panel, consumed and cleared by Chat: open this
+   *  room and scroll to this message (when present). */
+  chatFocus = $state<{ room: number; message: number | null } | null>(null);
   paletteOpen = $state(false);
   paletteStatus = $state<Status | null>(null);
   /** Every facet is multi-select; facets combine with AND, values within a

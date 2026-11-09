@@ -10,6 +10,7 @@
   import { ago, claimStale, store, statusName } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import Ring from "./ui/Ring.svelte";
+  import ActivityPanel from "./ActivityPanel.svelte";
   import { agentColor } from "./ui/colors";
 
   // Tick every 15s so relative heartbeats and stale badges age live; SSE
@@ -254,6 +255,13 @@
 
   function openIssue(key: string) {
     store.selectedKey = key;
+    openAgentId = null;
+  }
+
+  // The activity panel links chat entries back to the room and message.
+  function openActivityChat(room: number, message: number | null) {
+    store.view = "chat";
+    store.chatFocus = { room, message };
     openAgentId = null;
   }
 
@@ -697,6 +705,7 @@
         {:else}
           <div class="no-claims">No claims. This is an idle session on the roster.</div>
         {/if}
+        <ActivityPanel agent={selected.name} onOpenIssue={openIssue} onOpenChat={openActivityChat} />
       </div>
     </div>
   </div>

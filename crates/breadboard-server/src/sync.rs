@@ -154,10 +154,12 @@ fn parse_closes_key_refs(text: &str, project_key: &str) -> Vec<i64> {
 /// - Non-PR issues continue to mirror close/reopen to done/todo as before.
 ///
 /// Idempotent and safe to call on every PR sync.
+#[allow(clippy::too_many_arguments)]
 async fn sync_pr_closes(
     state: &AppState,
     repo: &str,
     pr_issue_id: i64,
+    pr_number: i64,
     body: &str,
     pr_closed: bool,
     pr_merged: bool,
@@ -227,12 +229,20 @@ async fn sync_pr_closes(
         .await
         {
             Ok(Some(updated)) => updated,
-            Ok(None) => continue,
+            Ok(None) => {
+                if pr_merged && just_closed {
+                    emit_pr_merged(state, repo, pr_number, &target).await;
+                }
+                continue;
+            }
             Err(e) => {
                 tracing::warn!(key = %target.key, error = %e, "cascading PR close failed; a later sync will heal it");
                 continue;
             }
         };
+        if pr_merged && just_closed {
+            emit_pr_merged(state, repo, pr_number, &target).await;
+        }
         emit_change_events(state, &target, &updated);
         let Some(fref) = &updated.forgejo_ref else {
             continue;
@@ -262,6 +272,36 @@ async fn sync_pr_closes(
                 tracing::warn!(key = %updated.key, error = %e, "cascaded status writeback to forgejo failed");
             }
         }
+    }
+}
+
+/// Record one `pr_merged` entry per agent claim on a PR target. The merge is
+/// already observed by the sync pass; this writes the timeline row at that
+/// point instead of inferring merges later.
+async fn emit_pr_merged(state: &AppState, repo: &str, pr_number: i64, target: &Issue) {
+    let url = format!(
+        "{}/{repo}/pulls/{pr_number}",
+        state.config.forgejo.base_url.trim_end_matches('/')
+    );
+    let claims = match store::list_issue_claims(&state.db, target.id).await {
+        Ok(claims) => claims,
+        Err(error) => {
+            tracing::warn!(key = %target.key, %error, "could not list claims for merge event");
+            return;
+        }
+    };
+    for claim in claims {
+        crate::agent_events::record_best_effort(
+            &state.db,
+            crate::agent_events::AgentEventInsert::new(
+                &claim.agent_name,
+                breadboard_core::AgentEventKind::PrMerged,
+            )
+            .issue(target.id, &target.key)
+            .pr(Some(&url), Some(pr_number))
+            .summary(format!("Merged {url}")),
+        )
+        .await;
     }
 }
 
@@ -331,6 +371,7 @@ pub async fn apply_issue(
                 state,
                 repo,
                 issue.id,
+                fg.number,
                 &fg.body,
                 fg.is_closed(),
                 fg.is_merged(),
@@ -468,6 +509,7 @@ pub async fn apply_issue(
                 state,
                 repo,
                 before.id,
+                fg.number,
                 &before.body,
                 fg.is_closed(),
                 fg.is_merged(),
@@ -490,6 +532,7 @@ pub async fn apply_issue(
             state,
             repo,
             after.id,
+            fg.number,
             &after.body,
             after.status == Status::Done,
             fg.is_merged(),

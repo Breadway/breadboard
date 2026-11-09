@@ -8,7 +8,9 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use anyhow::Context;
-use breadboard_server::{auth, config::Config, db, http, notify, store, sync, AppState};
+use breadboard_server::{
+    agent_events, auth, config::Config, db, http, notify, store, sync, AppState,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -67,6 +69,12 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::info!("forgejo.api_token unset: sync disabled");
     }
+
+    agent_events::spawn_pruner(state.clone());
+    tracing::info!(
+        retain_days = agent_events::AGENT_EVENT_RETENTION_DAYS,
+        "agent event retention loop started"
+    );
 
     if state.config.notifications.daily_digest {
         notify::spawn_daily_digest(state.clone());

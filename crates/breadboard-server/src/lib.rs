@@ -1,6 +1,7 @@
 //! breadboard API server as a library, so integration tests and (later) an
 //! embedded mode can build the router without the binary.
 
+pub mod agent_events;
 pub mod api;
 pub mod auth;
 pub mod bus;

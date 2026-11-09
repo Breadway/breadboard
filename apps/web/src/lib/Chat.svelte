@@ -415,6 +415,21 @@
     scheduleReload();
   });
 
+  // Deep link from the agent activity panel: open the linked room, then
+  // scroll to the linked message once it has rendered.
+  $effect(() => {
+    const target = store.chatFocus;
+    if (!target) return;
+    store.chatFocus = null;
+    pick(target.room);
+    if (target.message == null) return;
+    void tick().then(() => {
+      document
+        .getElementById(`bb-msg-${target.message}`)
+        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+    });
+  });
+
   // Keep the newest message in view.
   $effect(() => {
     void messages.length;
@@ -533,7 +548,7 @@
               <div class="sbody">{m.body}</div>
             </div>
           {:else}
-            <div class="msg" class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
+            <div class="msg" id={`bb-msg-${m.id}`} class:me={m.author_member === `human:${store.me?.login?.toLowerCase()}`}>
               <span class="who" style="--tint:{m.author_kind === 'agent' ? agentColor(m.author_display) : 'var(--accent)'}">
                 {m.author_display}
                 {#if m.author_kind === "human"}<span class="tag">human</span>{/if}

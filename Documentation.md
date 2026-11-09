@@ -84,6 +84,12 @@ release) removes it. Claim, state, PR and release transitions are appended to
 the issue's activity timeline as `agent_claim`, `agent_state`, `agent_pr` and
 `agent_release`; routine heartbeats that change nothing are not logged.
 
+The Agents modal also shows a per-agent timeline (`GET
+/api/agents/{name}/events`): typed `registered`, `claimed`, `released`,
+`state_change`, `pr_opened`, `pr_merged` and `chat_sent` rows (plus `paused`,
+`removed`, `ci_result` and `handoff` for the actions that produce them) with
+filters, paging and links back to the issue, PR or chat message.
+
 ### Agent ownership and orchestration
 
 Ownership is per issue, not per agent: one agent may hold many exclusive
@@ -235,6 +241,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
+| `GET` | `/api/agents/{name}/events` | per-agent activity timeline, newest first: `{ events[], has_more, next_before }`; each event is `{ id, agent_name, kind, issue_id?, issue_key?, pr_url?, pr_number?, room_id?, message_id?, summary, detail?, actor?, at }`. `kind` is `registered`, `claimed`, `released`, `state_change`, `paused`, `removed`, `pr_opened`, `pr_merged`, `ci_result`, `chat_sent` or `handoff`. Filter with a comma-separated `kind`, bound with RFC 3339 `since` / `until`, and page with `limit` (1-200, default 50) plus `before` from the previous page's `next_before`. Rows are written where the action happens and retained for 90 days; a kind whose action does not exist yet simply has no rows |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
