@@ -10,6 +10,7 @@
   import { ago, claimStale, store, statusName } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import Ring from "./ui/Ring.svelte";
+  import UsageStats from "./UsageStats.svelte";
   import ActivityPanel from "./ActivityPanel.svelte";
   import { agentColor } from "./ui/colors";
 
@@ -1028,6 +1029,8 @@
           </div>
         {/if}
       </div>
+
+      <UsageStats agent={selected.name} settingsEnabled />
 
       <div class="mbody">
         {#if selected.claims.length}

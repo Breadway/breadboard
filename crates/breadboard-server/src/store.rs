@@ -2207,6 +2207,18 @@ pub async fn insert_claim(
     let mode = input.mode.unwrap_or(ClaimMode::Exclusive);
     let ts = now_rfc3339();
     let state = input.state.unwrap_or(AgentState::Implementing);
+    // Usage stats: a claim without a session id cannot be tied to the tokens a
+    // session spent on it. If the caller did not send one, reuse the session id
+    // this agent already registered on the roster.
+    let session_id = match input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => Some(id.to_string()),
+        None => crate::usage::session_for_agent(db, claimed_by, &input.agent_name).await?,
+    };
 
     if mode == ClaimMode::Exclusive && has_exclusive_claim(db, issue.id).await? {
         return Err(AppError::Conflict("issue is already claimed".into()));
@@ -2243,7 +2255,7 @@ pub async fn insert_claim(
             let upd = crate::dto::ClaimUpdate {
                 agent_name: Some(input.agent_name.trim().to_string()),
                 state: input.state,
-                session_id: input.session_id.clone().map(Some),
+                session_id: session_id.clone().map(Some),
                 note: input.note.clone().map(Some),
                 branch: input.branch.clone().map(Some),
                 worktree: input.worktree.clone().map(Some),
@@ -2254,6 +2266,7 @@ pub async fn insert_claim(
                 message: input.message.clone().map(Some),
             };
             let claim = update_claim_row(db, id, &upd, &ts).await?;
+            crate::usage::link_session_issue(db, session_id.as_deref(), issue.id).await?;
             return Ok(claim);
         }
     }
@@ -2268,7 +2281,7 @@ pub async fn insert_claim(
     .bind(claimed_by)
     .bind(input.agent_name.trim().to_lowercase())
     .bind(mode.as_str())
-    .bind(input.session_id.clone())
+    .bind(session_id.clone())
     .bind(state.as_str())
     .bind(input.note.clone())
     .bind(input.branch.clone())
@@ -2294,6 +2307,7 @@ pub async fn insert_claim(
                 )
                 .await?;
             }
+            crate::usage::link_session_issue(db, session_id.as_deref(), issue.id).await?;
             let claim = get_claim_by_id(db, done.last_insert_rowid())
                 .await?
                 .ok_or(AppError::NotFound)?;
@@ -2348,7 +2362,7 @@ pub async fn insert_claim(
                     let upd = crate::dto::ClaimUpdate {
                         agent_name: Some(input.agent_name.trim().to_string()),
                         state: input.state,
-                        session_id: input.session_id.clone().map(Some),
+                        session_id: session_id.clone().map(Some),
                         note: input.note.clone().map(Some),
                         branch: input.branch.clone().map(Some),
                         worktree: input.worktree.clone().map(Some),
@@ -2358,6 +2372,7 @@ pub async fn insert_claim(
                         head_sha: input.head_sha.clone().map(Some),
                         message: input.message.clone().map(Some),
                     };
+                    crate::usage::link_session_issue(db, session_id.as_deref(), issue.id).await?;
                     return update_claim_row(db, id, &upd, &ts).await;
                 }
             }

@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, artifacts, auth, device, reviews, webhook, AppState};
+use crate::{api, artifacts, auth, device, reviews, usage, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -89,6 +89,16 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{name}/hide", post(api::hide_agent))
         .route("/agents/{name}/unhide", post(api::unhide_agent))
         .route("/agents/{name}/rename", post(api::rename_agent))
+        // Usage stats: imported from OpenCode's session store, grouped per
+        // agent or per issue claim. Additive block; unrelated routes above.
+        .route("/usage/agents", get(usage::list_agent_usage))
+        .route("/usage/agents/{name}", get(usage::get_agent_usage))
+        .route("/usage/issues/{key}", get(usage::get_issue_usage))
+        .route(
+            "/usage/settings",
+            get(usage::get_settings).put(usage::put_settings),
+        )
+        .route("/usage/import", post(usage::import_now))
         .merge(crate::agent_events::routes())
         .route(
             "/chat/rooms",

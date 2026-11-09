@@ -18,6 +18,7 @@
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
+  import UsageStats from "./UsageStats.svelte";
   import Artifacts from "./Artifacts.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
   import ReviewPanel from "./ReviewPanel.svelte";
@@ -570,6 +571,8 @@
         </section>
 
         <ReviewPanel issueKey={issue.key} />
+
+        <UsageStats issueKey={issue.key} compact />
 
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>

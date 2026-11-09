@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use breadboard_server::{
-    agent_events, auth, config::Config, db, http, notify, reviews, store, sync, AppState,
+    agent_events, auth, config::Config, db, http, notify, reviews, store, sync, usage, AppState,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -94,6 +94,16 @@ async fn main() -> anyhow::Result<()> {
         threshold_mins = reviews::REVIEW_ESCALATION_SECS / 60,
         "review escalation loop started"
     );
+
+    if state.config.usage.opencode_db.is_some() {
+        usage::spawn_importer(state.clone());
+        tracing::info!(
+            interval_mins = state.config.usage.import_interval_mins,
+            "usage importer started"
+        );
+    } else {
+        tracing::info!("usage.opencode_db unset: token stats disabled");
+    }
 
     let shutdown = state.shutdown.clone();
     let app = http::router(state);
