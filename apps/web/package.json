@@ -11,6 +11,7 @@
     "test:artifacts": "node tests/artifacts.static.mjs",
     "test:agents": "node tests/agents-layout.browser.mjs",
     "test:links": "node tests/agents-links.browser.mjs",
+    "test:hierarchy": "node tests/agents-hierarchy.browser.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },
