@@ -190,10 +190,15 @@ fn draw(f: &mut Frame, app: &App) {
                 } else {
                     ""
                 };
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", i.key), Style::new().dim()),
-                    Span::raw(format!("{mark}{}", i.title)),
-                ]))
+                // Two lines per card: the key stays visible and the title gets
+                // its own line so long titles are not cut mid-word on a single
+                // crowded row. Anything wider than the column still clips
+                // horizontally; press Enter for the detail popup, which wraps
+                // and shows the full title.
+                ListItem::new(vec![
+                    Line::from(vec![Span::styled(i.key.clone(), Style::new().dim())]),
+                    Line::from(vec![Span::raw(format!("{mark}{}", i.title))]),
+                ])
             })
             .collect();
         let focused = idx == app.col;

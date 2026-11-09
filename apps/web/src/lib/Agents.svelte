@@ -256,7 +256,7 @@
     <StatusGlyph status={c.board_status} size={12} />
     <button class="key" onclick={() => openIssue(c.key)} title="Open {c.key}">{c.key}</button>
     {#if c.mode === "intent"}<span class="queued-pill">queued</span>{/if}
-    <span class="title">{c.issue_title}</span>
+    <span class="title" title={c.issue_title}>{c.issue_title}</span>
     <span class="state {c.state === 'blocked' || c.state === 'needs-user' ? 'bad' : c.state === 'done' ? 'ok' : c.state.startsWith('awaiting') || c.state === 'verifying' ? 'warn' : 'idle'}">
       {c.state.replace(/-/g, " ")}
     </span>

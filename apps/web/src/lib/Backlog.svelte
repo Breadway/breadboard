@@ -39,7 +39,7 @@
             <PriorityGlyph priority={issue.priority} />
             <span class="key"><i style="background:{projectColor(pkey)}"></i>{issue.key}</span>
             <StatusGlyph status={issue.status} />
-            <span class="t">{issue.title}</span>
+            <span class="t" title={issue.title}>{issue.title}</span>
             <span class="labs">
               {#each issue.labels.slice(0, 3) as l (l)}<span class="chip-label"><i style="background:{labelColor(l)}"></i>{l}</span>{/each}
             </span>

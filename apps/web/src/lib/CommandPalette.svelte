@@ -289,7 +289,7 @@
                 {@const i = store.issueByKey(item.key)}
                 {#if i}<StatusGlyph status={i.status} />{/if}
                 <span class="key">{item.key}</span>
-                <span class="t">{@html hl(i?.title ?? "")}</span>
+                <span class="t" title={i?.title ?? ""}>{@html hl(i?.title ?? "")}</span>
                 <span class="go">↵ open</span>
               {:else}
                 <span class="arrow">→</span>
