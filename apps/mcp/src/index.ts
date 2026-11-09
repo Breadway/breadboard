@@ -15,9 +15,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import {
   ApiError,
+  ARTIFACT_KINDS,
   BreadboardClient,
   STATUSES,
   PRIORITIES,
+  type ArtifactKind,
   type IssueFilter,
   type IssueLink,
   type IssuePatch,
@@ -545,6 +547,49 @@ server.tool(
 
 server.tool("activity", "An issue's change history.", { key: z.string() }, ({ key }) =>
   run(() => client.getActivity(key)),
+);
+
+server.tool(
+  "list_artifacts",
+  "List typed evidence attached to an issue (benches, screenshots, CI logs, diffs, traces). " +
+    "Each row shows the uploader agent and session id plus its expiry.",
+  { key: z.string().describe("issue key, e.g. BREAD-42") },
+  ({ key }) => run(() => client.listIssueArtifacts(key)),
+);
+
+server.tool(
+  "attach_artifact",
+  "Attach immutable evidence to an issue. Pass base64 data (raw or a data: URL). " +
+    "Kinds: bench, screenshot, ci-log, diff, trace, other. Limits: 10 MB for a screenshot, " +
+    "bench or other; 25 MB for a diff; 50 MB for a CI log or trace. Optionally tie it to a " +
+    "comment_id or a review_ref (review key or URL). The row records the agent name and " +
+    "session id that produced it.",
+  {
+    key: z.string().describe("issue key, e.g. BREAD-42"),
+    kind: z.enum(ARTIFACT_KINDS as [string, ...string[]]).describe("artifact kind"),
+    filename: z.string().describe("display filename, also used to infer the mime type"),
+    data_base64: z.string().describe("base64 file contents (raw or a data: URL)"),
+    mime: z.string().optional().describe("e.g. image/png or text/plain"),
+    comment_id: z.number().int().optional().describe("attach to this comment on the issue"),
+    review_ref: z
+      .string()
+      .optional()
+      .describe("review request key or URL this evidence belongs to"),
+    agent_name: z.string().optional().describe("agent name; defaults to this MCP session"),
+  },
+  ({ key, kind, filename, data_base64, mime, comment_id, review_ref, agent_name }) =>
+    run(() =>
+      client.uploadIssueArtifactBase64(key, {
+        kind: kind as ArtifactKind,
+        filename,
+        data_base64,
+        mime,
+        comment_id,
+        review_ref,
+        agent_name: chatAgent(agent_name),
+        session_id: SESSION_ID,
+      }),
+    ),
 );
 
 server.tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));

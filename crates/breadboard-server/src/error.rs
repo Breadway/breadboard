@@ -19,6 +19,10 @@ pub enum AppError {
     ForbiddenMsg(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("{0}")]
+    TooLarge(String),
+    #[error("expired")]
+    Expired,
     #[error("upstream: {0}")]
     Upstream(String),
     #[error(transparent)]
@@ -50,6 +54,8 @@ impl IntoResponse for AppError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden".to_string()),
             AppError::ForbiddenMsg(m) => (StatusCode::FORBIDDEN, m.clone()),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m.clone()),
+            AppError::TooLarge(m) => (StatusCode::PAYLOAD_TOO_LARGE, m.clone()),
+            AppError::Expired => (StatusCode::GONE, "expired".to_string()),
             AppError::Upstream(m) => (StatusCode::BAD_GATEWAY, m.clone()),
             AppError::Db(sqlx::Error::RowNotFound) => {
                 (StatusCode::NOT_FOUND, "not found".to_string())
