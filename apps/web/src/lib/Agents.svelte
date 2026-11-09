@@ -10,6 +10,7 @@
   import { ago, claimStale, store, statusName } from "./store.svelte";
   import StatusGlyph from "./ui/StatusGlyph.svelte";
   import Ring from "./ui/Ring.svelte";
+  import UsageStats from "./UsageStats.svelte";
   import { agentColor } from "./ui/colors";
 
   // Tick every 15s so relative heartbeats and stale badges age live; SSE
@@ -688,6 +689,8 @@
           </div>
         {/if}
       </div>
+
+      <UsageStats agent={selected.name} settingsEnabled />
 
       <div class="mbody">
         {#if selected.claims.length}

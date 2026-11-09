@@ -365,6 +365,70 @@ export interface AgentStatusSummary {
   claims: AgentClaim[];
 }
 
+/** Token and cost roll-up imported from OpenCode's session store. */
+export interface UsageTotals {
+  cost: number;
+  input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  session_count: number;
+}
+
+export interface UsageModelShare {
+  model: string;
+  provider?: string;
+  cost: number;
+  total_tokens: number;
+  /** Fraction of cost, or of tokens when no cost is recorded. */
+  share: number;
+}
+
+export interface UsageAgentShare {
+  agent_name: string;
+  cost: number;
+  total_tokens: number;
+  share: number;
+}
+
+export interface UsageSession {
+  session_id: string;
+  agent_name?: string;
+  cost: number;
+  total_tokens: number;
+  first_day: string;
+  last_day: string;
+  models: string[];
+}
+
+export interface UsageSummary extends UsageTotals {
+  subject: string;
+  kind: "agent" | "issue";
+  range: string;
+  from?: string;
+  to: string;
+  models: UsageModelShare[];
+  sessions: UsageSession[];
+  agents?: UsageAgentShare[];
+  spend_warn_usd: number;
+  over_threshold: boolean;
+}
+
+export interface UsageSettings {
+  spend_warn_usd: number;
+}
+
+export interface UsageImportReport {
+  path: string;
+  sessions: number;
+  rows: number;
+  skipped_sessions: number;
+}
+
+export type UsageRange = "24h" | "7d" | "30d" | "90d" | "all";
+
 /** `POST /api/agents/register`. Omit `agent_name` to ask the server for a
  *  curated name. */
 export interface AgentRegister {
@@ -605,6 +669,20 @@ export class BreadboardClient {
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/rename`, {
       new_name,
     });
+  listAgentUsage = (range: UsageRange = "7d") =>
+    this.req<UsageSummary[]>("GET", `/api/usage/agents?range=${range}`);
+  getAgentUsage = (name: string, range: UsageRange = "7d") =>
+    this.req<UsageSummary>(
+      "GET",
+      `/api/usage/agents/${encodeURIComponent(name)}?range=${range}`,
+    );
+  getIssueUsage = (key: string, range: UsageRange = "7d") =>
+    this.req<UsageSummary>("GET", `/api/usage/issues/${encodeURIComponent(key)}?range=${range}`);
+  getUsageSettings = () => this.req<UsageSettings>("GET", "/api/usage/settings");
+  setUsageSettings = (settings: UsageSettings) =>
+    this.req<UsageSettings>("PUT", "/api/usage/settings", settings);
+  importUsage = (path?: string) =>
+    this.req<UsageImportReport>("POST", "/api/usage/import", path ? { path } : {});
   claimIssue = (key: string, claim: ClaimUpsert) =>
     this.req<AgentClaim>("POST", `/api/issues/${key}/claim`, claim);
   heartbeatClaim = (key: string, update: ClaimUpdate, agent?: string) =>

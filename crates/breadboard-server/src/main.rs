@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use anyhow::Context;
-use breadboard_server::{auth, config::Config, db, http, notify, store, sync, AppState};
+use breadboard_server::{auth, config::Config, db, http, notify, store, sync, usage, AppState};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         "startup stage: database ready"
     );
     store::ensure_seed(&db).await?;
+    usage::ensure_settings(&db, config.usage.spend_warn_usd).await?;
     tracing::info!(
         elapsed_ms = elapsed_ms(started),
         "startup stage: seed checked"
@@ -74,6 +75,16 @@ async fn main() -> anyhow::Result<()> {
             hour = state.config.notifications.digest_hour,
             "daily digest job started"
         );
+    }
+
+    if state.config.usage.opencode_db.is_some() {
+        usage::spawn_importer(state.clone());
+        tracing::info!(
+            interval_mins = state.config.usage.import_interval_mins,
+            "usage importer started"
+        );
+    } else {
+        tracing::info!("usage.opencode_db unset: token stats disabled");
     }
 
     let shutdown = state.shutdown.clone();

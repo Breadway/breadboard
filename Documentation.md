@@ -235,12 +235,32 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
+| `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, models[], sessions[], spend_warn_usd, over_threshold }]`. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
+| `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, cost, tokens, models) |
+| `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share |
+| `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global spend warning threshold |
+| `POST` | `/api/usage/import` | import now. Body `{ path? }`; defaults to `usage.opencode_db`. Returns `{ path, sessions, rows, skipped_sessions }`. Importing the same session again replaces its rows, so totals never double count |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
 | `POST` | `/api/repos` | `{ repo: "owner/name", key, name? }`: maps the repo to a project (created if absent), enables sync, kicks an initial import. `201` |
 | `DELETE` | `/api/repos/{owner}/{name}` | disables sync for the repo (keeps imported data). `204` |
 | `POST` | `/api/sync/reconcile` | run a reconcile pass now (background). `202 { "ok": true }` |
 | `POST` | `/api/import` | `{ project, markdown, dry_run?, repair? }`: headings → epics, checklist items → issues (`[x]` creates closed/done remotely too); returns created/skipped entries, `remote_would_create[]`, and `pending_writebacks[]` (`key`, `error`). Ordinary imports mirror only cards created in that request. Set `repair: true` to retry existing unlinked matches; combine with `dry_run: true` to list local keys that would be created remotely without writing. Duplicate item titles in one outline and multiply-matched existing cards are rejected as ambiguous. |
 | `POST` | `/webhooks/forgejo` | inbound sync: **no session auth**; HMAC-SHA256 over the raw body in `X-Forgejo-Signature` (or `X-Gitea-Signature`), verified against `forgejo.webhook_secret`. Handles `issues` and `issue_comment` events for enabled repos; always `200` once authenticated (reconcile is the safety net); `401` on a bad signature |
+
+**Usage stats**: input is the SQLite database OpenCode writes on the machine
+running an agent (`session_v2` plus per-message rows in `session_message`). The
+importer reads it read-only, groups per session, model and UTC day, and resolves
+the breadboard agent name from the session id registered by
+`/api/agents/register` (falling back to a claim's session id). Configure the file
+with `usage.opencode_db`, `BREADBOARD_USAGE_OPENCODE_DB`, or the default
+`$XDG_DATA_HOME/opencode/opencode.db`; mount it read-only into the container to
+collect from that host. A missing file leaves the importer idle. Import runs every
+`usage.import_interval_mins` (default 5) and on demand through
+`/api/usage/import`. Cost is the value OpenCode reported for each assistant
+message, in USD. An issue totals the sessions recorded as touching it: claiming
+records a permanent session-to-issue link, so releasing the claim does not erase
+history. A claim without a session id inherits the session registered for that
+agent name.
 
 **IssuePatch**: every field optional; absent = unchanged. `title`, `body`,
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,

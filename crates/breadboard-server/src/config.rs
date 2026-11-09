@@ -30,6 +30,23 @@ pub struct Config {
     pub forgejo: ForgejoConfig,
     pub notifications: NotificationConfig,
     pub summary: SummaryConfig,
+    pub usage: UsageConfig,
+}
+
+/// Token/cost statistics imported from OpenCode's local session database.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct UsageConfig {
+    /// Path to the OpenCode SQLite database (`opencode.db`). Defaults to
+    /// `$XDG_DATA_HOME/opencode/opencode.db`. In the container this path is
+    /// absent unless the file (or a copy) is mounted in; the importer then
+    /// stays idle instead of failing.
+    pub opencode_db: Option<PathBuf>,
+    /// Minutes between import passes. Minimum 1.
+    pub import_interval_mins: u64,
+    /// Default spend warning threshold in USD. The stored setting wins once it
+    /// has been written.
+    pub spend_warn_usd: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -88,6 +105,7 @@ impl Default for Config {
             forgejo: ForgejoConfig::default(),
             notifications: NotificationConfig::default(),
             summary: SummaryConfig::default(),
+            usage: UsageConfig::default(),
         }
     }
 }
@@ -125,6 +143,22 @@ impl Default for NotificationConfig {
             digest_hour: 8,
         }
     }
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            opencode_db: default_opencode_db(),
+            import_interval_mins: 5,
+            spend_warn_usd: 5.0,
+        }
+    }
+}
+
+/// OpenCode's data directory on the machine running the agent. Missing in the
+/// container unless mounted; the importer treats absence as "nothing to do".
+fn default_opencode_db() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("opencode").join("opencode.db"))
 }
 
 impl Config {
@@ -191,6 +225,25 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_NOTIFICATIONS_DIGEST_HOUR") {
             if let Ok(n) = v.parse::<u8>() {
                 self.notifications.digest_hour = n.min(23);
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_OPENCODE_DB") {
+            self.usage.opencode_db = if v.trim().is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(v))
+            };
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_IMPORT_INTERVAL_MINS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.usage.import_interval_mins = n.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_SPEND_WARN_USD") {
+            if let Ok(n) = v.parse::<f64>() {
+                if n.is_finite() && n >= 0.0 {
+                    self.usage.spend_warn_usd = n;
+                }
             }
         }
     }

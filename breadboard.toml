@@ -22,3 +22,11 @@ bread_events = true            # emit bread.board.* via bread-emit when present
 breadbar     = true            # desktop notifications through breadbar
 daily_digest = false           # run the daily digest job (BREADBOARD_NOTIFICATIONS_DAILY_DIGEST)
 digest_hour  = 8               # local hour 0-23 to send it (BREADBOARD_NOTIFICATIONS_DIGEST_HOUR)
+
+[usage]
+# Token and cost stats imported from OpenCode's session database. Defaults to
+# $XDG_DATA_HOME/opencode/opencode.db. In the container, mount the file (or a
+# copy) in and point this at it; a missing file leaves the importer idle.
+# opencode_db          = "/home/breadway/.local/share/opencode/opencode.db"
+import_interval_mins = 5       # BREADBOARD_USAGE_IMPORT_INTERVAL_MINS
+spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; the stored setting wins

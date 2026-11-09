@@ -18,6 +18,7 @@
   import PriorityGlyph from "./ui/PriorityGlyph.svelte";
   import Avatar from "./ui/Avatar.svelte";
   import Ring from "./ui/Ring.svelte";
+  import UsageStats from "./UsageStats.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
 
   // The issue's fields come straight from the store, so a drag on the board,
@@ -566,6 +567,8 @@
             </div>
           {/if}
         </section>
+
+        <UsageStats issueKey={issue.key} compact />
 
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>

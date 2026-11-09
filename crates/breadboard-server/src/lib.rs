@@ -17,6 +17,7 @@ pub mod notify;
 pub mod store;
 pub mod summary;
 pub mod sync;
+pub mod usage;
 pub mod webhook;
 
 use std::collections::HashMap;
