@@ -20,6 +20,7 @@
   import Ring from "./ui/Ring.svelte";
   import UsageStats from "./UsageStats.svelte";
   import Artifacts from "./Artifacts.svelte";
+  import Commits from "./Commits.svelte";
   import { agentColor, labelColor, projectColor } from "./ui/colors";
   import ReviewPanel from "./ReviewPanel.svelte";
 
@@ -327,6 +328,7 @@
     agent_state: "agent state",
     agent_release: "agent release",
     agent_pr: "agent PR",
+    commit: "commit attribution",
   };
   // Activity stores raw column values; turn ids back into names.
   function val(field: string, v: string | null): string {
@@ -574,6 +576,8 @@
 
         <UsageStats issueKey={issue.key} compact />
 
+        <Commits issueKey={issue.key} />
+
         {#if selectedEpic?.description?.trim()}
           <p class="epic-desc"><span class="ek">{selectedEpic.key}</span> {selectedEpic.description}</p>
         {/if}
@@ -654,6 +658,8 @@
                 <div class="ev">
                   {#if e.a.field === "created"}
                     <b>{who(e.a)}</b> created this issue
+                  {:else if e.a.field === "commit"}
+                    <b>{who(e.a)}</b> recorded commit <em>{val(e.a.field, e.a.new_value)}</em>
                   {:else}
                     <b>{who(e.a)}</b> changed {FIELD[e.a.field] ?? e.a.field}
                     {#if e.a.old_value}from <em>{val(e.a.field, e.a.old_value)}</em>{/if}

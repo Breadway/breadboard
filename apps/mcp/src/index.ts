@@ -7,6 +7,7 @@
 //   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { dirname } from "node:path";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
@@ -222,6 +223,34 @@ async function run<T>(fn: () => Promise<T>) {
 void ensureRegistered().catch((e) => {
   console.error(`breadboard registration failed: ${e instanceof Error ? e.message : String(e)}`);
 });
+
+function runGit(args: string[], input?: string): string | undefined {
+  const result = spawnSync("git", args, {
+    input,
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 32 * 1024 * 1024,
+  });
+  if (result.error || result.status !== 0 || typeof result.stdout !== "string") return undefined;
+  return result.stdout.trim();
+}
+
+/** Expand a short or symbolic SHA using the local repo, when `workdir` is known. */
+function resolveCommitSha(workdir: string, sha: string): string {
+  const full = runGit(["-C", workdir, "rev-parse", "--verify", `${sha}^{commit}`]);
+  return full?.split(/\s+/)[0] || sha.trim();
+}
+
+function resolveTreeSha(workdir: string, sha: string): string | undefined {
+  return runGit(["-C", workdir, "rev-parse", `${sha}^{tree}`])?.split(/\s+/)[0];
+}
+
+/** `git patch-id --stable`: the same patch keeps this id across a rebase. */
+function resolvePatchId(workdir: string, sha: string): string | undefined {
+  const patch = runGit(["-C", workdir, "show", "--no-color", "--pretty=format:", sha]);
+  if (!patch) return undefined;
+  return runGit(["patch-id", "--stable"], patch)?.split(/\s+/)[0];
+}
 
 async function resolveEpicId(keyOrId?: string): Promise<number | undefined> {
   if (!keyOrId) return undefined;
@@ -591,6 +620,57 @@ server.tool(
         session_id: SESSION_ID,
       }),
     ),
+);
+
+server.tool(
+  "record_commit",
+  "Record which agent, session and model produced a commit. Call this right after committing a " +
+    "change for an issue, so a bug can be traced from issue to commit to model. The server resolves " +
+    "your agent and session from this MCP process and resolves the model from usage data for this " +
+    "exact session; it never guesses from whichever agent was last active. If this session used " +
+    "more than one model, pass model explicitly. Pass workdir (the local repo path) to fill commit " +
+    "tree_sha and patch_id from git, which lets a later rebase or squash match this record. " +
+    "If no model can be established it is stored as unknown, not invented.",
+  {
+    repo: z.string().describe("owner/name, e.g. Breadway/breadboard"),
+    sha: z.string().describe("full commit sha (a short sha is expanded when workdir is given)"),
+    issue: z.string().describe("issue key, e.g. BB-163"),
+    note: z.string().optional().describe("optional one-line context"),
+    model: z
+      .string()
+      .optional()
+      .describe("explicit model id; use it when this session switched models"),
+    provider: z.string().optional().describe("explicit provider id, e.g. opencode-go"),
+    patch_id: z.string().optional().describe("git patch-id --stable, for rebase matching"),
+    tree_sha: z.string().optional().describe("commit tree sha, for squash matching"),
+    workdir: z
+      .string()
+      .optional()
+      .describe("local repository path; fills sha, tree_sha and patch_id from git when omitted"),
+  },
+  ({ repo, sha, issue, note, model, provider, patch_id, tree_sha, workdir }) =>
+    run(async () => {
+      let resolvedSha = sha.trim();
+      let resolvedTree = tree_sha;
+      let resolvedPatch = patch_id;
+      if (workdir) {
+        resolvedSha = resolveCommitSha(workdir, resolvedSha);
+        if (!resolvedTree) resolvedTree = resolveTreeSha(workdir, resolvedSha);
+        if (!resolvedPatch) resolvedPatch = resolvePatchId(workdir, resolvedSha);
+      }
+      return client.recordCommit({
+        repo,
+        sha: resolvedSha,
+        issue,
+        note,
+        model,
+        provider,
+        patch_id: resolvedPatch,
+        tree_sha: resolvedTree,
+        agent_name: defaultAgentName(),
+        session_id: SESSION_ID,
+      });
+    }),
 );
 
 server.tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));

@@ -57,6 +57,7 @@ or in `.mcp.json`:
 | `list_agents` `agent_status` | live claims + the `bb-status`-style server roll-up (`BB x/y done, …`) |
 | `import_markdown` | outline → epics + issues; set `repair: true` to retry existing unlinked cards and `dry_run: true` to list the local keys that would be created remotely. Normal import mirrors only newly created local cards. |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |
+| `record_commit` | after committing, record the repo, full SHA, issue and (when this session used more than one model) the model. Pass `workdir` to fill `tree_sha` and `patch_id` from git so a rebase or squash can be matched later. The server records your agent and session and resolves the model for that exact session; it never guesses from the last active agent |
 
 `update_issue`'s `add_links`/`remove_links` take `{ kind, target }` pairs
 (`kind` one of `blocks`/`blocked-by`/`relates-to`, `target` an issue key or

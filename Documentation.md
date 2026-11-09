@@ -225,6 +225,9 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/issues` | create; `title` required. `project` (key or id) is required once more than one project exists; with exactly one project it may be omitted. There is no catch-all default. Key allocated from the project's counter. The local row is committed and returned `201` without waiting for Forgejo; `x-breadboard-writeback: pending` means a background writeback was scheduled (a failed one retries on the next reconcile pass), `none` means the project is not mapped to an enabled repo |
 | `GET` | `/api/issues/{key}` | issue + `comments[]` |
 | `GET` | `/api/issues/{key}/activity` | `sync_log` timeline: `{ field, old_value, new_value, source, actor, at }[]` |
+| `GET` | `/api/issues/{key}/commits` | recorded commit attributions for this issue plus issues linked by `closes`/`closed-by`, newest first: `{ id, repo, sha, issue_id, issue_key, agent_name, session_id, orchestrator, orchestrator_session_id, model, provider, model_source, patch_id, tree_sha, note, created_at }[]` |
+| `POST` | `/api/commits` | `{ repo, sha, issue, agent_name?, session_id?, model?, provider?, patch_id?, tree_sha?, note? }`: record which agent, session, orchestrator and model produced a commit. `repo` is `owner/name`; `sha` is a full 40- or 64-character hex SHA; `issue` is a key or id. The model is reported explicitly or resolved from usage data for this exact session, else `model_source` is `unknown` and `model` is null. Re-recording the same repo and SHA merges data and never lets an unknown erase a known model. `201` |
+| `GET` | `/api/commits/lookup` | `?repo=owner/name&sha=<full sha>` plus optional `patch_id`/`tree_sha` for the SHA being looked up. Returns `{ repo, sha, known, matched_by?, attribution?, message? }`; `matched_by` is `exact`, `patch_id` or `tree_sha`. An unrecorded commit returns `known: false` and an explicit message instead of a guessed model |
 | `GET` | `/api/issues/{key}/artifacts` | typed evidence, newest first: `{ id, issue_id, kind, comment_id, review_ref, filename, mime, size, uploader_agent, session_id, created_at, expires_at }[]`. Expired rows are omitted |
 | `POST` | `/api/issues/{key}/artifacts` | multipart `file` plus `kind` (`bench`, `screenshot`, `ci-log`, `diff`, `trace`, `other`); optional `comment_id`, `review_ref`, `agent_name`, `session_id`. The uploader must own a named agent. `201` |
 | `POST` | `/api/issues/{key}/artifacts/base64` | `{ filename, kind, data_base64, mime?, comment_id?, review_ref?, agent_name?, session_id? }`: same, for MCP/CLI clients. The route accepts up to 72 MiB of request body so a 50 MiB decoded CI log fits within base64 expansion |
@@ -484,6 +487,41 @@ for `name: value unit` lines.
 
 MCP tools: `list_artifacts` and `attach_artifact` (base64).
 
+## Commit attribution
+
+Every agent-produced commit can be tied back to the issue, the agent, the
+session and the model that produced it. After committing, an agent calls the MCP
+tool `record_commit` with the repository (`owner/name`), the full commit SHA and
+the issue key. The server resolves the agent and session from the caller (or
+from this issue's claim), records the orchestrator from the agent's parent
+session, and resolves the model from `usage_sessions` rows keyed by that exact
+session id.
+
+The model is never inferred from whichever agent was last active.
+`model_source` is explicit:
+
+- `reported`: the agent passed `model` when recording the commit.
+- `session`: usage data for this exact session contains exactly one model.
+- `unknown`: neither applies. `model` and `provider` stay null and the UI says
+  "model unknown".
+
+For rewrites, pass `patch_id` (`git patch-id --stable`) and `tree_sha` (the
+commit tree) when recording. A rebase keeps the patch id; a squash of a branch
+tip produces that tip's tree. `GET /api/commits/lookup` accepts `patch_id` and
+`tree_sha` for the SHA being looked up and returns `known`, `matched_by`
+(`exact`, `patch_id` or `tree_sha`) and the original attribution. With no
+record and no match it returns `known: false` and an explicit "no attribution
+recorded for this commit" message.
+
+`GET /api/issues/{key}/commits` returns the issue's recorded commits plus the
+commits of issues linked by `closes`/`closed-by`, so a synced PR card shows the
+same list as the issue it closes. The issue drawer renders a Commits section and
+recording also appends a `commit` entry to the activity timeline. Only recorded
+commits appear, so an unrecorded commit is explicitly unknown rather than
+attributed to a nearby agent.
+
+MCP tool: `record_commit`.
+
 ## Forgejo sync
 
 **Direction:** bidirectional.
@@ -642,6 +680,10 @@ chat-inject plugin) can follow it. Tools: `whoami`, `list_issues` / `get_issue` 
 `list_agents` / `agent_status` / `suggest_agent_names`,
 `inbox` / `mark_notification_read` / `mark_all_notifications_read` /
 `get_notification_prefs` / `set_notification_prefs`. See `apps/mcp/README.md`.
+
+`record_commit` records which agent, session, orchestrator and model produced a
+commit. Call it right after committing so a bug traces from issue to commit to
+model; see the commit attribution section above.
 
 Agent rule (also in the `claim_issue` / `update_issue` / `move_issue` tool
 descriptions): **name first, then claim, keep the heartbeat alive, and release
