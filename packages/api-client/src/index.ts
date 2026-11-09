@@ -654,6 +654,8 @@ export class BreadboardClient {
     this.req<ReviewRequest>("POST", `/api/issues/${key}/reviews`, request);
   updateReview = (id: number, patch: ReviewRequestPatch) =>
     this.req<ReviewRequest>("PATCH", `/api/reviews/${id}`, patch);
+  withdrawReview = (id: number) =>
+    this.req<void>("DELETE", `/api/reviews/${id}`);
 
   listAgents = () => this.req<AgentClaim[]>("GET", "/api/agents");
   agentStatus = () => this.req<AgentStatusSummary>("GET", "/api/agents/status");

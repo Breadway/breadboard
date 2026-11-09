@@ -93,6 +93,20 @@
     }
   }
 
+  async function withdraw(id: number) {
+    if (busy) return;
+    busy = id;
+    error = "";
+    try {
+      await api.withdrawReview(id);
+      await load();
+    } catch (e) {
+      error = errMsg(e);
+    } finally {
+      busy = 0;
+    }
+  }
+
   async function create() {
     if (!issueKey || busy) return;
     const reviewerName = createReviewer.trim();
@@ -201,7 +215,19 @@
         </div>
       {/if}
       {#if r.note}<p class="note">{r.note}</p>{/if}
-      {#if r.state !== "approved"}
+      {#if r.state === "approved"}
+        {#if r.responded_at}
+          <div class="meta"><span class="dim">resolved {ago(r.responded_at)}</span></div>
+        {/if}
+      {:else if r.requested_by === store.me?.id}
+        <div class="actions">
+          <span class="dim small">Waiting on {r.reviewer}. Only the reviewer records the outcome.</span>
+          <span class="grow"></span>
+          <button class="btn sm" disabled={busy === r.id} onclick={() => withdraw(r.id)}>
+            {busy === r.id ? "Withdrawing…" : "Withdraw"}
+          </button>
+        </div>
+      {:else}
         <div class="actions">
           <input
             class="field note-in"
@@ -213,8 +239,6 @@
           <button class="btn sm warn" disabled={busy === r.id} onclick={() => act(r.id, "changes_requested")}>Changes</button>
           <button class="btn sm primary" disabled={busy === r.id} onclick={() => act(r.id, "approved")}>Approve</button>
         </div>
-      {:else if r.responded_at}
-        <div class="meta"><span class="dim">resolved {ago(r.responded_at)}</span></div>
       {/if}
     </div>
   {:else}

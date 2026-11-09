@@ -75,6 +75,16 @@ async fn review_request_notifies_and_gates_done_until_approved() {
     assert_eq!(created["reviewer_id"], json!(reviewer_id));
     let review_id = created["id"].as_i64().unwrap();
 
+    // The requester cannot approve their own request and clear the gate.
+    let self_approve = c
+        .patch(format!("{base}/api/reviews/{review_id}"))
+        .header("authorization", &auth)
+        .json(&json!({ "state": "approved" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_approve.status(), 403);
+
     let notified: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM notifications WHERE user_id = ?1 AND kind = 'review'",
     )
@@ -215,6 +225,27 @@ async fn review_request_notifies_and_gates_done_until_approved() {
     assert_eq!(dup.status(), 409);
 }
 
+async fn add_user_with_token(app: &tu::TestApp, forgejo_id: i64, login: &str, token: &str) -> i64 {
+    let id: i64 = sqlx::query_scalar(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (?1, ?2, ?2) RETURNING id",
+    )
+    .bind(forgejo_id)
+    .bind(login)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, ?3)",
+    )
+    .bind(id)
+    .bind(sha256_hex(token))
+    .bind(Utc::now().to_rfc3339())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    id
+}
+
 #[tokio::test]
 async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
     let app = tu::spawn().await;
@@ -223,29 +254,16 @@ async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
     let auth = format!("Bearer {}", app.token);
     let key = project_and_issue(&base, &auth).await;
 
-    // A user who is neither the requester nor the agent's owner: only the
-    // reviewer identity can authorize this update.
-    let other_id: i64 = sqlx::query_scalar(
-        "INSERT INTO users (forgejo_id, login, display_name) VALUES (3, 'other', 'Other') RETURNING id",
-    )
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
-    let other_token = "other-token-abcdef".to_string();
-    sqlx::query(
-        "INSERT INTO api_tokens (user_id, name, token_hash, created_at) VALUES (?1, 'test', ?2, ?3)",
-    )
-    .bind(other_id)
-    .bind(sha256_hex(&other_token))
-    .bind(Utc::now().to_rfc3339())
-    .execute(&app.db)
-    .await
-    .unwrap();
-    let other_auth = format!("Bearer {other_token}");
+    // The agent is owned by a different user than the requester. A third user
+    // is neither, so only the agent identity can authorize its outcome.
+    let owner_id = add_user_with_token(&app, 3, "agentowner", "owner-token-abcdef").await;
+    let owner_auth = "Bearer owner-token-abcdef";
+    let _other_id = add_user_with_token(&app, 4, "other", "other-token-abcdef").await;
+    let other_auth = "Bearer other-token-abcdef";
 
     let registered: Value = c
         .post(format!("{base}/api/agents/register"))
-        .header("authorization", &auth)
+        .header("authorization", owner_auth)
         .json(&json!({ "agent_name": "Zesty Rye" }))
         .send()
         .await
@@ -255,12 +273,13 @@ async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
         .unwrap();
     assert_eq!(registered["agent_name"], "zesty rye");
 
+    // Kind omitted on purpose: a registered space-named agent must be
+    // inferred as an agent, canonicalized, and pushed to its chat inbox.
     let created: Value = c
         .post(format!("{base}/api/issues/{key}/reviews"))
         .header("authorization", &auth)
         .json(&json!({
             "reviewer": "Zesty Rye",
-            "reviewer_kind": "agent",
             "pr_number": 42,
             "pr_repo": "Breadway/breadboard"
         }))
@@ -271,6 +290,8 @@ async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
         .await
         .unwrap();
     assert_eq!(created["reviewer_kind"], "agent");
+    assert_eq!(created["reviewer"], "zesty rye");
+    assert_eq!(created["reviewer_id"], json!(owner_id));
 
     // The agent is woken through the existing chat push inbox.
     let pushes: i64 =
@@ -280,34 +301,48 @@ async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
             .unwrap();
     assert_eq!(pushes, 1, "agent reviewer should get a DM push");
 
-    let queue: Vec<Value> = c
-        .get(format!(
-            "{base}/api/reviews?reviewer=Zesty%20Rye&outstanding=true"
-        ))
-        .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    assert_eq!(queue.len(), 1);
+    // Both spellings of the name find the queue.
+    for reviewer in ["Zesty%20Rye", "zesty-rye"] {
+        let queue: Vec<Value> = c
+            .get(format!(
+                "{base}/api/reviews?reviewer={reviewer}&outstanding=true"
+            ))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(queue.len(), 1, "queue for {reviewer}");
+    }
 
     let id = created["id"].as_i64().unwrap();
-    // The signed-in user owns the agent, but a named agent identity is still
-    // checked so a different agent cannot approve it.
+
+    // The requester cannot approve their own request.
+    let self_approve = c
+        .patch(format!("{base}/api/reviews/{id}"))
+        .header("authorization", &auth)
+        .json(&json!({ "state": "approved" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_approve.status(), 403);
+
+    // A different agent name does not authorize the outcome.
     let wrong = c
         .patch(format!("{base}/api/reviews/{id}"))
-        .header("authorization", &other_auth)
+        .header("authorization", other_auth)
         .json(&json!({ "state": "approved", "agent_name": "Snazzy Bagel" }))
         .send()
         .await
         .unwrap();
     assert_eq!(wrong.status(), 403);
 
+    // The named agent, written hyphenated, can approve.
     let ok: Value = c
         .patch(format!("{base}/api/reviews/{id}"))
-        .header("authorization", &other_auth)
+        .header("authorization", other_auth)
         .json(&json!({ "state": "approved", "agent_name": "zesty-rye" }))
         .send()
         .await
@@ -329,17 +364,155 @@ async fn agent_reviewers_use_the_same_records_and_chat_push_path() {
 }
 
 #[tokio::test]
-async fn untouched_requests_escalate_once() {
+async fn issue_and_outstanding_filters_compose() {
     let app = tu::spawn().await;
     let c = reqwest::Client::new();
     let base = format!("http://{}", app.addr);
     let auth = format!("Bearer {}", app.token);
     let key = project_and_issue(&base, &auth).await;
 
+    add_user_with_token(&app, 5, "first", "first-token-abcdef").await;
+    add_user_with_token(&app, 6, "second", "second-token-abcdef").await;
+
+    let first: Value = c
+        .post(format!("{base}/api/issues/{key}/reviews"))
+        .header("authorization", &auth)
+        .json(&json!({ "reviewer": "first", "pr_number": 1 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second: Value = c
+        .post(format!("{base}/api/issues/{key}/reviews"))
+        .header("authorization", &auth)
+        .json(&json!({ "reviewer": "second", "pr_number": 2 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Approve the first, leaving the second open.
+    c.patch(format!("{base}/api/reviews/{}", first["id"]))
+        .header("authorization", "Bearer first-token-abcdef")
+        .json(&json!({ "state": "approved" }))
+        .send()
+        .await
+        .unwrap();
+
+    let all: Vec<Value> = c
+        .get(format!("{base}/api/reviews?issue={key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 2);
+
+    let open: Vec<Value> = c
+        .get(format!("{base}/api/reviews?issue={key}&outstanding=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(open.len(), 1);
+    assert_eq!(open[0]["id"], second["id"]);
+}
+
+#[tokio::test]
+async fn requester_can_withdraw_but_nobody_else_can() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let key = project_and_issue(&base, &auth).await;
+
+    add_user_with_token(&app, 7, "reviewer", "reviewer-token-abcdef").await;
+    let reviewer_auth = "Bearer reviewer-token-abcdef";
+
     let created: Value = c
         .post(format!("{base}/api/issues/{key}/reviews"))
         .header("authorization", &auth)
-        .json(&json!({ "reviewer": "tester", "pr_number": 7 }))
+        .json(&json!({ "reviewer": "reviewer", "pr_number": 9 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_i64().unwrap();
+
+    let blocked = c
+        .patch(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .json(&json!({ "status": "done" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 409);
+
+    let not_requester = c
+        .delete(format!("{base}/api/reviews/{id}"))
+        .header("authorization", reviewer_auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(not_requester.status(), 403);
+
+    let withdrawn = c
+        .delete(format!("{base}/api/reviews/{id}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(withdrawn.status(), 204);
+
+    let remaining: Vec<Value> = c
+        .get(format!("{base}/api/issues/{key}/reviews"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(remaining.is_empty());
+
+    let done = c
+        .patch(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .json(&json!({ "status": "done" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(done.status(), 200);
+}
+
+#[tokio::test]
+async fn untouched_requests_escalate_once() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let key = project_and_issue(&base, &auth).await;
+    let watcher_id = add_user_with_token(&app, 8, "watcher", "watcher-token-abcdef").await;
+    let requester_id: i64 = sqlx::query_scalar("SELECT id FROM users WHERE login = 'tester'")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+
+    let created: Value = c
+        .post(format!("{base}/api/issues/{key}/reviews"))
+        .header("authorization", &auth)
+        .json(&json!({ "reviewer": "watcher", "pr_number": 7 }))
         .send()
         .await
         .unwrap()
@@ -356,16 +529,38 @@ async fn untouched_requests_escalate_once() {
         .await
         .unwrap();
 
-    let escalated = breadboard_server::reviews::escalate_stale(&app.db, Utc::now())
+    let escalated = breadboard_server::reviews::escalate_once(&app.state)
         .await
         .unwrap();
-    assert_eq!(escalated.len(), 1);
-    assert_eq!(escalated[0].id, id);
-    assert!(escalated[0].escalated_at.is_some());
+    assert_eq!(escalated, 1);
+    let row: (String, Option<String>) =
+        sqlx::query_as("SELECT state, escalated_at FROM review_requests WHERE id = ?1")
+            .bind(id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(row.0, "requested");
+    assert!(row.1.is_some());
+
+    // Both sides hear about it: the reviewer and the requester.
+    for user_id in [watcher_id, requester_id] {
+        let (count, escalated): (i64, i64) = sqlx::query_as(
+            "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN body LIKE '%waiting over%' THEN 1 ELSE 0 END), 0)
+               FROM notifications
+              WHERE user_id = ?1 AND kind = 'review'",
+        )
+        .bind(user_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+        assert!(count >= 1, "user {user_id} should be notified");
+        assert!(escalated >= 1, "user {user_id} should get the escalation");
+    }
 
     // Escalation is a one-shot per untouched window.
-    let again = breadboard_server::reviews::escalate_stale(&app.db, Utc::now())
+    let again = breadboard_server::reviews::escalate_once(&app.state)
         .await
         .unwrap();
-    assert!(again.is_empty());
+    assert_eq!(again, 0);
 }

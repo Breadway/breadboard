@@ -124,17 +124,41 @@ fn outcome_label(state: ReviewState) -> &'static str {
     }
 }
 
+/// Resolve an agent name to the way it is actually stored, treating spaces and
+/// hyphens as the same separator. `Some` means a known agent, `None` means the
+/// name has never registered, claimed, or opened a session.
+async fn canonical_agent_name(db: &SqlitePool, agent_name: &str) -> AppResult<Option<String>> {
+    let name = normalize_agent(agent_name);
+    Ok(sqlx::query_scalar(
+        "SELECT DISTINCT lower(agent_name) FROM (
+            SELECT agent_name FROM agent_profiles
+            UNION
+            SELECT agent_name FROM agent_claims
+            UNION
+            SELECT agent_name FROM agent_sessions
+         ) WHERE replace(lower(agent_name), ' ', '-') = ?1
+         ORDER BY length(agent_name) LIMIT 1",
+    )
+    .bind(&name)
+    .fetch_optional(db)
+    .await?)
+}
+
 /// The owner user for an agent name, if any. Mirrors `store::agent_owners`
-/// without making the store helper public.
+/// without making the store helper public. Both `scratch sentinel` and
+/// `scratch-sentinel` resolve to the same agent.
 async fn agent_owner(db: &SqlitePool, agent_name: &str) -> AppResult<Option<i64>> {
     let name = normalize_agent(agent_name);
     Ok(sqlx::query_scalar(
         "SELECT user_id FROM (
-            SELECT user_id FROM agent_profiles WHERE lower(agent_name) = ?1
+            SELECT user_id FROM agent_profiles
+             WHERE replace(lower(agent_name), ' ', '-') = ?1
             UNION
-            SELECT claimed_by AS user_id FROM agent_claims WHERE lower(agent_name) = ?1
+            SELECT claimed_by AS user_id FROM agent_claims
+             WHERE replace(lower(agent_name), ' ', '-') = ?1
             UNION
-            SELECT user_id FROM agent_sessions WHERE lower(agent_name) = ?1 AND user_id IS NOT NULL
+            SELECT user_id FROM agent_sessions
+             WHERE replace(lower(agent_name), ' ', '-') = ?1 AND user_id IS NOT NULL
          ) ORDER BY user_id LIMIT 1",
     )
     .bind(&name)
@@ -142,8 +166,20 @@ async fn agent_owner(db: &SqlitePool, agent_name: &str) -> AppResult<Option<i64>
     .await?)
 }
 
-pub async fn list_for_issue(db: &SqlitePool, issue_id: i64) -> AppResult<Vec<ReviewRequestRecord>> {
-    let sql = format!("{SELECT} WHERE r.issue_id = ?1 ORDER BY r.requested_at DESC, r.id DESC");
+pub async fn list_for_issue(
+    db: &SqlitePool,
+    issue_id: i64,
+    outstanding_only: bool,
+) -> AppResult<Vec<ReviewRequestRecord>> {
+    let sql = if outstanding_only {
+        format!(
+            "{SELECT} WHERE r.issue_id = ?1 \
+             AND r.state IN ('requested', 'accepted', 'changes_requested') \
+             ORDER BY r.requested_at DESC, r.id DESC"
+        )
+    } else {
+        format!("{SELECT} WHERE r.issue_id = ?1 ORDER BY r.requested_at DESC, r.id DESC")
+    };
     let rows: Vec<ReviewRow> = sqlx::query_as(&sql).bind(issue_id).fetch_all(db).await?;
     Ok(rows.into_iter().map(ReviewRow::into_record).collect())
 }
@@ -155,15 +191,18 @@ pub async fn list_for_reviewer(
 ) -> AppResult<Vec<ReviewRequestRecord>> {
     let sql = if outstanding_only {
         format!(
-            "{SELECT} WHERE lower(r.reviewer) = lower(?1) \
+            "{SELECT} WHERE replace(lower(r.reviewer), ' ', '-') = ?1 \
              AND r.state IN ('requested', 'accepted', 'changes_requested') \
              ORDER BY r.requested_at ASC, r.id ASC"
         )
     } else {
-        format!("{SELECT} WHERE lower(r.reviewer) = lower(?1) ORDER BY r.requested_at DESC, r.id DESC LIMIT 500")
+        format!(
+            "{SELECT} WHERE replace(lower(r.reviewer), ' ', '-') = ?1 \
+             ORDER BY r.requested_at DESC, r.id DESC LIMIT 500"
+        )
     };
     let rows: Vec<ReviewRow> = sqlx::query_as(&sql)
-        .bind(reviewer.trim())
+        .bind(normalize_agent(reviewer))
         .fetch_all(db)
         .await?;
     Ok(rows.into_iter().map(ReviewRow::into_record).collect())
@@ -218,21 +257,29 @@ pub async fn create(
     new: &NewReviewRequest,
     requester: &User,
 ) -> AppResult<ReviewRequestRecord> {
-    let reviewer = new.reviewer.trim().to_string();
+    let requested_name = new.reviewer.trim().to_string();
+    let canonical_agent = canonical_agent_name(db, &requested_name).await?;
     let kind = match new.reviewer_kind {
         Some(kind) => kind,
         None => {
-            if store::find_user_by_login(db, &reviewer).await?.is_some() {
-                ReviewerKind::Human
-            } else if store::known_agent_names(db)
+            // Humans win an ambiguous name, as before. Otherwise a known
+            // agent matches whether the caller wrote "scratch sentinel" or
+            // "scratch-sentinel".
+            if store::find_user_by_login(db, &requested_name)
                 .await?
-                .contains(&normalize_agent(&reviewer))
+                .is_some()
             {
+                ReviewerKind::Human
+            } else if canonical_agent.is_some() {
                 ReviewerKind::Agent
             } else {
                 ReviewerKind::Human
             }
         }
+    };
+    let reviewer = match kind {
+        ReviewerKind::Agent => canonical_agent.unwrap_or(requested_name),
+        ReviewerKind::Human => requested_name,
     };
     let reviewer_id = match kind {
         ReviewerKind::Human => store::find_user_by_login(db, &reviewer).await?,
@@ -287,18 +334,30 @@ pub async fn update_state(
             .agent_name
             .as_deref()
             .is_some_and(|name| reviewer_matches(name, &current.reviewer));
-    if !(actor_is_requester || actor_is_reviewer || actor_is_named_agent) {
-        return Err(AppError::forbidden_msg(
-            "only the requester or the named reviewer can update this request",
-        ));
-    }
+    let actor_is_named_reviewer = actor_is_reviewer || actor_is_named_agent;
 
     if let Some(next) = patch.state {
+        // A review outcome is the reviewer's call. The requester can withdraw
+        // the request, but cannot approve their own work and clear the gate.
+        if actor_is_requester {
+            return Err(AppError::forbidden_msg(
+                "the requester cannot record a review outcome; withdraw the request instead",
+            ));
+        }
+        if !actor_is_named_reviewer {
+            return Err(AppError::forbidden_msg(
+                "only the named reviewer can record a review outcome",
+            ));
+        }
         if current.state == ReviewState::Approved && next != ReviewState::Approved {
             return Err(AppError::Conflict(
                 "an approved review request is closed; file a new request instead".into(),
             ));
         }
+    } else if !(actor_is_requester || actor_is_named_reviewer) {
+        return Err(AppError::forbidden_msg(
+            "only the requester or the named reviewer can update this request",
+        ));
     }
 
     let ts = now_rfc3339();
@@ -346,6 +405,28 @@ pub async fn update_state(
     Ok(after)
 }
 
+/// Withdraw an unresolved request. Only the requester may do this; an approved
+/// request is history and stays on the issue.
+pub async fn withdraw(db: &SqlitePool, id: i64, actor: &User) -> AppResult<ReviewRequestRecord> {
+    let current = get(db, id).await?;
+    if current.requested_by != Some(actor.id) {
+        return Err(AppError::forbidden_msg(
+            "only the requester can withdraw a review request",
+        ));
+    }
+    if current.state == ReviewState::Approved {
+        return Err(AppError::Conflict(
+            "an approved review request is history and cannot be withdrawn".into(),
+        ));
+    }
+    sqlx::query("DELETE FROM review_requests WHERE id = ?1 AND requested_by = ?2")
+        .bind(id)
+        .bind(actor.id)
+        .execute(db)
+        .await?;
+    Ok(current)
+}
+
 /// Mark every unresolved request that has not changed state for the threshold
 /// as escalated. Returns only the rows this call actually escalated, so the
 /// caller can notify once.
@@ -374,32 +455,41 @@ pub async fn escalate_stale(
     Ok(out)
 }
 
+/// One escalation pass: mark due requests and notify both sides. Exposed so
+/// tests exercise the notification half, not just the timestamp update.
+pub async fn escalate_once(state: &AppState) -> AppResult<usize> {
+    let requests = escalate_stale(&state.db, Utc::now()).await?;
+    for request in &requests {
+        notify_escalated(state, request).await;
+        publish(state, request, true);
+    }
+    Ok(requests.len())
+}
+
 /// Escalation loop: at most once per request per untouched window.
 pub fn spawn_escalation(state: AppState) {
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(300));
         loop {
             tick.tick().await;
-            match escalate_stale(&state.db, Utc::now()).await {
-                Ok(requests) => {
-                    for request in requests {
-                        notify_escalated(&state, &request).await;
-                        publish(&state, &request, true);
-                    }
-                }
-                Err(error) => tracing::warn!(%error, "review escalation pass failed"),
+            if let Err(error) = escalate_once(&state).await {
+                tracing::warn!(%error, "review escalation pass failed");
             }
         }
     });
 }
 
 fn publish(app: &AppState, request: &ReviewRequestRecord, escalated: bool) {
+    publish_state(app, request, request.state.as_str(), escalated);
+}
+
+fn publish_state(app: &AppState, request: &ReviewRequestRecord, state: &str, escalated: bool) {
     let event = BoardEvent::ReviewUpdated {
         id: request.id,
         issue_id: request.issue_id,
         key: request.issue_key.clone(),
         reviewer: request.reviewer.clone(),
-        state: request.state.as_str().to_string(),
+        state: state.to_string(),
         escalated,
     };
     app.bus.publish(event.clone());
@@ -575,7 +665,7 @@ pub async fn list_issue_reviews(
     Path(key): Path<String>,
 ) -> AppResult<Json<Vec<ReviewRequestRecord>>> {
     let issue = store::get_issue_by_key(&app.db, &key).await?;
-    Ok(Json(list_for_issue(&app.db, issue.id).await?))
+    Ok(Json(list_for_issue(&app.db, issue.id, false).await?))
 }
 
 pub async fn create_review_request(
@@ -597,11 +687,13 @@ pub async fn list_reviews(
     _user: AuthUser,
     Query(query): Query<ReviewQuery>,
 ) -> AppResult<Json<Vec<ReviewRequestRecord>>> {
+    let outstanding_only = query.outstanding.unwrap_or(false);
     if let Some(key) = query.issue.as_deref().filter(|s| !s.trim().is_empty()) {
         let issue = store::get_issue_by_key(&app.db, key).await?;
-        return Ok(Json(list_for_issue(&app.db, issue.id).await?));
+        return Ok(Json(
+            list_for_issue(&app.db, issue.id, outstanding_only).await?,
+        ));
     }
-    let outstanding_only = query.outstanding.unwrap_or(false);
     if let Some(reviewer) = query.reviewer.as_deref().filter(|s| !s.trim().is_empty()) {
         return Ok(Json(
             list_for_reviewer(&app.db, reviewer, outstanding_only).await?,
@@ -625,6 +717,28 @@ pub async fn update_review_request(
     notify_outcome(&app, &request, &user.0).await;
     publish(&app, &request, false);
     Ok(Json(request))
+}
+
+/// Requester withdraws an open request. The record is removed so it no longer
+/// gates done; approved requests stay as history.
+pub async fn withdraw_review_request(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    let request = withdraw(&app.db, id, &user.0).await?;
+    if let Ok(issue) = store::get_issue(&app.db, request.issue_id).await {
+        notify_reviewer(
+            &app,
+            &request,
+            &issue,
+            &user.0,
+            format!("Review request withdrawn on {}.", request.issue_key),
+        )
+        .await;
+    }
+    publish_state(&app, &request, "withdrawn", false);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]

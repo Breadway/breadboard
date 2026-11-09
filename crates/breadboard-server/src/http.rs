@@ -55,7 +55,10 @@ pub fn router(state: AppState) -> Router {
             get(reviews::list_issue_reviews).post(reviews::create_review_request),
         )
         .route("/reviews", get(reviews::list_reviews))
-        .route("/reviews/{id}", patch(reviews::update_review_request))
+        .route(
+            "/reviews/{id}",
+            patch(reviews::update_review_request).delete(reviews::withdraw_review_request),
+        )
         .route("/repos", get(api::list_repos).post(api::add_repo))
         .route(
             "/repos/{owner}/{name}",
