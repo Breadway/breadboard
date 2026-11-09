@@ -132,7 +132,9 @@ async fn claim_lifecycle() {
 
     // Release: card keeps its status, claim disappears.
     let rel = c
-        .delete(format!("{base}/api/issues/{key}/claim"))
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+        ))
         .header("authorization", &auth)
         .send()
         .await
@@ -198,11 +200,13 @@ async fn claim_events_flow_over_sse() {
     assert_eq!(updated["claim"]["state"], "verifying");
     assert!(updated["claim"]["last_heartbeat"].is_string());
 
-    c.delete(format!("{base}/api/issues/{key}/claim"))
-        .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap();
+    c.delete(format!(
+        "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
+    ))
+    .header("authorization", &auth)
+    .send()
+    .await
+    .unwrap();
     assert_eq!(events.next_type().await, "agent.released");
 }
 
@@ -337,11 +341,13 @@ async fn claim_changes_appear_in_activity() {
         .send()
         .await
         .unwrap();
-    c.delete(format!("{base}/api/claims/{claim_id}"))
-        .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap();
+    c.delete(format!(
+        "{base}/api/claims/{claim_id}?note=done%3B%20next%3B%20risky"
+    ))
+    .header("authorization", &auth)
+    .send()
+    .await
+    .unwrap();
 
     let activity: Value = c
         .get(format!("{base}/api/issues/{key}/activity"))
@@ -1772,7 +1778,10 @@ async fn exclusive_claim_budget_per_agent_and_release() {
 
     // Releasing one live claim frees exactly one slot.
     let released = c
-        .delete(format!("{base}/api/issues/{}/claim", keys[0]))
+        .delete(format!(
+            "{base}/api/issues/{}/claim?note=done%3B%20next%3B%20risky",
+            keys[0]
+        ))
         .header("authorization", &auth)
         .send()
         .await
@@ -1931,4 +1940,280 @@ async fn unlinked_agents_count_under_themselves_only() {
         assert_eq!(row["orchestrator_exclusive_count"], 5);
         assert_eq!(row["orchestrator_exclusive_limit"], 5);
     }
+}
+
+/// BB-162: session links survive release, and a release requires a handoff
+/// note unless it is an explicit no-work claim.
+#[tokio::test]
+async fn session_links_and_required_handoff() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "handoff target").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    let claim = |session: &str, state: &str, mode: &str, branch: Option<&str>| {
+        let c = c.clone();
+        let base = base.clone();
+        let auth = auth.clone();
+        let key = key.clone();
+        let session = session.to_string();
+        let state = state.to_string();
+        let mode = mode.to_string();
+        let branch = branch.map(str::to_string);
+        async move {
+            let mut body = json!({
+                "agent_name": "handoff-agent",
+                "session_id": session,
+                "state": state,
+                "mode": mode,
+            });
+            if let Some(branch) = branch {
+                body["branch"] = json!(branch);
+            }
+            c.post(format!("{base}/api/issues/{key}/claim"))
+                .header("authorization", &auth)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // Claim creating the session link.
+    let first = claim("ses_alpha", "implementing", "exclusive", None).await;
+    assert_eq!(first.status(), 201);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(issue["last_handoff"].is_null());
+    let sessions = issue["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["session_id"], "ses_alpha");
+    assert_eq!(sessions[0]["agent_name"], "handoff-agent");
+    assert_eq!(sessions[0]["last_state"], "implementing");
+    let first_seen = sessions[0]["first_seen"].as_str().unwrap().to_string();
+
+    // Missing note is refused with the exact rule.
+    let refused = c
+        .delete(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let body: Value = refused.json().await.unwrap();
+    let message = body["error"].as_str().unwrap();
+    assert!(message.contains("handoff note"), "{message}");
+    assert!(message.contains("done"), "{message}");
+    assert!(message.contains("no_note"), "{message}");
+
+    // no_note is not a bypass for work that started.
+    let bypass = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bypass.status(), 400);
+    let body: Value = bypass.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("no_note"));
+
+    // A real note releases and is stored, shown and listed.
+    let note = "done: core path; next: tests; risky: auth edge";
+    let released = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note={}",
+            urlencode(note)
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(released.status(), 204);
+
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["last_handoff"]["note"], note);
+    let sessions = issue["sessions"].as_array().unwrap();
+    assert_eq!(sessions.len(), 1, "release must keep the session link");
+    assert_eq!(sessions[0]["first_seen"], first_seen);
+    assert_eq!(sessions[0]["last_state"], "implementing");
+
+    let handoffs: Value = c
+        .get(format!("{base}/api/issues/{key}/handoffs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    assert_eq!(handoffs[0]["note"], note);
+
+    let events: Value = c
+        .get(format!(
+            "{base}/api/agents/handoff-agent/events?kind=handoff"
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(events["events"][0]["kind"], "handoff");
+    assert_eq!(events["events"][0]["summary"], note);
+
+    // Back-link: the session knows the issue it touched.
+    let back: Value = c
+        .get(format!("{base}/api/sessions/ses_alpha/issues"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(back.as_array().unwrap()[0]["key"], key);
+
+    // A planned exclusive claim with no evidence never held work: explicit
+    // no_note is allowed and writes no handoff.
+    assert_eq!(
+        claim("ses_beta", "planned", "exclusive", None)
+            .await
+            .status(),
+        201
+    );
+    let no_work = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_work.status(), 204);
+    let handoffs: Value = c
+        .get(format!("{base}/api/issues/{key}/handoffs"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(handoffs.as_array().unwrap().len(), 1);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 2);
+
+    // A planned claim with a branch did hold work: no_note is refused.
+    assert_eq!(
+        claim("ses_delta", "planned", "exclusive", Some("fix/x"))
+            .await
+            .status(),
+        201
+    );
+    let bad = c
+        .delete(format!("{base}/api/issues/{key}/claim?no_note=true"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    let body: Value = bad.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("no_note"));
+    let good = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?note={}",
+            urlencode("done: branch; next: review; risky: none")
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(good.status(), 204);
+
+    // The most recent note is the resume context.
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        issue["last_handoff"]["note"],
+        "done: branch; next: review; risky: none"
+    );
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 3);
+
+    // An intent is always a no-work claim; releasing it without a note still
+    // asks for the explicit opt-in.
+    let intent = claim("ses_gamma", "implementing", "intent", None).await;
+    assert_eq!(intent.status(), 201);
+    let refused = c
+        .delete(format!("{base}/api/issues/{key}/claim?mode=intent"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 400);
+    let intent_release = c
+        .delete(format!(
+            "{base}/api/issues/{key}/claim?mode=intent&no_note=true"
+        ))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(intent_release.status(), 204);
+    let issue: Value = c
+        .get(format!("{base}/api/issues/{key}"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(issue["sessions"].as_array().unwrap().len(), 4);
+}
+
+fn urlencode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            b' ' => "%20".to_string(),
+            other => format!("%{other:02X}"),
+        })
+        .collect()
 }
