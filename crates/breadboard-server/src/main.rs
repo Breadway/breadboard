@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use breadboard_server::{
-    agent_events, auth, config::Config, db, http, notify, reviews, store, sync, usage, AppState,
+    agent_events, agent_prune, auth, config::Config, db, http, notify, reviews, store, sync, usage,
+    AppState,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -79,6 +80,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(
         retain_days = agent_events::AGENT_EVENT_RETENTION_DAYS,
         "agent event retention loop started"
+    );
+
+    agent_prune::spawn_pruner(state.clone());
+    tracing::info!(
+        prune_after_hours = state.config.agents.prune_after_hours,
+        "abandoned agent prune loop started"
     );
 
     if state.config.notifications.daily_digest {

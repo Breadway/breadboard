@@ -2,6 +2,7 @@
 //! embedded mode can build the router without the binary.
 
 pub mod agent_events;
+pub mod agent_prune;
 pub mod api;
 pub mod artifacts;
 pub mod auth;

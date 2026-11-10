@@ -223,10 +223,10 @@ async fn imports_per_agent_and_per_issue_and_warns_over_threshold() {
         "{base}/api/issues/{key}/claim?note=done%3B%20next%3B%20risky"
     ))
     .header("authorization", &auth)
-        .send()
-        .await
-        .unwrap()
-        .assert_status_success();
+    .send()
+    .await
+    .unwrap()
+    .assert_status_success();
     let issue: Value = c
         .get(format!("{base}/api/usage/issues/{key}?range=7d"))
         .header("authorization", &auth)
@@ -383,6 +383,11 @@ async fn imports_zero_cost_and_session_v2_fallback_rows() {
             .unwrap();
         assert_eq!(summary["total_tokens"], tokens, "{name}");
         approx(summary["cost"].as_f64().unwrap(), 0.0);
+        assert_eq!(
+            summary["unpriced_tokens"], tokens,
+            "zero-cost tokens are unpriced, not free: {name}"
+        );
+        assert_eq!(summary["models"][0]["unpriced_tokens"], tokens, "{name}");
         assert!(!summary["over_threshold"].as_bool().unwrap());
     }
 }
@@ -412,6 +417,267 @@ async fn sessions_without_a_registered_agent_are_skipped() {
         .unwrap();
     assert_eq!(report["sessions"], 0);
     assert_eq!(report["skipped_sessions"], 1);
+}
+
+#[tokio::test]
+async fn renamed_agent_keeps_usage_under_the_current_name() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let session = "ses_rename_usage";
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "old crust", "session_id": session }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("opencode.db");
+    let source = fake_opencode_db(&source_path).await;
+    insert_message(&source, "m1", session, "cheap", 1.25, 100, 10, 0, 0, 0).await;
+    source.close().await;
+
+    c.post(format!("{base}/api/usage/import"))
+        .header("authorization", &auth)
+        .json(&json!({ "path": source_path }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    c.post(format!("{base}/api/agents/old%20crust/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "new crust" }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let list: Value = c
+        .get(format!("{base}/api/usage/agents?range=all"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let subjects: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["subject"].as_str().unwrap())
+        .collect();
+    assert!(
+        subjects.contains(&"new crust"),
+        "renamed agent should own its history: {subjects:?}"
+    );
+    assert!(
+        !subjects.contains(&"old crust"),
+        "the old name must not keep a row: {subjects:?}"
+    );
+    let renamed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["subject"] == "new crust")
+        .unwrap();
+    approx(renamed["cost"].as_f64().unwrap(), 1.25);
+    assert_eq!(renamed["total_tokens"], 110);
+
+    let summary: Value = c
+        .get(format!("{base}/api/usage/agents/new%20crust?range=all"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    approx(summary["cost"].as_f64().unwrap(), 1.25);
+    assert_eq!(summary["sessions"][0]["agent_name"], "new crust");
+}
+
+#[tokio::test]
+async fn removed_agent_history_survives_without_a_dead_name_row() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let session = "ses_removed_usage";
+
+    ensure_project(&c, &base, &auth).await;
+    let key = create_issue(&c, &base, &auth, "removed usage history").await;
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "gone agent", "session_id": session }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+    // Claim so the session-to-issue link exists before the agent is removed.
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "gone agent" }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("opencode.db");
+    let source = fake_opencode_db(&source_path).await;
+    insert_message(&source, "m1", session, "cheap", 0.75, 200, 20, 0, 0, 0).await;
+    source.close().await;
+
+    c.post(format!("{base}/api/usage/import"))
+        .header("authorization", &auth)
+        .json(&json!({ "path": source_path }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    c.post(format!("{base}/api/agents/gone%20agent/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let list: Value = c
+        .get(format!("{base}/api/usage/agents?range=all"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let subjects: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["subject"].as_str().unwrap())
+        .collect();
+    assert!(
+        !subjects.contains(&"gone agent"),
+        "a removed name must not reappear as a usage subject: {subjects:?}"
+    );
+    let unattributed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["subject"] == "unattributed")
+        .expect("removed history should stay in the unattributed bucket");
+    approx(unattributed["cost"].as_f64().unwrap(), 0.75);
+    assert_eq!(unattributed["total_tokens"], 220);
+
+    // The issue total is the durable copy of that history.
+    let issue: Value = c
+        .get(format!("{base}/api/usage/issues/{key}?range=all"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    approx(issue["cost"].as_f64().unwrap(), 0.75);
+    assert_eq!(issue["total_tokens"], 220);
+    assert_eq!(issue["agents"][0]["agent_name"], "unattributed");
+}
+
+#[tokio::test]
+async fn reported_and_unpriced_spend_stay_separate_and_totals_add_up() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+    let session = "ses_mixed_usage";
+
+    ensure_project(&c, &base, &auth).await;
+    let key = create_issue(&c, &base, &auth, "mixed usage").await;
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "mixed spender", "session_id": session }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "mixed spender" }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let dir = tempfile::tempdir().unwrap();
+    let source_path = dir.path().join("opencode.db");
+    let source = fake_opencode_db(&source_path).await;
+    // Priced: 100 + 10 tokens for 0.5.
+    insert_message(&source, "m1", session, "priced", 0.5, 100, 10, 0, 0, 0).await;
+    // Unpriced: 50 + 5 tokens with cost 0.
+    insert_message(&source, "m2", session, "free", 0.0, 50, 5, 0, 0, 0).await;
+    source.close().await;
+
+    c.post(format!("{base}/api/usage/import"))
+        .header("authorization", &auth)
+        .json(&json!({ "path": source_path }))
+        .send()
+        .await
+        .unwrap()
+        .assert_status_success();
+
+    let agent: Value = c
+        .get(format!("{base}/api/usage/agents/mixed%20spender?range=7d"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    approx(agent["cost"].as_f64().unwrap(), 0.5);
+    assert_eq!(agent["unpriced_tokens"], 55);
+    assert_eq!(agent["total_tokens"], 165);
+    assert_eq!(agent["sessions"][0]["unpriced_tokens"], 55);
+    let free = agent["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "test/free")
+        .unwrap();
+    assert_eq!(free["cost"], 0.0);
+    assert_eq!(free["unpriced_tokens"], 55);
+    let priced = agent["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["model"] == "test/priced")
+        .unwrap();
+    approx(priced["cost"].as_f64().unwrap(), 0.5);
+    assert_eq!(priced["unpriced_tokens"], 0);
+
+    let issue: Value = c
+        .get(format!("{base}/api/usage/issues/{key}?range=7d"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    approx(issue["cost"].as_f64().unwrap(), 0.5);
+    assert_eq!(issue["unpriced_tokens"], 55);
+    assert_eq!(issue["total_tokens"], 165);
+    assert_eq!(issue["agents"][0]["unpriced_tokens"], 55);
 }
 
 fn approx(actual: f64, expected: f64) {

@@ -19,6 +19,7 @@
   let now = $state(Date.now());
   let staleOnly = $state(false);
   let showHidden = $state(false);
+  let showAbandoned = $state(false);
   let focus = $state<string | null>(null);
   let openAgentId = $state<string | null>(null);
   let copied = $state<string | null>(null);
@@ -78,6 +79,10 @@
     host: string | null;
     pid: number | null;
     presence: "live" | "stale" | "paused";
+    /** Roster maintenance would remove this row. */
+    abandoned: boolean;
+    /** Why it qualifies, for the badge tooltip. */
+    abandonedReason: string | null;
     paused: boolean;
     pausedBy: string | null;
     pausedAt: string | null;
@@ -125,6 +130,8 @@
           host: null,
           pid: null,
           presence: "stale",
+          abandoned: false,
+          abandonedReason: null,
           paused: false,
           pausedBy: null,
           pausedAt: null,
@@ -175,6 +182,8 @@
       g.host = r.host ?? g.host;
       g.pid = r.pid ?? g.pid;
       g.presence = r.status;
+      g.abandoned = r.abandoned;
+      g.abandonedReason = r.abandoned_reason ?? null;
       g.paused = r.paused;
       g.pausedBy = r.paused_by_login ?? null;
       g.pausedAt = r.paused_at ?? null;
@@ -220,6 +229,7 @@
   const hiddenGroups = $derived(allGroups.filter((g) => g.hidden));
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
+  const abandonedCount = $derived(allGroups.filter((g) => g.abandoned).length);
 
   interface AgentNode {
     group: Group;
@@ -333,6 +343,7 @@
     const ids = new Set<string>();
     for (const g of allGroups) {
       if (g.hidden && !showHidden && g.name !== focus) continue;
+      if (g.abandoned && !showAbandoned && g.name !== focus) continue;
       if (focus && !focusTreeIds.has(g.id)) continue;
       if (staleOnly && g.stale === 0 && g.name !== focus) continue;
       ids.add(g.id);
@@ -868,6 +879,9 @@
         {#if g.hidden}
           <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
         {/if}
+        {#if g.abandoned}
+          <span class="idle-badge" title={g.abandonedReason ?? "No claims, chat or reviews and idle past the prune window"}>abandoned</span>
+        {/if}
         {#if g.paused}
           <span class="paused-badge" title="Claims kept; new claims blocked until resumed">paused</span>
         {:else if g.stale > 0}
@@ -1062,6 +1076,7 @@
     <div class="stats">
       <div class="stat"><b>{shownCount}</b><span>shown</span></div>
       <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
+      <div class="stat" class:warn={abandonedCount > 0}><b>{abandonedCount}</b><span>abandoned</span></div>
       <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live sessions</span></div>
       <div class="stat"><b>{orchestratorCount}</b><span>orchestrators</span></div>
       <div class="stat"><b>{subagentCount}</b><span>subagents</span></div>
@@ -1096,6 +1111,17 @@
       onclick={() => (showHidden = !showHidden)}
     >
       {showHidden ? "Showing hidden" : "Show hidden"} <span>{hiddenCount}</span>
+    </button>
+    <button
+      class="hidden-toggle abandoned-toggle"
+      class:on={showAbandoned}
+      aria-pressed={showAbandoned}
+      title={abandonedCount
+        ? `${abandonedCount} abandoned agent${abandonedCount === 1 ? "" : "s"}: no claims, chat or reviews, idle past the prune window. Roster maintenance removes these daily.`
+        : "No abandoned agents"}
+      onclick={() => (showAbandoned = !showAbandoned)}
+    >
+      {showAbandoned ? "Showing abandoned" : "Show abandoned"} <span>{abandonedCount}</span>
     </button>
     {#if focus}
       <span class="focus-banner">
@@ -1154,7 +1180,9 @@
             ? "No stale claims. Every agent heartbeated in the last 5 minutes."
             : hiddenCount > 0 && !showHidden
               ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
-              : "No agent is working an issue right now."}
+              : abandonedCount > 0 && !showAbandoned
+                ? `All ${abandonedCount} agent${abandonedCount === 1 ? " is" : "s are"} abandoned and hidden from the default view. Use Show abandoned to inspect them.`
+                : "No agent is working an issue right now."}
       </p>
       <p class="hint">
         Agents claim with <code>breadboard claim KEY --agent NAME</code> or the <code>claim_issue</code> MCP tool.
@@ -1605,6 +1633,10 @@
     background: color-mix(in srgb, var(--status-review) 14%, var(--raise));
     border-color: color-mix(in srgb, var(--status-review) 45%, var(--line));
     color: var(--ink);
+  }
+  .abandoned-toggle.on {
+    background: color-mix(in srgb, var(--danger) 12%, var(--raise));
+    border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
   }
   .hidden-toggle span {
     font: 500 10px/1 var(--font-mono);
