@@ -908,6 +908,7 @@
           <div
             class="card-menu"
             role="menu"
+            tabindex="-1"
             aria-label="Actions for {g.name}"
             onclick={(e) => e.stopPropagation()}
             onkeydown={(e) => e.stopPropagation()}
@@ -1053,23 +1054,25 @@
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
 
-  {#if draggingId}
-    <div
-      class="root-drop"
-      class:over={rootDropOver}
-      data-drop-root="true"
-      ondragover={(e) => {
-        e.preventDefault();
-        rootDropOver = true;
-        if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-      }}
-      ondragleave={() => (rootDropOver = false)}
-      ondrop={dropOnRoot}
-    >
-      <b>Drop here to make top level</b>
-      <span>clears the orchestrator, nothing else changes</span>
-    </div>
-  {/if}
+  <div
+    class="root-drop"
+    class:active={!!draggingId}
+    class:over={rootDropOver}
+    data-drop-root="true"
+    role="button"
+    tabindex="-1"
+    aria-label="Drop here to make top level"
+    ondragover={(e) => {
+      e.preventDefault();
+      rootDropOver = true;
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    }}
+    ondragleave={() => (rootDropOver = false)}
+    ondrop={dropOnRoot}
+  >
+    <b>Top level</b>
+    <span>drop a card here to clear its orchestrator</span>
+  </div>
 
   {#if !sections.length}
     <div class="empty">
