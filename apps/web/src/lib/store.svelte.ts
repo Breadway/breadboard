@@ -224,6 +224,16 @@ class Store {
   #lastChatPush = 0;
   #chatPushReady = false;
   #chatPushTimer: ReturnType<typeof setTimeout> | undefined;
+  // Locally read-through chat message id per room. The server writes the read
+  // receipt in the background, so a room-list fetch can still report unread
+  // messages this client has already displayed (BB-205). Counts at or below
+  // the watermark are hidden until the server catches up.
+  #chatReadThrough: Map<number, number> = new Map();
+  // Room-list fetches apply latest-request-wins in the shared cache, not just
+  // in the Chat component: an older snapshot must not overwrite a newer one
+  // for the sidebar badge or the agent cards (BB-184).
+  #chatRoomsSeq = 0;
+  #chatRoomsApplied = 0;
   #everLive = false;
   #issuesGen = 0;
   #retry: ReturnType<typeof setTimeout> | undefined;
@@ -582,10 +592,54 @@ class Store {
   /** Fetch the room list once and keep the shared unread total honest for
    *  views outside Chat. */
   async loadChatRooms(): Promise<ChatRoom[]> {
-    const next = await api.listChatRooms();
+    const seq = ++this.#chatRoomsSeq;
+    const fetched = await api.listChatRooms();
+    // A response that started before a newer one already applied (for example
+    // the snapshot taken before a DM existed) is stale even if it resolves
+    // last. Return the cache instead of overwriting it.
+    if (seq < this.#chatRoomsApplied) return this.chatRooms;
+    this.#chatRoomsApplied = seq;
+    const next = this.#applyChatReads(fetched);
     this.chatRooms = next;
     this.chatUnread = next.reduce((n, r) => n + r.unread, 0);
     return next;
+  }
+
+  /** Hide unread counts this client has already read on screen. */
+  #applyChatReads(list: ChatRoom[]): ChatRoom[] {
+    if (!this.#chatReadThrough.size) return list;
+    let changed = false;
+    const next = list.map((room) => {
+      if (!room.unread) return room;
+      const mark = this.#chatReadThrough.get(room.id);
+      if (mark == null) return room;
+      // Only clear when the newest message is at or below the read point.
+      // A newer message keeps its real count.
+      if (!room.last_message || room.last_message.id > mark) return room;
+      changed = true;
+      return { ...room, unread: 0 };
+    });
+    return changed ? next : list;
+  }
+
+  /** Record that this client has displayed every message up to `messageId` in
+   *  a room, and clear its badge now instead of waiting for the server's
+   *  background read receipt and the next poll. */
+  markChatRoomRead(roomId: number, messageId: number) {
+    if (!messageId) return;
+    const previous = this.#chatReadThrough.get(roomId) ?? 0;
+    if (messageId <= previous) return;
+    this.#chatReadThrough.set(roomId, messageId);
+    let changed = false;
+    const next = this.chatRooms.map((room) => {
+      if (room.id !== roomId || !room.unread) return room;
+      changed = true;
+      return { ...room, unread: 0 };
+    });
+    if (changed) {
+      this.chatRooms = next;
+      this.chatUnread = next.reduce((n, r) => n + r.unread, 0);
+    }
   }
 
   /** The DM shared with this agent, when it already exists. */

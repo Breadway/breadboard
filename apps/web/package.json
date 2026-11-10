@@ -15,9 +15,11 @@
     "test:orchestrator": "node tests/agents-orchestrator.browser.mjs",
     "test:agents-ux": "node tests/agents-ux.browser.mjs",
     "test:chat-dm": "node tests/chat-dm.browser.mjs",
+    "test:chat-followups": "node tests/chat-followups.browser.mjs",
     "test:web-a11y": "node tests/web-a11y.browser.mjs",
     "preview": "vite preview",
-    "check": "svelte-check --tsconfig ./tsconfig.json"
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test:markdown": "node tests/markdown.static.mjs"
   },
   "license": "MIT",
   "dependencies": {
