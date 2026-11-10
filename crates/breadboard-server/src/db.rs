@@ -41,7 +41,7 @@ pub async fn begin_write(pool: &SqlitePool) -> Result<Transaction<'static, Sqlit
 
 /// SQLite reports writer contention as SQLITE_BUSY (5) or SQLITE_LOCKED (6),
 /// including extended codes such as SQLITE_BUSY_SNAPSHOT (517).
-fn is_busy(error: &sqlx::Error) -> bool {
+pub(crate) fn is_busy(error: &sqlx::Error) -> bool {
     let sqlx::Error::Database(db_error) = error else {
         return false;
     };

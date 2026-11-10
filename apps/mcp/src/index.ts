@@ -6,6 +6,7 @@
 //   BREADBOARD_SERVER / BREADBOARD_TOKEN env vars
 //   ~/.config/breadboard/cli.toml   (server, token; written by `breadboard auth login`)
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { homedir, hostname } from "node:os";
@@ -72,12 +73,17 @@ const AGENT_STATE = join(
   "agent.json",
 );
 
-function rememberAgent(name: string) {
+function rememberAgent(name: string, session_id?: string) {
   try {
     mkdirSync(dirname(AGENT_STATE), { recursive: true });
     writeFileSync(
       AGENT_STATE,
-      `${JSON.stringify({ name, pid: process.pid, at: new Date().toISOString() })}\n`,
+      `${JSON.stringify({
+        name,
+        session_id: session_id ?? null,
+        pid: process.pid,
+        at: new Date().toISOString(),
+      })}\n`,
     );
   } catch {
     /* best effort only */
@@ -85,74 +91,139 @@ function rememberAgent(name: string) {
 }
 
 /**
- * One name per MCP process, so an agent's claims group together. The server
- * owns the curated list: registering without a name assigns one and returns
- * alternatives, which keeps the client and server in step.
+ * Identity belongs to the OpenCode conversation, not to this process.
+ *
+ * OpenCode runs one local MCP server for the whole app and serves every
+ * session from it. It sends the calling session id on each tool request as
+ * `_meta["ai.opencode/sessionID"]`, so that is the only id that can tell two
+ * conversations apart. A value captured at spawn time is process-wide and
+ * therefore wrong for every session except the first one.
+ *
+ * `OPENCODE_SESSION_ID` is deliberately not read: OpenCode exports it to
+ * spawned shell commands, not to MCP servers, and in a shared process it is
+ * stale even when present. `BREADBOARD_SESSION_ID` remains available for a
+ * dedicated client that really does own a whole MCP process.
  */
-let autoAgentName: string | undefined = cfg.agent?.trim().toLowerCase() || undefined;
-/** True once the server has accepted this process's current name. A name from
- *  config alone is not safe to rename from: the server may have refused it. */
-let nameConfirmed = false;
-let nameAlternatives: string[] = [];
-let registeredAt = 0;
-let registration: Promise<string> | null = null;
+const DEDICATED_SESSION_ID = process.env.BREADBOARD_SESSION_ID?.trim() || undefined;
+const HOST = hostname().trim();
 const REGISTER_REFRESH_MS = 60_000;
 
-const SESSION_ID =
-  process.env.OPENCODE_SESSION_ID?.trim() ||
-  process.env.BREADBOARD_SESSION_ID?.trim() ||
-  undefined;
-const HOST = hostname().trim();
+type CallContext = {
+  /** Session id that owns this exact tool call, when one exists. */
+  session_id?: string;
+  /** True when `session_id` came from this call's request metadata. */
+  per_call: boolean;
+};
+
+const callContext = new AsyncLocalStorage<CallContext>();
+
+function contextFromExtra(extra?: { _meta?: Record<string, unknown> }): CallContext {
+  const meta = extra?._meta;
+  const raw = meta?.["ai.opencode/sessionID"] ?? meta?.sessionId ?? meta?.session_id;
+  const id = typeof raw === "string" ? raw.trim() : "";
+  if (id) return { session_id: id, per_call: true };
+  return { session_id: DEDICATED_SESSION_ID, per_call: false };
+}
+
+function currentContext(): CallContext {
+  return callContext.getStore() ?? {
+    session_id: DEDICATED_SESSION_ID,
+    per_call: false,
+  };
+}
+
+/** The session id to send on a write. This is this call's own id, or the
+ *  explicit id of a dedicated process. It is never a stale startup value. */
+function callSessionId(): string | undefined {
+  return currentContext().session_id;
+}
+
+type Identity = {
+  name?: string;
+  /** True once the server accepted `name`. A name from config alone is not
+   *  safe to rename from: the server may have refused it. */
+  confirmed: boolean;
+  alternatives: string[];
+  registeredAt: number;
+  registration: Promise<string> | null;
+};
+
+/** One identity per conversation, so naming or registering one session cannot
+ *  move another session's claims or chat identity. */
+const identities = new Map<string, Identity>();
+
+function identityFor(ctx = currentContext()): Identity {
+  const key = ctx.session_id ?? "";
+  let found = identities.get(key);
+  if (!found) {
+    found = {
+      // A configured name belongs to the process. Only seed it for the
+      // process-wide identity; a per-call session must get its own name.
+      name: ctx.per_call ? undefined : cfg.agent?.trim().toLowerCase() || undefined,
+      confirmed: false,
+      alternatives: [],
+      registeredAt: 0,
+      registration: null,
+    };
+    identities.set(key, found);
+  }
+  return found;
+}
 
 /** Turn a name collision into a message that tells the agent what to do next.
  *  The server names the holding session and returns free alternatives; the
  *  plugin only learns a name from successful identity calls, so a refusal must
- *  not be recorded as this process's name. */
-function explainRegistrationError(e: unknown): never {
+ *  not be recorded as the caller's name. */
+function explainRegistrationError(e: unknown, identity: Identity): never {
   if (e instanceof ApiError && e.status === 409) {
     const details = e.details;
-    const alternatives = details?.alternatives ?? nameAlternatives;
+    const alternatives = details?.alternatives ?? identity.alternatives;
     const suffix = alternatives.length ? ` Try: ${alternatives.join(", ")}` : "";
     throw new Error(`${e.message}${suffix}`);
   }
   throw e;
 }
 
-/** Register this process and refresh `last_seen`, throttled on the MCP side. */
+/** Register the calling session and refresh `last_seen`, throttled per
+ *  identity. The registration carries the per-call session id, so the server
+ *  can bind a name to the conversation that actually made the call. */
 async function ensureRegistered(force = false): Promise<string> {
+  const ctx = currentContext();
+  const identity = identityFor(ctx);
   const now = Date.now();
-  if (!force && autoAgentName && now - registeredAt < REGISTER_REFRESH_MS) {
-    return autoAgentName;
+  if (!force && identity.name && now - identity.registeredAt < REGISTER_REFRESH_MS) {
+    return identity.name;
   }
-  if (registration) return registration;
-  registration = (async () => {
+  if (identity.registration) return identity.registration;
+  identity.registration = (async () => {
     const res = await client.registerAgent({
-      agent_name: autoAgentName,
-      session_id: SESSION_ID,
+      agent_name: identity.name,
+      session_id: ctx.session_id,
       host: HOST || undefined,
       pid: process.pid,
       note: "opencode mcp",
     });
-    autoAgentName = res.agent_name;
-    nameConfirmed = true;
-    nameAlternatives = res.alternatives ?? [];
-    registeredAt = Date.now();
-    rememberAgent(autoAgentName);
-    ensureChatPoller(autoAgentName);
-    return autoAgentName;
+    identity.name = res.agent_name;
+    identity.confirmed = true;
+    identity.alternatives = res.alternatives ?? [];
+    identity.registeredAt = Date.now();
+    rememberAgent(identity.name, ctx.session_id);
+    ensureChatPoller(identity.name);
+    return identity.name;
   })();
   try {
-    return await registration;
+    return await identity.registration;
   } finally {
-    registration = null;
+    identity.registration = null;
   }
 }
 
 function defaultAgentName(): string {
-  if (!autoAgentName) {
+  const identity = identityFor();
+  if (!identity.name) {
     throw new Error("agent is not registered yet; call name_agent or retry");
   }
-  return autoAgentName;
+  return identity.name;
 }
 
 /** Claims owned by the signed-in user under this agent name. */
@@ -242,12 +313,10 @@ async function run<T>(fn: () => Promise<T>) {
   });
 }
 
-// Register at startup, before the first tool call, so the chat plugin can map
-// this session from the start. A failed startup registration is retried by
-// the first tool call.
-void ensureRegistered().catch((e) => {
-  console.error(`breadboard registration failed: ${e instanceof Error ? e.message : String(e)}`);
-});
+// Registration happens on the first tool call, not at startup: there is no
+// session id yet at spawn time, and registering without one would attach this
+// process (and any other conversation it serves) to whatever stale session row
+// the server still holds for the name.
 
 async function resolveEpicId(keyOrId?: string): Promise<number | undefined> {
   if (!keyOrId) return undefined;
@@ -321,20 +390,48 @@ async function mergeLinks(
 
 const server = new McpServer({ name: "breadboard", version: "0.1.0" });
 
+/**
+ * Register a tool with the calling conversation's context attached. Every
+ * handler runs inside an AsyncLocalStorage scope, so registration, claims,
+ * chat and commit attribution resolve the session id from the request's
+ * `_meta` instead of a process-wide value captured at startup.
+ */
+type ToolExtra = {
+  _meta?: Record<string, unknown>;
+  signal?: AbortSignal;
+};
+
+function tool(
+  name: string,
+  description: string,
+  params: Record<string, unknown>,
+  handler: (args: any, extra?: ToolExtra) => unknown,
+) {
+  return server.tool(name, description, params as never, ((args: any, extra?: ToolExtra) =>
+    callContext.run(contextFromExtra(extra), () => handler(args, extra))) as never);
+}
+
 // --- chat push -------------------------------------------------------------
 //
 // DMs and @pings always push; group rooms push when the agent subscribed with
 // chat_push. The server keeps the inbox; this loop turns new rows into MCP
 // logging notifications so the client sees them without polling tools.
 
-let chatPoller: ReturnType<typeof setInterval> | undefined;
-let pollerAgent: string | undefined;
-let lastPushId = 0;
+/// One fallback poller per conversation. A single process can serve several
+/// sessions, so a shared poller would drain one identity's inbox and advance
+/// another conversation's cursor.
+type ChatPoller = { timer: ReturnType<typeof setInterval>; lastPushId: number };
+const chatPollers = new Map<string, ChatPoller>();
 
-function stopChatPoller() {
-  if (chatPoller) clearInterval(chatPoller);
-  chatPoller = undefined;
-  pollerAgent = undefined;
+function stopChatPoller(name?: string) {
+  if (name) {
+    const poller = chatPollers.get(name);
+    if (poller) clearInterval(poller.timer);
+    chatPollers.delete(name);
+    return;
+  }
+  for (const poller of chatPollers.values()) clearInterval(poller.timer);
+  chatPollers.clear();
 }
 
 /// The breadboard-chat plugin already injects pushes into the session. Running
@@ -354,17 +451,17 @@ function ensureChatPoller(explicit?: string) {
     stopChatPoller()
     return
   }
-  const name = explicit?.trim() || autoAgentName;
+  const name = explicit?.trim() || identityFor().name;
   if (!name) return;
-  if (chatPoller && pollerAgent === name) return;
-  if (chatPoller) clearInterval(chatPoller);
-  pollerAgent = name;
-  chatPoller = setInterval(() => {
-    void (async () => {
+  if (chatPollers.has(name)) return;
+  const poller: ChatPoller = {
+    lastPushId: 0,
+    timer: setInterval(() => {
+      void (async () => {
       try {
-        const pushes = await client.listChatPushes(name, lastPushId, 20);
+        const pushes = await client.listChatPushes(name, poller.lastPushId, 20);
         for (const push of pushes) {
-          lastPushId = Math.max(lastPushId, push.id);
+          poller.lastPushId = Math.max(poller.lastPushId, push.id);
           const where = push.room_name ? `#${push.room_name}` : "DM";
           const text = `[chat ${push.kind}] ${push.message.author_display} in ${where}: ${push.message.body || "(attachment)"}`;
           console.error(text);
@@ -389,9 +486,11 @@ function ensureChatPoller(explicit?: string) {
       } catch {
         /* keep polling */
       }
-    })();
-  }, 5_000);
-  chatPoller.unref?.();
+      })();
+    }, 5_000),
+  };
+  poller.timer.unref?.();
+  chatPollers.set(name, poller);
 }
 
 const stopEverything = () => {
@@ -403,11 +502,11 @@ process.removeListener("SIGTERM", stopAllKeepalives);
 process.once("SIGINT", stopEverything);
 process.once("SIGTERM", stopEverything);
 
-server.tool("whoami", "The signed-in user and the server URL.", {}, () =>
+tool("whoami", "The signed-in user and the server URL.", {}, () =>
   run(async () => ({ server: cfg.server, user: await client.me() })),
 );
 
-server.tool(
+tool(
   "list_issues",
   "List issues, optionally filtered.",
   {
@@ -432,14 +531,14 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "get_issue",
   "One issue with its comments.",
   { key: z.string().describe("issue key, e.g. BREAD-42") },
   ({ key }) => run(() => client.getIssue(key)),
 );
 
-server.tool(
+tool(
   "board",
   "The board grouped by status (counts + titles).",
   {
@@ -462,7 +561,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "create_issue",
   "Create an issue. Title is required, and so is the right project once there is more than one. " +
     "ROUTING RULES (important): file the issue where the work actually lives. " +
@@ -502,7 +601,7 @@ server.tool(
     ),
 );
 
-server.tool(
+tool(
   "update_issue",
   "Patch an issue. Any omitted field is left unchanged. CLAIM FIRST: agents must " +
     "call claim_issue before starting work (first claim wins; 409 means someone else is on it: " +
@@ -552,7 +651,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "move_issue",
   "Shorthand: set an issue's status. CLAIM FIRST with claim_issue (and heartbeat via " +
     "update_claim); 409 means another agent holds it. Workflow: doing when work actually starts, review once "
@@ -562,7 +661,7 @@ server.tool(
   ({ key, status }) => run(() => client.patchIssue(key, { status: status as IssuePatch["status"] })),
 );
 
-server.tool(
+tool(
   "delete_issue",
   "Permanently delete an issue. There is no undo.",
   { key: z.string() },
@@ -573,25 +672,25 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "move_issue_project",
   "Move an issue to a different project; it is reassigned a new key/number in that project.",
   { key: z.string(), project: z.string().describe("target project key") },
   ({ key, project }) => run(() => client.moveIssueProject(key, project.toUpperCase())),
 );
 
-server.tool(
+tool(
   "comment",
   "Add a comment to an issue (pushed to Forgejo if the issue is linked).",
   { key: z.string(), body: z.string() },
   ({ key, body }) => run(() => client.addComment(key, body)),
 );
 
-server.tool("activity", "An issue's change history.", { key: z.string() }, ({ key }) =>
+tool("activity", "An issue's change history.", { key: z.string() }, ({ key }) =>
   run(() => client.getActivity(key)),
 );
 
-server.tool(
+tool(
   "list_artifacts",
   "List typed evidence attached to an issue (benches, screenshots, CI logs, diffs, traces). " +
     "Each row shows the uploader agent and session id plus its expiry.",
@@ -599,7 +698,7 @@ server.tool(
   ({ key }) => run(() => client.listIssueArtifacts(key)),
 );
 
-server.tool(
+tool(
   "attach_artifact",
   "Attach immutable evidence to an issue. Pass base64 data (raw or a data: URL). " +
     "Kinds: bench, screenshot, ci-log, diff, trace, other. A screenshot must be png, jpeg, gif " +
@@ -630,17 +729,17 @@ server.tool(
         comment_id,
         review_ref,
         agent_name: chatAgent(agent_name),
-        session_id: SESSION_ID,
+        session_id: callSessionId(),
       }),
     ),
 );
 
-server.tool(
+tool(
   "record_commit",
   "Record which agent, session and model produced a commit. Call this right after committing a " +
-    "change for an issue, so a bug can be traced from issue to commit to model. The server resolves " +
-    "your agent and session from this MCP process and resolves the model from usage data for this " +
-    "exact session; it never guesses from whichever agent was last active. If this session used " +
+    "change for an issue, so a bug can be traced from issue to commit to model. The server records " +
+    "the agent and session of this exact call and resolves the model from usage data for that " +
+    "session; it never guesses from whichever agent was last active. If this session used " +
     "more than one model, pass model explicitly. Pass workdir (the local repo path) to fill commit " +
     "tree_sha and patch_id from git, which lets a later rebase or squash match this record. " +
     "When workdir is given it must be a git work tree and the commit must resolve there; otherwise " +
@@ -684,16 +783,16 @@ server.tool(
         patch_id: resolvedPatch,
         tree_sha: resolvedTree,
         agent_name: defaultAgentName(),
-        session_id: SESSION_ID,
+        session_id: callSessionId(),
       });
     }),
 );
 
-server.tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));
-server.tool("list_epics", "All epics with done/total progress.", {}, () => run(() => client.listEpics()));
-server.tool("list_cycles", "All cycles.", {}, () => run(() => client.listCycles()));
+tool("list_projects", "All projects.", {}, () => run(() => client.listProjects()));
+tool("list_epics", "All epics with done/total progress.", {}, () => run(() => client.listEpics()));
+tool("list_cycles", "All cycles.", {}, () => run(() => client.listCycles()));
 
-server.tool(
+tool(
   "get_epic",
   "Get an epic by key or id, including its progress and child issues.",
   { epic: z.string().describe("epic key or id") },
@@ -709,7 +808,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "create_epic",
   "Create an epic, optionally scoped to a project.",
   {
@@ -729,7 +828,7 @@ server.tool(
     ),
 );
 
-server.tool(
+tool(
   "update_epic",
   "Update an epic by key or id. Omitted fields are left unchanged; description may be null to clear it.",
   {
@@ -746,7 +845,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "delete_epic",
   "Delete an epic by key or id. Child issues are kept and unlinked from the epic.",
   { epic: z.string().describe("epic key or id") },
@@ -759,7 +858,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "create_cycle",
   "Create a cycle with inclusive ISO dates.",
   {
@@ -771,7 +870,7 @@ server.tool(
   ({ name, starts_on, ends_on, project_ids }) => run(() => client.createCycle({ name, starts_on, ends_on, project_ids })),
 );
 
-server.tool("update_cycle_projects", "Replace the projects selected for a cycle's new-issue defaults. Existing issues are not moved.", {
+tool("update_cycle_projects", "Replace the projects selected for a cycle's new-issue defaults. Existing issues are not moved.", {
   cycle: z.string().describe("cycle name or id"),
   project_ids: z.array(z.number().int()),
 }, ({ cycle, project_ids }) => run(async () => {
@@ -780,7 +879,7 @@ server.tool("update_cycle_projects", "Replace the projects selected for a cycle'
   return client.updateCycle(id, { project_ids });
 }));
 
-server.tool(
+tool(
   "start_cycle",
   "Start a cycle by name or id.",
   { cycle: z.string().describe("cycle name or id") },
@@ -792,7 +891,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "end_cycle",
   "End a cycle by name or id.",
   { cycle: z.string().describe("cycle name or id") },
@@ -804,9 +903,9 @@ server.tool(
     }),
 );
 
-server.tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => client.listRepos()));
+tool("list_repos", "Forgejo repos being synced.", {}, () => run(() => client.listRepos()));
 
-server.tool(
+tool(
   "create_project",
   "Create a project. Repo-less by default, which is the right choice for a new project that does not have a " +
     "Forgejo repo yet, and for work about the machine/tooling rather than one repo's code. " +
@@ -821,7 +920,7 @@ server.tool(
     run(() => client.createProject({ key: key.toUpperCase(), name, forgejo_repo })),
 );
 
-server.tool(
+tool(
   "update_project",
   "Rename a project, archive/unarchive it, or attach/detach its Forgejo repo mapping. Omitted "
     + "fields are left unchanged; pass forgejo_repo: null to detach it.",
@@ -842,14 +941,14 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "add_repo",
   "Map a Forgejo repo to a project and start syncing its issues.",
   { repo: z.string().describe("owner/name"), key: z.string(), name: z.string().optional() },
   ({ repo, key, name }) => run(() => client.addRepo(repo, key.toUpperCase(), name)),
 );
 
-server.tool(
+tool(
   "remove_repo",
   "Stop syncing a Forgejo repo (disables it; the project and its already-synced issues stay).",
   { repo: z.string().describe("owner/name") },
@@ -860,7 +959,7 @@ server.tool(
     }),
 );
 
-server.tool("reconcile", "Run a Forgejo reconcile pass now.", {}, () =>
+tool("reconcile", "Run a Forgejo reconcile pass now.", {}, () =>
   run(async () => {
     await client.reconcile();
     return "reconcile queued";
@@ -880,7 +979,7 @@ const AGENT_STATES = [
   "done",
 ] as const;
 
-server.tool(
+tool(
   "claim_issue",
   "Claim an issue as an agent. REQUIRED FIRST STEP before any implementation work: " +
     "no code changes without holding the claim. " +
@@ -921,8 +1020,15 @@ server.tool(
     run(async () => {
       const name = agent_name?.trim() || defaultAgentName();
       const mode = (claim.mode ?? "exclusive") as "exclusive" | "intent";
+      // Bind the claim to the conversation that made the call. The server
+      // falls back to the name's registered session when this is absent.
+      const session_id = claim.session_id?.trim() || callSessionId();
       try {
-        const created = await client.claimIssue(key, { ...claim, agent_name: name } as never);
+        const created = await client.claimIssue(key, {
+          ...claim,
+          agent_name: name,
+          session_id,
+        } as never);
         startKeepalive(key, created.agent_name);
         ensureChatPoller(created.agent_name);
         const issue = await client.getIssue(key).catch(() => null);
@@ -937,7 +1043,11 @@ server.tool(
             (c) => c.key.toLowerCase() === key.toLowerCase() && c.mode === mode,
           );
           if (mine) {
-            const resumed = await client.heartbeatClaim(key, { agent_name: name }, name);
+            const resumed = await client.heartbeatClaim(
+              key,
+              { agent_name: name, session_id: callSessionId() },
+              name,
+            );
             startKeepalive(key, resumed.agent_name);
             ensureChatPoller(resumed.agent_name);
             const issue = await client.getIssue(key).catch(() => null);
@@ -953,7 +1063,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "update_claim",
   "Heartbeat / update your claim (refreshes the live signal on the Agents page). Only the claiming user may update.",
   {
@@ -970,10 +1080,19 @@ server.tool(
     pr_number: z.number().nullable().optional(),
     head_sha: z.string().nullable().optional(),
   },
-  ({ key, ...update }) => run(() => client.heartbeatClaim(key, update as never)),
+  ({ key, ...update }) =>
+    run(() => {
+      // An absent session_id means "this conversation"; an explicit null still
+      // clears it. A heartbeat must never borrow another session's id.
+      const session_id =
+        update.session_id === null
+          ? null
+          : update.session_id?.trim() || callSessionId();
+      return client.heartbeatClaim(key, { ...update, session_id } as never);
+    }),
 );
 
-server.tool(
+tool(
   "release_claim",
   "Release your claim (exclusive or intent). The card keeps its status; only the agent tint goes away. " +
     "REQUIRED: pass note, one line covering what is done, what is next and what is risky, so the next " +
@@ -999,14 +1118,15 @@ server.tool(
   },
   ({ key, agent_name, note, no_note }) =>
     run(async () => {
-      const who = agent_name?.trim() || autoAgentName;
+      const who = agent_name?.trim() || identityFor().name;
+      if (!who) throw new Error("no agent name yet: pass agent_name or claim the issue first");
       await client.releaseClaim(key, who, note, no_note === true);
       stopKeepalive(key, who);
       return `released ${key}`;
     }),
 );
 
-server.tool(
+tool(
   "set_agent_message",
   "Set or clear the one-line message shown under your name in the Agents view. " +
     "Use it for what you are about (or a fun motto); keep it to one short line. " +
@@ -1017,21 +1137,22 @@ server.tool(
   },
   ({ message, agent_name }) =>
     run(async () => {
-      const name = agent_name?.trim() || autoAgentName;
+      const name = agent_name?.trim() || identityFor().name;
       if (!name) throw new Error("no agent name yet: pass agent_name or call claim_issue first");
       ensureChatPoller(name);
       return client.setAgentMessage(name, message);
     }),
 );
 
-server.tool(
+tool(
   "name_agent",
-  "Name this MCP process before you claim any work. Sets the name later claim and chat calls use " +
+  "Name this conversation before you claim any work. Sets the name later claim and chat calls use " +
     "(so you can omit agent_name), registers your profile in the Agents view, and starts chat " +
     "polling. Pick something fun and memorable, and reuse it across issues. Before claims exist a " +
     "rename is free; after claims exist the server moves them with the profile or refuses a target " +
-    "already in use. This also lets the chat plugin map this session, so DMs and mentions reach you " +
-    "before your first claim.",
+    "already in use. Only this conversation is renamed: another OpenCode session sharing the same " +
+    "MCP server keeps its own name. This also lets the chat plugin map this session, so DMs and " +
+    "mentions reach you before your first claim.",
   {
     agent_name: z.string().describe("fun, memorable name, e.g. Toasty Pretzel"),
     message: z
@@ -1044,10 +1165,11 @@ server.tool(
       const name = agent_name.trim().toLowerCase();
       if (!name) throw new Error("agent_name is required");
       const line = message?.trim() || "Ready for work.";
+      const identity = identityFor();
       // A rename after claims exist moves them and the profile in one server
       // transaction, or is refused. Before any claims it is free.
-      const previous = autoAgentName;
-      const previousConfirmed = nameConfirmed;
+      const previous = identity.name;
+      const previousConfirmed = identity.confirmed;
       let renamed = false;
       try {
         // Only rename from a name the server has actually accepted. A name
@@ -1057,27 +1179,27 @@ server.tool(
           await client.renameAgent(previous, name);
           renamed = true;
         }
-        autoAgentName = name;
-        registeredAt = 0;
+        identity.name = name;
+        identity.registeredAt = 0;
         await ensureRegistered(true);
       } catch (e) {
-        // A refused registration must not strand this process (or the chat
-        // plugin) on a name another live session owns. If the rename already
-        // happened, the server moved this session to the new name, so keep it;
-        // otherwise restore the identity that was still valid.
+        // A refused registration must not strand this conversation (or the
+        // chat plugin) on a name another live session owns. If the rename
+        // already happened, the server moved this session to the new name, so
+        // keep it; otherwise restore the identity that was still valid.
         if (!renamed) {
-          autoAgentName = previous;
-          nameConfirmed = previousConfirmed;
+          identity.name = previous;
+          identity.confirmed = previousConfirmed;
         }
-        registeredAt = 0;
-        explainRegistrationError(e);
+        identity.registeredAt = 0;
+        explainRegistrationError(e, identity);
       }
       ensureChatPoller(name);
       return client.setAgentMessage(name, line);
     }),
 );
 
-server.tool(
+tool(
   "resume_claims",
   "Re-attach to work you already own after a restart. Heartbeats every claim owned by you under " +
     "this agent name and re-arms the keepalive for each, so they stop looking abandoned/stale. " +
@@ -1092,7 +1214,7 @@ server.tool(
   },
   ({ agent_name }) =>
     run(async () => {
-      const name = agent_name?.trim() || autoAgentName;
+      const name = agent_name?.trim() || identityFor().name;
       if (!name) {
         throw new Error("no agent name yet: pass agent_name or call claim_issue first");
       }
@@ -1104,7 +1226,11 @@ server.tool(
       const failed: string[] = [];
       for (const c of mine) {
         try {
-          await client.heartbeatClaim(c.key, { agent_name: name }, name);
+          await client.heartbeatClaim(
+            c.key,
+            { agent_name: name, session_id: callSessionId() },
+            name,
+          );
           startKeepalive(c.key, name);
           const issue = await client.getIssue(c.key).catch(() => null);
           resumed.push({ key: c.key, last_handoff: issue?.last_handoff ?? null });
@@ -1122,11 +1248,11 @@ server.tool(
 
 /** The agent name to speak as; chat requires one. */
 function chatAgent(explicit?: string): string {
-  const name = explicit?.trim() || autoAgentName;
+  const name = explicit?.trim() || identityFor().name;
   if (!name) {
     throw new Error("no agent name yet: claim an issue or pass agent_name");
   }
-  rememberAgent(name);
+  rememberAgent(name, callSessionId());
   return name;
 }
 
@@ -1134,7 +1260,7 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Resolve a room name/id, or the DM with another agent, to a room id. */
 async function resolveChatRoom(name: string, room?: string, peer?: string): Promise<number> {
-  if (peer) return (await client.openDm(peer, name, SESSION_ID)).id;
+  if (peer) return (await client.openDm(peer, name, callSessionId())).id;
   const rooms = await client.listChatRooms(name);
   const want = room?.trim() || "lobby";
   const found = rooms.find((r) => String(r.id) === want || r.name === want);
@@ -1142,7 +1268,7 @@ async function resolveChatRoom(name: string, room?: string, peer?: string): Prom
   return found.id;
 }
 
-server.tool(
+tool(
   "chat_push",
   "Turn push notifications on/off for a shared room. DMs and @pings always push; group rooms " +
     "only push while subscribed. New pushes arrive as MCP notifications and in chat_pushes.",
@@ -1160,7 +1286,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "chat_pushes",
   "Drain your chat push inbox (DMs, @pings, and subscribed rooms). Pass ack:true to clear the " +
     "ones returned. New pushes also arrive as MCP notifications while this process is running.",
@@ -1181,7 +1307,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "chat_rooms",
   "List chat rooms and DMs with an unread count per room. Shared rooms (including the global " +
     "lobby) are open to everyone; an agent only sees DMs it belongs to. Check this between tasks " +
@@ -1195,7 +1321,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "chat_read",
   "Read recent messages from a room or DM and advance your read cursor. Use `room` for a room " +
     "name/id (default lobby) or `with` to read the DM with another agent.",
@@ -1216,7 +1342,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "chat_wait",
   "Wait for the next chat message instead of polling. Blocks until a message arrives, or until " +
     "`timeout` seconds pass. Use timeout:'inf' to wait indefinitely, but run that inside a " +
@@ -1267,7 +1393,7 @@ server.tool(
     }),
 );
 
-server.tool(
+tool(
   "chat_send",
   "Send a chat message as yourself. Use `to` for a DM with another agent, or `room` for a " +
     "shared room (default lobby). Create new rooms with chat_create_room.",
@@ -1290,12 +1416,12 @@ server.tool(
         room,
         uploads,
         agent_name: chatAgent(agent_name),
-        session_id: SESSION_ID,
+        session_id: callSessionId(),
       });
     }),
 );
 
-server.tool(
+tool(
   "chat_upload",
   "Upload a file or image to attach to a chat message. Pass base64 data (raw or a data: URL), " +
     "then send the returned upload id in chat_send. 10 MB limit.",
@@ -1308,7 +1434,7 @@ server.tool(
     run(() => client.uploadChatBase64(filename, data_base64, mime)),
 );
 
-server.tool(
+tool(
   "chat_create_room",
   "Create a shared chat room (the global lobby already exists). Silly rooms encouraged.",
   {
@@ -1318,7 +1444,7 @@ server.tool(
   ({ name, description }) => run(() => client.createChatRoom(name, description)),
 );
 
-server.tool(
+tool(
   "suggest_agent_names",
   "Get the server's curated agent name list: this session's assigned name plus a few free " +
     "alternatives. Names are characters, not hosts: pass your pick to name_agent, then reuse it " +
@@ -1326,23 +1452,26 @@ server.tool(
   { count: z.number().min(1).max(20).optional().describe("how many names, default 4") },
   ({ count }) =>
     run(async () => {
-      const names = [...new Set([autoAgentName, ...nameAlternatives].filter((n): n is string => Boolean(n)))];
+      const identity = identityFor();
+      const names = [
+        ...new Set([identity.name, ...identity.alternatives].filter((n): n is string => Boolean(n))),
+      ];
       return names.slice(0, count ?? 4);
     }),
 );
 
-server.tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>
+tool("list_agents", "Live agent claims (exclusive presence per issue).", {}, () =>
   run(() => client.listAgents()),
 );
 
-server.tool(
+tool(
   "agent_status",
   "Server-side roll-up mirroring the opencode bb-status widget line, computed from live claims.",
   {},
   () => run(() => client.agentStatus()),
 );
 
-server.tool(
+tool(
   "import_markdown",
   "Import a markdown outline: '##' headings become epics, '- [ ]' / '- [x]' items become issues.",
   {
@@ -1354,14 +1483,14 @@ server.tool(
   ({ project, markdown, dry_run, repair }) => run(() => client.importMarkdown({ project, markdown, dry_run, repair })),
 );
 
-server.tool(
+tool(
   "inbox",
   "List your notification inbox.",
   { unread_only: z.boolean().optional() },
   ({ unread_only }) => run(() => client.inbox(unread_only)),
 );
 
-server.tool(
+tool(
   "mark_notification_read",
   "Mark one notification as read.",
   { id: z.number() },
@@ -1372,18 +1501,18 @@ server.tool(
     }),
 );
 
-server.tool("mark_all_notifications_read", "Mark every notification as read.", {}, () =>
+tool("mark_all_notifications_read", "Mark every notification as read.", {}, () =>
   run(async () => {
     await client.markAllRead();
     return "all marked read";
   }),
 );
 
-server.tool("get_notification_prefs", "Your notification preferences.", {}, () =>
+tool("get_notification_prefs", "Your notification preferences.", {}, () =>
   run(() => client.getNotificationPrefs()),
 );
 
-server.tool(
+tool(
   "set_notification_prefs",
   "Set your notification preferences (full replace, all four fields required).",
   {

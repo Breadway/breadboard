@@ -3212,7 +3212,16 @@ async fn upsert_agent_session(
              user_id, first_seen, last_seen)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
          ON CONFLICT(agent_name) DO UPDATE SET
-            session_id         = COALESCE(excluded.session_id, agent_sessions.session_id),
+            -- A registration that cannot name its session (pid is only set by
+            -- /api/agents/register) must not inherit the previous holder's
+            -- session id: that is exactly how a shared MCP process used to
+            -- borrow another conversation's identity. Claims and heartbeats
+            -- pass pid = NULL and keep whatever session is known.
+            session_id         = CASE
+                WHEN excluded.session_id IS NOT NULL THEN excluded.session_id
+                WHEN excluded.pid IS NOT NULL THEN NULL
+                ELSE agent_sessions.session_id
+            END,
             -- Only a new non-empty title replaces the stored one. An omitted
             -- or empty title (heartbeat, rename, older client) never clears it.
             session_title      = COALESCE(excluded.session_title, agent_sessions.session_title),

@@ -498,3 +498,122 @@ async fn pr_card_shows_the_linked_issue_commits() {
         .unwrap();
     assert!(commits.is_empty());
 }
+
+/// BB-215: a caller that presents a name and a session id that disagree is
+/// refused with an explicit conflict, and nothing is recorded. A name with no
+/// session id resolves to that name's own registered session instead of
+/// borrowing another conversation's.
+#[tokio::test]
+async fn commit_identity_must_match_the_calling_session() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let key = project_and_issue(&c, &base, &auth).await;
+    register(&c, &base, &auth, "alpha", "ses_alpha", None).await;
+    register(&c, &base, &auth, "beta", "ses_beta", None).await;
+
+    let refused_sha = sha('3');
+    let (status, body) = record(
+        &c,
+        &base,
+        &auth,
+        json!({
+            "repo": "Breadway/breadboard",
+            "sha": refused_sha,
+            "issue": key,
+            "agent_name": "alpha",
+            "session_id": "ses_beta",
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CONFLICT, "{body}");
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(message.contains("ses_beta"), "{message}");
+    assert!(message.contains("beta"), "{message}");
+
+    let commits: Vec<Value> = c
+        .get(format!("{base}/api/issues/{key}/commits"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(commits.is_empty(), "a refused identity must record nothing");
+
+    let correct_sha = sha('4');
+    let (status, body) = record(
+        &c,
+        &base,
+        &auth,
+        json!({
+            "repo": "Breadway/breadboard",
+            "sha": correct_sha,
+            "issue": key,
+            "agent_name": "alpha",
+            "session_id": "ses_alpha",
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+    assert_eq!(body["agent_name"], "alpha");
+    assert_eq!(body["session_id"], "ses_alpha");
+
+    // With no session id the server uses the name's registered session, which
+    // is the fallback for clients that cannot send a per-call id.
+    let by_name_sha = sha('5');
+    let (status, body) = record(
+        &c,
+        &base,
+        &auth,
+        json!({
+            "repo": "Breadway/breadboard",
+            "sha": by_name_sha,
+            "issue": key,
+            "agent_name": "beta",
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+    assert_eq!(body["agent_name"], "beta");
+    assert_eq!(body["session_id"], "ses_beta");
+
+    // A registration from a process that cannot name its session must not
+    // inherit the previous holder's id. Otherwise the name-based fallback
+    // keeps borrowing the same stale session that caused the misattribution.
+    register(&c, &base, &auth, "delta", "ses_delta", None).await;
+    let resp = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "delta", "pid": 4242 }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.text().await.unwrap());
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = 'delta'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(stored, None, "a new registration cannot keep a stale session id");
+
+    let no_session_sha = sha('6');
+    let (status, body) = record(
+        &c,
+        &base,
+        &auth,
+        json!({
+            "repo": "Breadway/breadboard",
+            "sha": no_session_sha,
+            "issue": key,
+            "agent_name": "delta",
+        }),
+    )
+    .await;
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{body}");
+    assert_eq!(body["agent_name"], "delta");
+    assert_eq!(body["session_id"], Value::Null);
+}
