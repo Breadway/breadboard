@@ -215,7 +215,7 @@ try {
     assert.ok(focused.some((c) => c.name === names.orch), `${width}: focused orchestrator remains visible`);
     assert.ok(!focused.some((c) => c.name.startsWith("crumb-")), `${width}: focus hides non-linked agents`);
     assert.ok(!focused.some((c) => c.name === names.hidden), `${width}: focus still respects hidden`);
-    await page.getByRole("button", { name: "Clear" }).click();
+    await page.getByRole("button", { name: "Clear", exact: true }).click();
     await page.waitForTimeout(150);
 
     // Revealing hidden keeps the relationship and offers Unhide.

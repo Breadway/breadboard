@@ -322,7 +322,7 @@ try {
       const focused = await cardInfo();
       assert.ok(focused.some((c) => c.name === names.root), `${width}: focused root stays visible`);
       assert.ok(!focused.some((c) => c.name === names.study), `${width}: jump hides unrelated root sections`);
-      await page.getByRole("button", { name: "Clear" }).click();
+      await page.getByRole("button", { name: "Clear", exact: true }).click();
       await page.waitForTimeout(150);
 
       // Revealing hidden restores the hidden orchestrator card and child.
