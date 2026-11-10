@@ -1118,6 +1118,19 @@ pub async fn open_dm(
     ))
 }
 
+/// Maintenance action for agents whose chat identity was left on an old name
+/// by a rename that predates chat migration. `dry_run` reports the rows that
+/// would move without touching them.
+pub async fn repair_chat_identity(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Json(body): Json<breadboard_core::dto::RepairChatIdentity>,
+) -> AppResult<Json<breadboard_core::dto::ChatIdentityRepair>> {
+    Ok(Json(
+        store::repair_chat_identity(&app.db, &body.old_name, &body.new_name, body.dry_run).await?,
+    ))
+}
+
 // --- chat uploads -----------------------------------------------------------
 
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;

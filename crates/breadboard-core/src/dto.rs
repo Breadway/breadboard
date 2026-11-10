@@ -448,6 +448,38 @@ pub struct OpenDm {
     pub with: String,
 }
 
+/// `POST /api/chat/identity/repair` body. Moves chat membership, read
+/// cursors, pushes and push subscriptions from an old agent name to a new
+/// one for agents already broken by a rename that did not migrate chat.
+/// Refused while the old name still has a live session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepairChatIdentity {
+    pub old_name: String,
+    pub new_name: String,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Rows a chat identity move touches. For a dry run these are the rows that
+/// would move; otherwise the rows that did move.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChatIdentityCounts {
+    pub members: i64,
+    pub reads: i64,
+    pub pushes: i64,
+    pub push_subs: i64,
+    pub dm_rooms: i64,
+}
+
+/// `POST /api/chat/identity/repair` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatIdentityRepair {
+    pub old_name: String,
+    pub new_name: String,
+    pub dry_run: bool,
+    pub counts: ChatIdentityCounts,
+}
+
 /// Server-side roll-up for `GET /api/agents/status`. Counts mirror the
 /// opencode `bb-status` widget line (`BB x/y done, a active, …`), computed
 /// from live claims instead of local session files.

@@ -16,8 +16,8 @@ use sqlx::{FromRow, SqlitePool};
 
 use crate::config::ClaimLimits;
 use crate::dto::{
-    AgentRegister, AgentRegistration, AgentRemoval, AgentRosterEntry, IssueFilter, IssuePatch,
-    NewCycle, NewEpic, NewIssue, NewProject,
+    AgentRegister, AgentRegistration, AgentRemoval, AgentRosterEntry, ChatIdentityCounts,
+    ChatIdentityRepair, IssueFilter, IssuePatch, NewCycle, NewEpic, NewIssue, NewProject,
 };
 use crate::error::{AppError, AppResult};
 use crate::names;
@@ -3923,6 +3923,9 @@ pub async fn rename_agent(
             }
             other => AppError::Db(other),
         })?;
+    // Chat membership is keyed by the agent name too. Move it in the same
+    // transaction so a renamed agent keeps its DMs, read cursors and pushes.
+    move_chat_identity_in_tx(&mut tx, &old, &new).await?;
     tx.commit().await?;
 
     roster_entry(db, &new, limits)
@@ -4770,6 +4773,304 @@ pub async fn chat_is_member(db: &SqlitePool, room_id: i64, member: &str) -> AppR
     .fetch_one(db)
     .await?;
     Ok(n > 0)
+}
+
+/// Count the chat identity rows a move would touch. DM rooms count once per
+/// room even though the member row is part of `members`.
+async fn chat_identity_counts_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    member: &str,
+) -> AppResult<ChatIdentityCounts> {
+    let members: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_room_members WHERE member = ?1")
+            .bind(member)
+            .fetch_one(&mut **tx)
+            .await?;
+    let reads: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_reads WHERE member = ?1")
+        .bind(member)
+        .fetch_one(&mut **tx)
+        .await?;
+    let pushes: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM chat_pushes WHERE member = ?1")
+        .bind(member)
+        .fetch_one(&mut **tx)
+        .await?;
+    let push_subs: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM chat_push_subs WHERE member = ?1")
+            .bind(member)
+            .fetch_one(&mut **tx)
+            .await?;
+    let dm_rooms: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)
+           FROM chat_rooms r
+           JOIN chat_room_members m ON m.room_id = r.id
+          WHERE r.kind = 'dm' AND m.member = ?1",
+    )
+    .bind(member)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(ChatIdentityCounts {
+        members,
+        reads,
+        pushes,
+        push_subs,
+        dm_rooms,
+    })
+}
+
+/// Merge one DM room into another after a rename or repair would give both the
+/// same `dm_key`. Messages keep their ids, authors and displays; membership,
+/// read cursors, push subscriptions and pushes move to the destination room so
+/// the history stays reachable and no duplicate DM remains.
+async fn merge_dm_room_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    from_id: i64,
+    into_id: i64,
+) -> AppResult<()> {
+    sqlx::query("UPDATE chat_messages SET room_id = ?2 WHERE room_id = ?1")
+        .bind(from_id)
+        .bind(into_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO chat_room_members (room_id, member)
+         SELECT ?2, member FROM chat_room_members WHERE room_id = ?1",
+    )
+    .bind(from_id)
+    .bind(into_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM chat_room_members WHERE room_id = ?1")
+        .bind(from_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO chat_reads (room_id, member, last_read_message_id, updated_at)
+         SELECT ?2, member, last_read_message_id, updated_at
+           FROM chat_reads WHERE room_id = ?1
+         ON CONFLICT(room_id, member) DO UPDATE SET
+            last_read_message_id =
+                MAX(chat_reads.last_read_message_id, excluded.last_read_message_id),
+            updated_at = CASE
+                WHEN excluded.updated_at > chat_reads.updated_at THEN excluded.updated_at
+                ELSE chat_reads.updated_at
+            END",
+    )
+    .bind(from_id)
+    .bind(into_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM chat_reads WHERE room_id = ?1")
+        .bind(from_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query(
+        "INSERT OR IGNORE INTO chat_push_subs (user_id, member, room_id, created_at)
+         SELECT user_id, member, ?2, created_at
+           FROM chat_push_subs WHERE room_id = ?1",
+    )
+    .bind(from_id)
+    .bind(into_id)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM chat_push_subs WHERE room_id = ?1")
+        .bind(from_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("UPDATE OR IGNORE chat_pushes SET room_id = ?2 WHERE room_id = ?1")
+        .bind(from_id)
+        .bind(into_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_pushes WHERE room_id = ?1")
+        .bind(from_id)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_rooms WHERE id = ?1")
+        .bind(from_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Recompute the unique `dm_key` for every DM the old member belongs to. A
+/// destination that already uses the new key is merged instead of duplicated.
+async fn move_dm_keys_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    old_member: &str,
+    new_member: &str,
+) -> AppResult<()> {
+    let room_ids: Vec<i64> = sqlx::query_scalar(
+        "SELECT r.id
+           FROM chat_rooms r
+           JOIN chat_room_members m ON m.room_id = r.id
+          WHERE r.kind = 'dm' AND m.member = ?1
+          ORDER BY r.id",
+    )
+    .bind(old_member)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    for room_id in room_ids {
+        let others: Vec<String> = sqlx::query_scalar(
+            "SELECT member FROM chat_room_members
+              WHERE room_id = ?1 AND member <> ?2 ORDER BY member",
+        )
+        .bind(room_id)
+        .bind(old_member)
+        .fetch_all(&mut **tx)
+        .await?;
+        // A DM has exactly one other member. Anything else is malformed data;
+        // leave its key alone rather than inventing a pair.
+        if others.len() != 1 {
+            continue;
+        }
+        let other = &others[0];
+        let (a, b) = if new_member <= other.as_str() {
+            (new_member, other.as_str())
+        } else {
+            (other.as_str(), new_member)
+        };
+        let new_key = format!("{a}|{b}");
+        let existing: Option<i64> =
+            sqlx::query_scalar("SELECT id FROM chat_rooms WHERE dm_key = ?1 AND id <> ?2")
+                .bind(&new_key)
+                .bind(room_id)
+                .fetch_optional(&mut **tx)
+                .await?;
+        match existing {
+            Some(destination) => merge_dm_room_tx(tx, room_id, destination).await?,
+            None => {
+                sqlx::query("UPDATE chat_rooms SET dm_key = ?2 WHERE id = ?1")
+                    .bind(room_id)
+                    .bind(&new_key)
+                    .execute(&mut **tx)
+                    .await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Move every chat identity row from one agent name to another inside an
+/// existing write transaction. Used by rename and by the repair action so the
+/// two paths cannot drift apart.
+async fn move_chat_identity_in_tx(
+    tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>,
+    old_name: &str,
+    new_name: &str,
+) -> AppResult<ChatIdentityCounts> {
+    let old_member = agent_member(old_name);
+    let new_member = agent_member(new_name);
+    let counts = chat_identity_counts_tx(tx, &old_member).await?;
+
+    move_dm_keys_tx(tx, &old_member, &new_member).await?;
+
+    sqlx::query("UPDATE OR IGNORE chat_room_members SET member = ?2 WHERE member = ?1")
+        .bind(&old_member)
+        .bind(&new_member)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_room_members WHERE member = ?1")
+        .bind(&old_member)
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO chat_reads (room_id, member, last_read_message_id, updated_at)
+         SELECT room_id, ?2, last_read_message_id, updated_at
+           FROM chat_reads WHERE member = ?1
+         ON CONFLICT(room_id, member) DO UPDATE SET
+            last_read_message_id =
+                MAX(chat_reads.last_read_message_id, excluded.last_read_message_id),
+            updated_at = CASE
+                WHEN excluded.updated_at > chat_reads.updated_at THEN excluded.updated_at
+                ELSE chat_reads.updated_at
+            END",
+    )
+    .bind(&old_member)
+    .bind(&new_member)
+    .execute(&mut **tx)
+    .await?;
+    sqlx::query("DELETE FROM chat_reads WHERE member = ?1")
+        .bind(&old_member)
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("UPDATE OR IGNORE chat_pushes SET member = ?2 WHERE member = ?1")
+        .bind(&old_member)
+        .bind(&new_member)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_pushes WHERE member = ?1")
+        .bind(&old_member)
+        .execute(&mut **tx)
+        .await?;
+
+    sqlx::query("UPDATE OR IGNORE chat_push_subs SET member = ?2 WHERE member = ?1")
+        .bind(&old_member)
+        .bind(&new_member)
+        .execute(&mut **tx)
+        .await?;
+    sqlx::query("DELETE FROM chat_push_subs WHERE member = ?1")
+        .bind(&old_member)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(counts)
+}
+
+/// Repair chat identity for an agent that was renamed before rename migrated
+/// the chat tables. Refused while the old name has a live session; a stale
+/// session row does not block because the work is already attributed
+/// elsewhere. `dry_run` returns the same counts without writing.
+pub async fn repair_chat_identity(
+    db: &SqlitePool,
+    old_raw: &str,
+    new_raw: &str,
+    dry_run: bool,
+) -> AppResult<ChatIdentityRepair> {
+    let old_name = names::normalize(old_raw);
+    let new_name = names::normalize(new_raw);
+    validate_agent_name(&old_name)?;
+    validate_agent_name(&new_name)?;
+    if old_name == new_name {
+        return Err(AppError::bad_request(
+            "old_name and new_name must be different",
+        ));
+    }
+
+    let mut tx = crate::db::begin_write(db).await?;
+    let last_seen: Option<String> =
+        sqlx::query_scalar("SELECT last_seen FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&old_name)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(last_seen) = last_seen {
+        if (Utc::now() - parse_ts(&last_seen)).num_seconds() < AGENT_LIVE_SECS {
+            return Err(AppError::Conflict(format!(
+                "agent '{old_name}' still has a live session; chat identity can only be \
+                 repaired once it is stale"
+            )));
+        }
+    }
+
+    let counts = if dry_run {
+        chat_identity_counts_tx(&mut tx, &agent_member(&old_name)).await?
+    } else {
+        move_chat_identity_in_tx(&mut tx, &old_name, &new_name).await?
+    };
+    if dry_run {
+        tx.rollback().await?;
+    } else {
+        tx.commit().await?;
+    }
+
+    Ok(ChatIdentityRepair {
+        old_name,
+        new_name,
+        dry_run,
+        counts,
+    })
 }
 
 /// Return the DM room for two members, creating it the first time.

@@ -135,6 +135,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/chat/uploads/{id}", get(api::get_chat_upload))
         .route("/chat/dm", post(api::open_dm))
+        .route("/chat/identity/repair", post(api::repair_chat_identity))
         .route("/chat/pushes", get(api::list_chat_pushes))
         .route("/chat/pushes/ack", post(api::ack_chat_pushes))
         .route(
