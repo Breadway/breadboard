@@ -2385,6 +2385,244 @@ async fn session_links_and_required_handoff() {
     assert_eq!(issue["sessions"].as_array().unwrap().len(), 4);
 }
 
+/// Set a name's orchestrator (or clear it) through the explicit endpoint.
+async fn post_orchestrator(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    name: &str,
+    orchestrator: Option<&str>,
+) -> reqwest::Response {
+    let body = match orchestrator {
+        Some(value) => json!({ "orchestrator": value }),
+        None => json!({}),
+    };
+    c.post(format!("{base}/api/agents/{name}/orchestrator"))
+        .header("authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+}
+
+async fn register_agent(
+    c: &reqwest::Client,
+    base: &str,
+    auth: &str,
+    name: &str,
+    session: &str,
+    parent: Option<&str>,
+) -> Value {
+    let mut body = json!({ "agent_name": name, "session_id": session });
+    if let Some(parent) = parent {
+        body["parent_session_id"] = json!(parent);
+    }
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", auth)
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn agent_events(c: &reqwest::Client, base: &str, auth: &str, name: &str) -> Value {
+    c.get(format!("{base}/api/agents/{name}/events?kind=state_change"))
+        .header("authorization", auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// The explicit endpoint sets a parent and clears it again. Clearing must stick
+/// on a fresh roster read even though registration's COALESCE path cannot
+/// remove a link, and hiding is not touched by either direction.
+#[tokio::test]
+async fn orchestrator_set_and_clear_persists() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_agent(&c, &base, &auth, "move-orch", "ses_move_orch", None).await;
+    register_agent(&c, &base, &auth, "move-child", "ses_move_child", None).await;
+
+    // Hidden is display-only state; a move must not reveal the card.
+    c.post(format!("{base}/api/agents/move-child/hide"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+
+    let moved: Value = post_orchestrator(&c, &base, &auth, "move-child", Some("move-orch"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(moved["agent_name"], "move-child");
+    assert_eq!(moved["parent_session_id"], "ses_move_orch");
+    assert_eq!(moved["orchestrator"], "move-orch");
+    assert_eq!(moved["orchestrator_session_id"], "ses_move_orch");
+    assert_eq!(moved["hidden"], true);
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "move-child");
+    assert_eq!(row["parent_session_id"], "ses_move_orch");
+    assert_eq!(row["orchestrator"], "move-orch");
+    assert_eq!(row["hidden"], true);
+
+    // The timeline names both sides of the change.
+    let events = agent_events(&c, &base, &auth, "move-child").await;
+    let summary = events["events"][0]["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("none") && summary.contains("move-orch"),
+        "set event names old and new: {summary}"
+    );
+
+    // Clearing is allowed and persists. The roster omits the null parent.
+    let cleared: Value = post_orchestrator(&c, &base, &auth, "move-child", None)
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        cleared.get("parent_session_id").is_none() || cleared["parent_session_id"].is_null(),
+        "clear removes parent_session_id: {cleared}"
+    );
+    assert!(
+        cleared.get("orchestrator").is_none() || cleared["orchestrator"].is_null(),
+        "clear removes the resolved orchestrator: {cleared}"
+    );
+    assert_eq!(cleared["hidden"], true, "clearing does not unhide");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "move-child");
+    assert!(row.get("parent_session_id").is_none() || row["parent_session_id"].is_null());
+    assert_eq!(row["hidden"], true);
+
+    let events = agent_events(&c, &base, &auth, "move-child").await;
+    let summary = events["events"][0]["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("move-orch") && summary.contains("none"),
+        "clear event names old and new: {summary}"
+    );
+
+    // An unknown subject is a 404, not a create.
+    let unknown = post_orchestrator(&c, &base, &auth, "never-registered", Some("move-orch")).await;
+    assert_eq!(unknown.status(), 404);
+}
+
+/// A drop that would close a loop is refused with a message, and so is an
+/// unknown or removed target. The roster is unchanged after each refusal.
+#[tokio::test]
+async fn orchestrator_refuses_cycles_and_unknown_targets() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_agent(&c, &base, &auth, "cycle-root", "ses_cycle_root", None).await;
+    register_agent(
+        &c,
+        &base,
+        &auth,
+        "cycle-mid",
+        "ses_cycle_mid",
+        Some("ses_cycle_root"),
+    )
+    .await;
+    register_agent(
+        &c,
+        &base,
+        &auth,
+        "cycle-leaf",
+        "ses_cycle_leaf",
+        Some("ses_cycle_mid"),
+    )
+    .await;
+
+    // root -> leaf would close root <- mid <- leaf.
+    let cycle = post_orchestrator(&c, &base, &auth, "cycle-root", Some("cycle-leaf")).await;
+    assert_eq!(cycle.status(), 409, "a descendant target is a cycle");
+    let body: Value = cycle.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("cycle"),
+        "the refusal explains why: {body}"
+    );
+
+    // A self-link is the smallest cycle.
+    let self_link = post_orchestrator(&c, &base, &auth, "cycle-mid", Some("cycle-mid")).await;
+    assert_eq!(self_link.status(), 409);
+
+    // Unknown names are refused in the body, not silently dropped.
+    let unknown = post_orchestrator(&c, &base, &auth, "cycle-leaf", Some("ghost-agent")).await;
+    assert_eq!(unknown.status(), 400);
+    let body: Value = unknown.json().await.unwrap();
+    assert!(
+        body["error"].as_str().unwrap().contains("ghost-agent"),
+        "the refusal names the target: {body}"
+    );
+
+    // A removed agent cannot be a drop target afterwards.
+    register_agent(&c, &base, &auth, "doomed-orch", "ses_doomed", None).await;
+    c.post(format!("{base}/api/agents/doomed-orch/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let removed = post_orchestrator(&c, &base, &auth, "cycle-leaf", Some("doomed-orch")).await;
+    assert_eq!(removed.status(), 400);
+
+    // Every refusal left the original tree alone.
+    let roster = get_roster(&c, &base, &auth).await;
+    assert_eq!(
+        roster_row(&roster, "cycle-root")["parent_session_id"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        roster_row(&roster, "cycle-mid")["parent_session_id"],
+        "ses_cycle_root"
+    );
+    assert_eq!(
+        roster_row(&roster, "cycle-leaf")["parent_session_id"],
+        "ses_cycle_mid"
+    );
+}
+
+/// Setting and clearing publish `agent.orchestrator` with both sides so every
+/// open client can re-render without waiting for its 15 second poll.
+#[tokio::test]
+async fn orchestrator_change_publishes_events() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_agent(&c, &base, &auth, "event-parent", "ses_event_parent", None).await;
+    register_agent(&c, &base, &auth, "event-child", "ses_event_child", None).await;
+
+    let mut events = tu::EventStream::connect_with_auth(&base, &auth).await;
+
+    post_orchestrator(&c, &base, &auth, "event-child", Some("event-parent")).await;
+    let event = events.next_event().await;
+    assert_eq!(event["type"], "agent.orchestrator");
+    assert_eq!(event["agent"], "event-child");
+    assert!(event["previous"].is_null());
+    assert_eq!(event["orchestrator"], "event-parent");
+
+    post_orchestrator(&c, &base, &auth, "event-child", None).await;
+    let event = events.next_event().await;
+    assert_eq!(event["type"], "agent.orchestrator");
+    assert_eq!(event["agent"], "event-child");
+    assert_eq!(event["previous"], "event-parent");
+    assert!(event["orchestrator"].is_null());
+}
+
 fn urlencode(value: &str) -> String {
     value
         .bytes()

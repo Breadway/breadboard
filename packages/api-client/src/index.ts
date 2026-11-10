@@ -754,6 +754,7 @@ export type BoardEvent =
   | { type: "agent.resumed"; agent: string; resumed_by: number | null }
   | { type: "agent.hidden"; agent: string; hidden_by: number | null }
   | { type: "agent.unhidden"; agent: string; unhidden_by: number | null }
+  | { type: "agent.orchestrator"; agent: string; previous: string | null; orchestrator: string | null; changed_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
   | { type: "chat.room.deleted"; id: number }
   | {
@@ -1003,6 +1004,10 @@ export class BreadboardClient {
   renameAgent = (name: string, new_name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/rename`, {
       new_name,
+    });
+  setAgentOrchestrator = (name: string, orchestrator: string | null) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/orchestrator`, {
+      orchestrator,
     });
   listAgentUsage = (range: UsageRange = "7d") =>
     this.req<UsageSummary[]>("GET", `/api/usage/agents?range=${range}`);

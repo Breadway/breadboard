@@ -3951,6 +3951,171 @@ pub async fn rename_agent(
         .ok_or(AppError::NotFound)
 }
 
+/// The current `parent_session_id` links of every agent registered on one
+/// session id. A session id can appear on more than one row (historical data),
+/// so cycle detection has to consider all of them.
+async fn parent_session_ids(db: &SqlitePool, session_id: &str) -> AppResult<Vec<String>> {
+    let rows: Vec<Option<String>> = sqlx::query_scalar(
+        "SELECT parent_session_id FROM agent_sessions
+          WHERE session_id = ?1 AND parent_session_id IS NOT NULL",
+    )
+    .bind(session_id)
+    .fetch_all(db)
+    .await?;
+    Ok(rows.into_iter().flatten().collect())
+}
+
+/// The agent name currently registered on a session id, if any.
+async fn agent_name_for_session(db: &SqlitePool, session_id: &str) -> AppResult<Option<String>> {
+    Ok(sqlx::query_scalar(
+        "SELECT agent_name FROM agent_sessions
+          WHERE session_id = ?1
+          ORDER BY last_seen DESC, agent_name ASC
+          LIMIT 1",
+    )
+    .bind(session_id)
+    .fetch_optional(db)
+    .await?)
+}
+
+/// Walk up from the proposed parent. If the walk reaches the agent being
+/// moved, the link would close a loop and is refused.
+async fn ensure_no_cycle(
+    db: &SqlitePool,
+    child_session: &str,
+    target_session: &str,
+) -> AppResult<()> {
+    let mut seen = HashSet::new();
+    let mut frontier = vec![target_session.to_string()];
+    while let Some(current) = frontier.pop() {
+        if current == child_session {
+            return Err(AppError::Conflict(
+                "that change would create an orchestrator cycle".into(),
+            ));
+        }
+        if !seen.insert(current.clone()) {
+            continue;
+        }
+        frontier.extend(parent_session_ids(db, &current).await?);
+    }
+    Ok(())
+}
+
+/// Explicitly set or clear one agent's orchestrator. Unlike registration,
+/// `None` clears the link: the register path uses COALESCE, so it can only
+/// preserve or set a parent and has no way to remove one.
+///
+/// A non-empty target must be a known agent with a registered session, and the
+/// resulting link must not close a cycle. Hiding is untouched: this only edits
+/// the parent session id, never the hidden flag.
+pub async fn set_agent_orchestrator(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+    raw_orchestrator: Option<&str>,
+    limits: &ClaimLimits,
+) -> AppResult<(AgentRosterEntry, Option<String>)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
+
+    let child_session: Option<Option<String>> =
+        sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let child_session = child_session.flatten().ok_or_else(|| {
+        AppError::bad_request(format!(
+            "agent '{name}' has no registered session; it cannot be placed under an orchestrator"
+        ))
+    })?;
+    let old_parent: Option<Option<String>> =
+        sqlx::query_scalar("SELECT parent_session_id FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let old_parent = old_parent.flatten();
+    let previous = match old_parent.as_deref() {
+        Some(session) => agent_name_for_session(db, session).await?,
+        None => None,
+    };
+
+    let target = raw_orchestrator
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(names::normalize);
+    let (new_parent, target_name) = match target {
+        Some(target) => {
+            if target == name {
+                return Err(AppError::Conflict(format!(
+                    "'{name}' cannot be its own orchestrator"
+                )));
+            }
+            // A removed agent is gone from the session table, so it fails the
+            // same known-name check as a typo instead of silently linking to a
+            // dead session id.
+            if !known.contains(&target) {
+                return Err(AppError::bad_request(format!(
+                    "orchestrator '{target}' is not a registered agent"
+                )));
+            }
+            let target_session: Option<Option<String>> =
+                sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
+                    .bind(&target)
+                    .fetch_optional(db)
+                    .await?;
+            let target_session = target_session.flatten().ok_or_else(|| {
+                AppError::bad_request(format!("orchestrator '{target}' has no registered session"))
+            })?;
+            ensure_no_cycle(db, &child_session, &target_session).await?;
+            (Some(target_session), Some(target))
+        }
+        None => (None, None),
+    };
+
+    if old_parent != new_parent {
+        let mut tx = crate::db::begin_write(db).await?;
+        sqlx::query("UPDATE agent_sessions SET parent_session_id = ?2 WHERE agent_name = ?1")
+            .bind(&name)
+            .bind(new_parent.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+
+        let old_label = previous.as_deref().unwrap_or("none");
+        let new_label = target_name.as_deref().unwrap_or("none");
+        let verb = if new_parent.is_some() {
+            if previous.is_some() {
+                "changed"
+            } else {
+                "set"
+            }
+        } else {
+            "cleared"
+        };
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary(format!(
+                "Orchestrator {verb} from {old_label} to {new_label}"
+            ))
+            .actor(Some(user_id)),
+        )
+        .await;
+    }
+
+    roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)
+        .map(|entry| (entry, previous))
+}
+
 /// The union of sessions, profiles and claims, deduplicated by lowercased
 /// agent name. This is what the Agents page renders.
 pub async fn agent_roster(
