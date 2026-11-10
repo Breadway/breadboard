@@ -26,6 +26,7 @@
   let draggingId = $state<string | null>(null);
   let dropTargetId = $state<string | null>(null);
   let rootDropOver = $state(false);
+  let dragReason = $state<string | null>(null);
   let menuFor = $state<string | null>(null);
   let menuChoice = $state<string>("");
 
@@ -87,6 +88,7 @@
     hiddenBy: string | null;
     hiddenAt: string | null;
     parentSessionId: string | null;
+    parentAgentName: string | null;
     orchestrator: string | null;
     orchestratorSessionId: string | null;
     /** Live exclusive claim budget for this name (per agent). */
@@ -133,6 +135,7 @@
           hiddenBy: null,
           hiddenAt: null,
           parentSessionId: null,
+          parentAgentName: null,
           orchestrator: null,
           orchestratorSessionId: null,
           exclusiveLimit: 10,
@@ -182,6 +185,7 @@
       g.hiddenBy = r.hidden_by_login ?? null;
       g.hiddenAt = r.hidden_at ?? null;
       g.parentSessionId = r.parent_session_id ?? null;
+      g.parentAgentName = r.parent_agent_name ?? null;
       g.orchestrator = r.orchestrator ?? null;
       g.orchestratorSessionId = r.orchestrator_session_id ?? null;
       g.exclusiveLimit = r.exclusive_limit;
@@ -242,9 +246,9 @@
     return map;
   });
 
-  // Hierarchy comes only from parent_session_id resolved against another
-  // roster row's session_id. A name-only orchestrator hint, a shared host or a
-  // busy neighbour never invents an edge here.
+  // Hierarchy resolves the explicit parent name first (it survives a missing
+  // session on either side), then the session id against another roster row.
+  // A shared host or a busy neighbour never invents an edge here.
   const bySession = $derived.by(() => {
     const map = new Map<string, Group>();
     for (const g of allGroups) {
@@ -256,8 +260,11 @@
   const parentById = $derived.by(() => {
     const map = new Map<string, string>();
     for (const g of allGroups) {
-      if (!g.parentSessionId) continue;
-      const parent = bySession.get(g.parentSessionId);
+      const parent = g.parentAgentName
+        ? byId.get(g.parentAgentName.trim().toLowerCase())
+        : g.parentSessionId
+          ? bySession.get(g.parentSessionId)
+          : undefined;
       if (parent && parent.id !== g.id) map.set(g.id, parent.id);
     }
     return map;
@@ -296,7 +303,9 @@
   );
   const subagentCount = $derived(allGroups.filter((g) => parentById.has(g.id)).length);
   const unlinkedGroups = $derived(
-    allGroups.filter((g) => !!g.parentSessionId && !parentById.has(g.id)),
+    allGroups.filter(
+      (g) => (!!g.parentAgentName || !!g.parentSessionId) && !parentById.has(g.id),
+    ),
   );
   const unlinkedCount = $derived(unlinkedGroups.length);
 
@@ -583,10 +592,11 @@
   }
 
   /** The agents this card may be dropped on. Removed agents are absent from the
-   *  roster, hidden ones keep working, and a descendant would close a cycle. */
+   *  roster, hidden ones keep working, and a descendant would close a cycle.
+   *  Any card is a target: the hierarchy edge no longer needs a session id. */
   function orchestratorOptions(g: Group): Group[] {
     return allGroups
-      .filter((o) => o.id !== g.id && !!o.sessionId && !isDescendant(o.id, g.id))
+      .filter((o) => o.id !== g.id && !isDescendant(o.id, g.id))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -613,51 +623,71 @@
     void moveAgent(g.id, null);
   }
 
+  /** Why a drop on `targetId` is refused, or null when it is allowed. */
+  function dropRefusal(sourceId: string, targetId: string): string | null {
+    const source = byId.get(sourceId);
+    const target = byId.get(targetId);
+    if (!source || !target) return null;
+    if (source.id === target.id) {
+      return `Can't move ${source.name} under itself: that would create a cycle`;
+    }
+    if (isDescendant(target.id, source.id)) {
+      return `Can't move ${source.name} under ${target.name}: that would create a cycle`;
+    }
+    return null;
+  }
+
   /** Move one agent under another, or to the top level when `targetId` is
    *  null. A cycle is refused before the request so the message is immediate;
-   *  the server enforces the same rule. */
+   *  the server enforces the same rule. Neither side needs a session id. */
   async function moveAgent(sourceId: string, targetId: string | null) {
     const source = byId.get(sourceId);
-    if (!source || source.id === targetId) return;
-    if (!source.sessionId) {
-      store.flash(`Can't move ${source.name}: it has no registered session`);
-      return;
-    }
+    if (!source) return;
     let target: Group | undefined;
     if (targetId) {
       target = byId.get(targetId);
-      if (!target) return;
-      if (!target.sessionId) {
-        store.flash(`Can't move ${source.name} under ${target.name}: ${target.name} has no registered session`);
+      if (!target) {
+        store.flash(`Can't move ${source.name}: that agent is no longer on the roster`);
         return;
       }
-      if (isDescendant(target.id, source.id)) {
-        store.flash(`Can't move ${source.name} under ${target.name}: that would create a cycle`);
+      const refusal = dropRefusal(source.id, target.id);
+      if (refusal) {
+        store.flash(refusal);
         return;
       }
     }
     draggingId = null;
     dropTargetId = null;
+    dragReason = null;
     rootDropOver = false;
     await store.setAgentOrchestrator(source.name, target?.name ?? null);
   }
 
   function startDrag(e: DragEvent, g: Group) {
-    if (!g.sessionId) {
-      e.preventDefault();
-      return;
-    }
+    // The hierarchy edge is organisational, so every card can be dragged even
+    // when its OpenCode session is unknown.
     draggingId = g.id;
+    dragReason = null;
     menuFor = null;
     e.dataTransfer?.setData("text/plain", g.id);
     if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
   }
 
   function overCard(e: DragEvent, g: Group) {
-    if (!draggingId || draggingId === g.id || !g.sessionId) return;
+    if (!draggingId) return;
+    // Keep accepting the event even for a refused target so the drop runs and
+    // the reason reaches a toast instead of the drop silently never firing.
     e.preventDefault();
     e.stopPropagation();
+    const refusal = dropRefusal(draggingId, g.id);
+    if (refusal) {
+      dropTargetId = null;
+      dragReason = refusal;
+      if (e.dataTransfer) e.dataTransfer.dropEffect = "none";
+      return;
+    }
     dropTargetId = g.id;
+    dragReason = null;
     if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
   }
 
@@ -665,13 +695,21 @@
     e.preventDefault();
     e.stopPropagation();
     const source = e.dataTransfer?.getData("text/plain") || draggingId;
+    const refusal = source ? dropRefusal(source, g.id) : null;
     dropTargetId = null;
-    if (source) void moveAgent(source, g.id);
+    dragReason = null;
+    if (!source) return;
+    if (refusal) {
+      store.flash(refusal);
+      return;
+    }
+    void moveAgent(source, g.id);
   }
 
   function dropOnRoot(e: DragEvent) {
     e.preventDefault();
     rootDropOver = false;
+    dragReason = null;
     const source = e.dataTransfer?.getData("text/plain") || draggingId;
     if (source) void moveAgent(source, null);
   }
@@ -679,6 +717,7 @@
   function endDrag() {
     draggingId = null;
     dropTargetId = null;
+    dragReason = null;
     rootDropOver = false;
   }
 
@@ -760,7 +799,7 @@
   {@const isOrchestrator = direct.length > 0}
   {@const parentId = parentById.get(g.id)}
   {@const parent = parentId ? byId.get(parentId) : null}
-  {@const unlinkedParent = !parent && g.parentSessionId ? g.parentSessionId : null}
+  {@const unlinkedParent = !parent ? (g.parentAgentName ?? g.parentSessionId) : null}
   {@const directLive = direct.filter((c) => c.presence === "live" && !c.paused).length}
   <div
     class="agent-card"
@@ -781,7 +820,7 @@
     data-session={g.sessionId ?? ""}
     role="button"
     tabindex="0"
-    draggable={!!g.sessionId}
+    draggable={true}
     ondragstart={(e) => startDrag(e, g)}
     ondragend={endDrag}
     ondragover={(e) => overCard(e, g)}
@@ -1033,6 +1072,9 @@
       <div class="stat" class:bad={tallies.blocked > 0}><b>{tallies.blocked}</b><span>blocked</span></div>
       <div class="stat" class:warn={pausedCount > 0}><b>{pausedCount}</b><span>paused</span></div>
     </div>
+    {#if dragReason}
+      <p class="drag-reason" role="status" aria-live="polite">{dragReason}</p>
+    {/if}
   </header>
 
   <div class="bar">
@@ -1305,6 +1347,11 @@
               {selected.orchestrator}
             </button>
           </div>
+        {:else if selected.parentAgentName}
+          <div class="srow">
+            <span class="slabel">parent agent</span>
+            <code class="sid" title="Parent agent is not on the roster">{selected.parentAgentName}</code>
+          </div>
         {:else if selected.parentSessionId}
           <div class="srow">
             <span class="slabel">parent session</span>
@@ -1495,6 +1542,15 @@
   }
   .stat.warn b {
     color: var(--status-review);
+  }
+  .drag-reason {
+    margin: 0;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent);
+    background: color-mix(in srgb, var(--danger) 10%, transparent);
+    color: var(--danger);
+    font: 500 11.5px/1.35 var(--font-mono);
   }
   /* --- bar ----------------------------------------------------------- */
   .bar {

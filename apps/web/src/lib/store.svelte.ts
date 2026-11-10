@@ -772,9 +772,11 @@ class Store {
       return false;
     }
     const previousParent = child.parent_session_id ?? null;
+    const previousParentName = child.parent_agent_name ?? null;
     const previousOrchestrator = child.orchestrator ?? null;
     const previousOrchestratorSession = child.orchestrator_session_id ?? null;
 
+    child.parent_agent_name = target?.agent_name ?? null;
     child.parent_session_id = target?.session_id ?? null;
     child.orchestrator = target?.agent_name ?? null;
     child.orchestrator_session_id = target?.session_id ?? null;
@@ -793,6 +795,7 @@ class Store {
     } catch (e) {
       const current = this.roster.find((r) => r.agent_name === name);
       if (current) {
+        current.parent_agent_name = previousParentName;
         current.parent_session_id = previousParent;
         current.orchestrator = previousOrchestrator;
         current.orchestrator_session_id = previousOrchestratorSession;

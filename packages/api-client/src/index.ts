@@ -605,7 +605,7 @@ export interface AgentRegister {
   note?: string;
   /** OpenCode parent session id; the chat plugin reports this. */
   parent_session_id?: string;
-  /** Optional orchestrator name; resolved to its session when known. */
+  /** Optional orchestrator name; stored as the explicit name edge when known. */
   orchestrator?: string;
 }
 
@@ -618,6 +618,8 @@ export interface AgentRegistration {
   session_id?: string | null;
   session_title?: string | null;
   parent_session_id?: string | null;
+  /** Explicit parent agent name, which wins over the session edge when set. */
+  parent_agent_name?: string | null;
   orchestrator?: string | null;
   orchestrator_session_id?: string | null;
 }
@@ -660,7 +662,9 @@ export interface AgentRosterEntry {
   hidden_at?: string | null;
   /** The session that spawned this agent, as reported by the chat plugin. */
   parent_session_id?: string | null;
-  /** Resolved orchestrator name, when the parent session is registered. */
+  /** Explicit parent agent name. When resolvable it wins over the session id. */
+  parent_agent_name?: string | null;
+  /** Resolved orchestrator: the parent name first, then the parent session. */
   orchestrator?: string | null;
   orchestrator_session_id?: string | null;
 }
