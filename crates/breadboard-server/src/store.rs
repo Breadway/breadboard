@@ -3074,6 +3074,7 @@ pub const AGENT_LIVE_SECS: i64 = 120;
 struct AgentSessionRow {
     agent_name: String,
     session_id: Option<String>,
+    session_title: Option<String>,
     parent_session_id: Option<String>,
     host: Option<String>,
     pid: Option<i64>,
@@ -3104,9 +3105,10 @@ struct AgentHiddenRow {
     hidden_at: String,
 }
 
-const AGENT_SESSION_COLS: &str = "s.agent_name, s.session_id, s.parent_session_id, s.host, s.pid, \
-    s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.paused, s.paused_by, \
-    p.login AS paused_by_login, s.paused_at";
+const AGENT_SESSION_COLS: &str =
+    "s.agent_name, s.session_id, s.session_title, s.parent_session_id, \
+    s.host, s.pid, s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.paused, \
+    s.paused_by, p.login AS paused_by_login, s.paused_at";
 
 fn agent_session_join() -> String {
     format!(
@@ -3120,6 +3122,7 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
     AgentRosterEntry {
         agent_name: name.to_string(),
         session_id: None,
+        session_title: None,
         host: None,
         pid: None,
         note: None,
@@ -3188,6 +3191,7 @@ async fn upsert_agent_session(
     user_id: i64,
     name: &str,
     session_id: Option<&str>,
+    session_title: Option<&str>,
     parent_session_id: Option<&str>,
     host: Option<&str>,
     pid: Option<i64>,
@@ -3202,11 +3206,14 @@ async fn upsert_agent_session(
     let stale_before = (Utc::now() - chrono::Duration::seconds(AGENT_LIVE_SECS)).to_rfc3339();
     let result = sqlx::query(
         "INSERT INTO agent_sessions
-            (agent_name, session_id, parent_session_id, host, pid, note, user_id,
-             first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            (agent_name, session_id, session_title, parent_session_id, host, pid, note,
+             user_id, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
          ON CONFLICT(agent_name) DO UPDATE SET
             session_id         = COALESCE(excluded.session_id, agent_sessions.session_id),
+            -- Only a new non-empty title replaces the stored one. An omitted
+            -- or empty title (heartbeat, rename, older client) never clears it.
+            session_title      = COALESCE(excluded.session_title, agent_sessions.session_title),
             parent_session_id  = COALESCE(excluded.parent_session_id, agent_sessions.parent_session_id),
             host               = COALESCE(excluded.host, agent_sessions.host),
             pid                = COALESCE(excluded.pid, agent_sessions.pid),
@@ -3216,10 +3223,11 @@ async fn upsert_agent_session(
          WHERE ?2 IS NULL
             OR agent_sessions.session_id IS NULL
             OR agent_sessions.session_id IS ?2
-            OR julianday(agent_sessions.last_seen) < julianday(?9)",
+            OR julianday(agent_sessions.last_seen) < julianday(?10)",
     )
     .bind(name)
     .bind(session_id)
+    .bind(session_title)
     .bind(parent_session_id)
     .bind(host)
     .bind(pid)
@@ -3312,6 +3320,13 @@ pub async fn register_agent(
         }
     };
     validate_agent_name(&name)?;
+    // A title is display-only. Trim it and treat blank as absent so an empty
+    // report can never overwrite the last meaningful title.
+    let session_title = input
+        .session_title
+        .as_deref()
+        .map(str::trim)
+        .filter(|title| !title.is_empty());
     // A registration that inserts the row is the agent's first appearance;
     // refreshing an existing session is not an event worth logging.
     let first_registration: bool =
@@ -3355,6 +3370,7 @@ pub async fn register_agent(
         user_id,
         &name,
         input.session_id.as_deref(),
+        session_title,
         parent_session_id.as_deref(),
         input.host.as_deref(),
         input.pid,
@@ -3410,6 +3426,7 @@ pub async fn register_agent(
         live: entry.live,
         paused: entry.paused,
         session_id: entry.session_id,
+        session_title: entry.session_title,
         parent_session_id: entry.parent_session_id,
         orchestrator: entry.orchestrator,
         orchestrator_session_id: entry.orchestrator_session_id,
@@ -3434,6 +3451,7 @@ pub async fn ensure_agent_writable(
         user_id,
         &name,
         session_id,
+        None,
         None,
         None,
         None,
@@ -3574,7 +3592,7 @@ pub async fn pause_agent(
     let ts = now_rfc3339();
     // A claim-only or profile-only name still gets a session row so the pause
     // flag has somewhere to live; registration preserves that flag.
-    upsert_agent_session(db, user_id, &name, None, None, None, None, None, &ts).await?;
+    upsert_agent_session(db, user_id, &name, None, None, None, None, None, None, &ts).await?;
     let was_paused: Option<i64> =
         sqlx::query_scalar("SELECT paused FROM agent_sessions WHERE agent_name = ?1")
             .bind(&name)
@@ -3946,6 +3964,7 @@ pub async fn agent_roster(
             .entry(key.clone())
             .or_insert_with(|| empty_roster_entry(&key));
         entry.session_id = session.session_id.clone();
+        entry.session_title = session.session_title.clone();
         entry.parent_session_id = session.parent_session_id.clone();
         entry.host = session.host.clone();
         entry.pid = session.pid;

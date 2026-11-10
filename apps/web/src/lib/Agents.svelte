@@ -67,6 +67,8 @@
     stale: number;
     lastHeartbeat: string | null;
     sessionId: string | null;
+    /** Human-readable OpenCode session title, when the plugin reported one. */
+    sessionTitle: string | null;
     host: string | null;
     pid: number | null;
     presence: "live" | "stale" | "paused";
@@ -112,6 +114,7 @@
           stale: 0,
           lastHeartbeat: null,
           sessionId: null,
+          sessionTitle: null,
           host: null,
           pid: null,
           presence: "stale",
@@ -160,6 +163,7 @@
       g.login ??= r.login ?? null;
       g.message = r.message ?? g.message;
       g.sessionId = r.session_id ?? g.sessionId;
+      g.sessionTitle = r.session_title ?? g.sessionTitle;
       g.host = r.host ?? g.host;
       g.pid = r.pid ?? g.pid;
       g.presence = r.status;
@@ -673,6 +677,11 @@
           <span class="role-badge unlinked">unlinked</span>
         {/if}
         <span class="aname">{g.name}</span>
+        {#if g.sessionTitle}
+          <span class="asession" title={g.sessionId ? `${g.sessionTitle} · ${g.sessionId}` : g.sessionTitle}>
+            {g.sessionTitle}
+          </span>
+        {/if}
         {#if g.message}<span class="amessage" title={g.message}>{g.message}</span>{/if}
         {#if ownerDiffers}<span class="alogin">{g.login}</span>{/if}
       </div>
@@ -1065,6 +1074,9 @@
         <div class="srow">
           <span class="slabel">session</span>
           {#if selected.sessionId}
+            {#if selected.sessionTitle}
+              <span class="stitle" title="Session title">{selected.sessionTitle}</span>
+            {/if}
             <code class="sid" title="Select and copy">{selected.sessionId}</code>
             <button class="btn ghost sm" onclick={() => void copySession(selected.sessionId)}>
               {copied === selected.sessionId ? "Copied" : "Copy"}
@@ -1606,6 +1618,13 @@
     white-space: normal;
     overflow-wrap: anywhere;
   }
+  .asession {
+    font: 400 10.5px/1.35 var(--font-ui);
+    color: var(--ink-dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .rel-link {
     display: inline-flex;
     align-items: center;
@@ -1920,6 +1939,11 @@
     border: 1px solid var(--line);
     color: var(--ink);
     user-select: all;
+    overflow-wrap: anywhere;
+  }
+  .stitle {
+    font: 400 11px/1.35 var(--font-ui);
+    color: var(--ink-dim);
     overflow-wrap: anywhere;
   }
   .muted {
