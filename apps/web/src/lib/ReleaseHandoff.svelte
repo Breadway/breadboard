@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick, onMount } from "svelte";
   import { fly } from "svelte/transition";
   import type { AgentClaim } from "@breadboard/api-client";
   import { store } from "./store.svelte";
@@ -6,8 +7,86 @@
   let note = $state("");
   let noNote = $state(false);
   let busy = $state(false);
+  let dialogEl = $state<HTMLDivElement | null>(null);
+  let noteEl = $state<HTMLTextAreaElement | null>(null);
 
   const claim = $derived(store.pendingRelease);
+
+  // Elements the Tab trap may move through. Queried live because the note
+  // checkbox and the error text appear and disappear while the dialog is open.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let returnFocus: HTMLElement | null = null;
+  let fallbackFocus: HTMLElement | null = null;
+  let wasOpen = false;
+
+  function focusables(): HTMLElement[] {
+    if (!dialogEl) return [];
+    return Array.from(dialogEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+      (el) => el.getClientRects().length > 0,
+    );
+  }
+
+  // BB-199: behave like a real modal. Remember the trigger, move focus to the
+  // note field on open, and restore focus when the dialog closes. If the
+  // trigger disappeared (the released claim row is gone), fall back to the
+  // dialog that contained it.
+  $effect(() => {
+    const open = claim !== null;
+    if (open === wasOpen) return;
+    wasOpen = open;
+    if (open) {
+      const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      returnFocus = active;
+      fallbackFocus = active?.closest<HTMLElement>('[role="dialog"]') ?? null;
+      void tick().then(() => noteEl?.focus());
+      return;
+    }
+    const target = returnFocus?.isConnected ? returnFocus : fallbackFocus?.isConnected ? fallbackFocus : null;
+    returnFocus = null;
+    fallbackFocus = null;
+    void tick().then(() => target?.focus());
+  });
+
+  // Escape is taken at the window in the capture phase. This listener is
+  // registered on mount, before the agent panel registers its own Escape
+  // handler when a card opens, so it runs first and stops immediate
+  // propagation: the panel cannot close underneath the modal and the app's
+  // global handler cannot blur the field. Tab cycles inside the dialog and
+  // cannot reach the page behind it.
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!claim || !dialogEl) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        close();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      if (!items.length) {
+        e.preventDefault();
+        dialogEl.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const inside = active instanceof Node && dialogEl.contains(active);
+      if (e.shiftKey) {
+        if (!inside || active === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  });
 
   /** Mirror of the server rule: an intent claim, or an exclusive claim still
    *  planned with no branch/worktree/repo/PR/commit, never held work. */
@@ -66,14 +145,10 @@
       role="dialog"
       aria-modal="true"
       aria-label="Release {claim.key}"
+      aria-describedby="release-handoff-help"
       tabindex="-1"
+      bind:this={dialogEl}
       transition:fly={{ y: 8, duration: 150, opacity: 0.4 }}
-      onkeydown={(e) => {
-        if (e.key === "Escape") {
-          e.stopPropagation();
-          close();
-        }
-      }}
     >
       <header>
         <h2>Release {claim.key}</h2>
@@ -81,7 +156,7 @@
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
         </button>
       </header>
-      <p class="lede">
+      <p class="lede" id="release-handoff-help">
         Leave one line for the next session: <b>what is done</b>, <b>what is next</b> and
         <b>what is risky</b>. It survives the release, appears on the card and in the
         agent timeline, and is returned when someone resumes this issue.
@@ -92,6 +167,7 @@
         maxlength="500"
         placeholder="done: ...; next: ...; risky: ..."
         bind:value={note}
+        bind:this={noteEl}
         disabled={noNote}
         aria-label="Handoff note"
       ></textarea>
