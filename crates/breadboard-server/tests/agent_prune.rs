@@ -235,6 +235,97 @@ async fn prunes_only_abandoned_rows_and_audits_each_removal() {
 }
 
 #[tokio::test]
+async fn a_reused_pruned_name_inherits_no_children() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let stale = now - Duration::hours(30);
+
+    // The parent is abandoned; the child is fresh and must survive the pass.
+    insert_session(&app.db, "reuse-orch", Some("ses_reuse_old"), stale, false).await;
+    insert_session(
+        &app.db,
+        "reuse-child",
+        Some("ses_reuse_child"),
+        now - Duration::minutes(2),
+        false,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE agent_sessions
+            SET parent_agent_name = 'reuse-orch', parent_session_id = 'ses_reuse_old'
+          WHERE agent_name = 'reuse-child'",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["reuse-orch"]);
+
+    // Both edges are detached inside the prune transaction, before the name is
+    // free for reuse.
+    let child_links: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT parent_agent_name, parent_session_id FROM agent_sessions
+          WHERE agent_name = 'reuse-child'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(child_links, (None, None));
+
+    // Re-register the same name with a new session, as the documented reuse
+    // path allows, and confirm it inherited nobody.
+    let registered: Value = reqwest::Client::new()
+        .post(format!("http://{}/api/agents/register", app.addr))
+        .header("authorization", format!("Bearer {}", app.token))
+        .json(&serde_json::json!({
+            "agent_name": "reuse-orch",
+            "session_id": "ses_reuse_new",
+            "host": "test",
+            "pid": 7
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(registered["agent_name"], "reuse-orch");
+
+    let children: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_sessions
+          WHERE lower(parent_agent_name) = 'reuse-orch'
+             OR parent_session_id IN ('ses_reuse_old', 'ses_reuse_new')",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(children, 0, "the re-registered name has no children");
+
+    let roster: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/agents/roster", app.addr))
+        .header("authorization", format!("Bearer {}", app.token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let child = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["agent_name"] == "reuse-child")
+        .expect("child survives the prune");
+    assert!(child["parent_agent_name"].is_null());
+    assert!(child["parent_session_id"].is_null());
+    assert!(child["orchestrator"].is_null());
+}
+
+#[tokio::test]
 async fn a_shorter_window_prunes_a_row_a_longer_one_keeps() {
     let app = tu::spawn().await;
     let now = Utc::now();

@@ -52,15 +52,19 @@ equally to sessionless rows and rows whose OpenCode session no longer exists.
 Each removal writes one `agent_removals` audit row holding the name and the
 reason, and the name is free for a fresh registration. The Agents header shows
 an abandoned count; the default view hides those rows, and "Show abandoned"
-reveals what the next pass would remove without touching live agents.
+reveals what the next pass would remove without touching live agents. Pruning
+also detaches the removed agent's children's name and session edges inside the
+same transaction, so a later agent that reuses the name inherits no subagents.
 
-A registered session can carry its OpenCode `parent_session_id`. The roster
-resolves that to an orchestrator name; the subagent card shows an `under
-<orchestrator>` chip that focuses the orchestrator and its direct subagents.
-An unresolved parent keeps the raw session id on the chip instead of dropping
-the link. An orchestrator card shows how many of its direct subagents are
-live. Hiding, pausing or removing a subagent affects only that card, never the
-orchestrator. The link fields never participate in sorting.
+An agent can carry an explicit `parent_agent_name`; a registered session can
+also carry its OpenCode `parent_session_id`. The roster resolves the parent name
+first, then the session id to an orchestrator name, so either side may have no
+session. The subagent card shows an `under <orchestrator>` chip that focuses the
+orchestrator and its direct subagents. An unresolved parent name or session id
+stays on the chip instead of dropping the link. An orchestrator card shows how
+many of its direct subagents are live. Hiding, pausing or removing a subagent
+affects only that card, never the orchestrator. Removing an agent detaches its
+children's name and session edges. The link fields never participate in sorting.
 
 Cards use
 CSS multi-column masonry (`columns: 248px`, `break-inside: avoid`) so a tall
@@ -93,7 +97,8 @@ Agents claim issues on top of this workflow. There are two claim modes:
 
 Exclusive work is budgeted. One agent name may hold at most **10** live
 exclusive claims, and one orchestrator tree (the orchestrator plus every
-registered agent below it through `parent_session_id`) may hold at most
+registered agent below it through `parent_agent_name`, or `parent_session_id`
+when no name edge is set) may hold at most
 **100**. An unlinked agent is its own tree. Intents are not capped: only
 exclusive claims count. Releasing a claim, removing its agent, or moving an
 issue out from under a live claim frees capacity immediately. A refused claim
@@ -360,15 +365,15 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/chat/uploads/{id}` | authenticated download. Safe images (png/jpeg/gif/webp) render inline; everything else is served as an attachment with `nosniff` |
 | `GET` | `/api/agents` | live agent claims (each joined with its issue key/title/status), exclusive first then intents, most-recent heartbeat first |
 | `GET` | `/api/agents/status` | server-side roll-up mirroring the opencode `bb-status` widget line: `{ total, live, stale, queued, done, active, review, verifying, blocked, remaining, line, claims[] }`. Counts cover exclusive work only; `queued` counts intents, and the line adds `N queued` when any exist |
-| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, session_title?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name, or to reuse the name the session already holds (one name per session). An explicit `agent_name` different from that session's existing name is refused with `409` and `rename_required`; use the rename route. `session_title` is the human-readable OpenCode title (the chat plugin reports it); a trimmed non-empty value replaces the stored title, while an omitted or empty value never clears one. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name the server resolves to its registered session when `parent_session_id` is absent. Returns `{ agent_name, alternatives[], live, paused, session_id, session_title, parent_session_id, orchestrator, orchestrator_session_id }`; registration refreshes a paused name without unpausing it. `200` |
-| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, session_title, host, pid, note, first_seen, last_seen, live, paused, status, abandoned, abandoned_reason, message, state, claim_count, exclusive_count, intent_count, exclusive_limit, orchestrator_exclusive_count, orchestrator_exclusive_limit, user_id, login, paused_by, paused_by_login, paused_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, orchestrator, orchestrator_session_id }`. `session_title` is the human-readable OpenCode title reported at registration and omitted when no title was ever supplied. `live` is a heartbeat inside 120 seconds on a name that is not paused; `status` is `live`, `stale` or `paused`. `abandoned` is true when the daily pass would remove the row: no claims, no chat membership or DM, no open review request, not paused, and a heartbeat older than `agents.prune_after_hours`; `abandoned_reason` explains it. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved by matching `parent_session_id` against another roster entry's `session_id`; when no entry matches, `parent_session_id` stays populated and `orchestrator` is omitted so clients can show the raw id. `exclusive_limit` is the per-agent claim cap and `orchestrator_exclusive_count` / `orchestrator_exclusive_limit` are the live usage and cap for the whole tree this name belongs to (an unlinked agent is its own one-name tree) |
+| `POST` | `/api/agents/register` | `{ agent_name?, session_id?, session_title?, host?, pid?, note?, parent_session_id?, orchestrator? }`: upsert this session and refresh `last_seen`. Omit `agent_name` for a unique curated name, or to reuse the name the session already holds (one name per session). An explicit `agent_name` different from that session's existing name is refused with `409` and `rename_required`; use the rename route. `session_title` is the human-readable OpenCode title (the chat plugin reports it); a trimmed non-empty value replaces the stored title, while an omitted or empty value never clears one. `parent_session_id` is the OpenCode parent (the chat plugin reports it); `orchestrator` is an optional known name stored as the explicit `parent_agent_name` edge, which wins on display and may point at a sessionless agent, while its registered session (when any) is kept for fallback. Returns `{ agent_name, alternatives[], live, paused, session_id, session_title, parent_session_id, parent_agent_name, orchestrator, orchestrator_session_id }`; registration refreshes a paused name without unpausing it. `200` |
+| `GET` | `/api/agents/roster` | the union of `agent_sessions`, `agent_profiles` and `agent_claims`, deduplicated by lowercased name: `{ agent_name, session_id, session_title, host, pid, note, first_seen, last_seen, live, paused, status, abandoned, abandoned_reason, message, state, claim_count, exclusive_count, intent_count, exclusive_limit, orchestrator_exclusive_count, orchestrator_exclusive_limit, user_id, login, paused_by, paused_by_login, paused_at, hidden, hidden_by, hidden_by_login, hidden_at, parent_session_id, parent_agent_name, orchestrator, orchestrator_session_id }`. `session_title` is the human-readable OpenCode title reported at registration and omitted when no title was ever supplied. `live` is a heartbeat inside 120 seconds on a name that is not paused; `status` is `live`, `stale` or `paused`. `abandoned` is true when the daily pass would remove the row: no claims, no chat membership or DM, no open review request, not paused, and a heartbeat older than `agents.prune_after_hours`; `abandoned_reason` explains it. Hidden rows are still returned so clients can count and reveal them. `orchestrator` is resolved name-first from `parent_agent_name`, then from `parent_session_id` matched against another roster entry's `session_id`; when neither matches, the raw link stays populated and `orchestrator` is omitted so clients can show it. `exclusive_limit` is the per-agent claim cap and `orchestrator_exclusive_count` / `orchestrator_exclusive_limit` are the live usage and cap for the whole tree this name belongs to (an unlinked agent is its own one-name tree) |
 | `POST` | `/api/agents/{name}/kill` | remove the lowercased name: release every claim it holds (exclusive and intent), delete its session row, profile, hidden flag and chat push/subscription/read state, write one server-side `agent_removals` audit row, and emit `agent.removed`. Returns `{ agent_name, removed, claims_released, profile_removed }`. `404` for an unknown name, with no row created (BB-145) |
 | `POST` | `/api/agents/{name}/pause` | pause a known name: keep its claims, profile and roster row, set `paused_by`/`paused_at`, drop pending chat pushes and emit `agent.paused`. New claims are refused with `403`; heartbeats and registration still refresh the row. Idempotent. `404` for an unknown name |
 | `POST` | `/api/agents/{name}/resume` | clear the pause flag and emit `agent.resumed`. Idempotent. `404` for an unknown name |
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
-| `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
-| `POST` | `/api/agents/{name}/orchestrator` | `{ orchestrator? }`: explicitly set or clear an agent's orchestrator. `orchestrator` is a registered agent name; omit it (or send `null`) to clear the link and make the agent top level. Unlike registration this never COALESCEs, so a clear sticks. Refuses an unknown or removed target (`400`), an agent with no registered session (`400`), a self-link or any link that would close a cycle (`409`), and leaves the hidden flag untouched. Writes a `state_change` agent event naming the old and new orchestrator and emits `agent.orchestrator`. Returns the updated roster row |
+| `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile, session row and `parent_agent_name` edges that point at the old name move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
+| `POST` | `/api/agents/{name}/orchestrator` | `{ orchestrator? }`: explicitly set or clear an agent's orchestrator. `orchestrator` is a registered agent name or a registered session id, and either side may be sessionless; omit it (or send `null`) to clear the link and make the agent top level. Unlike registration this never COALESCEs, so a clear sticks. Refuses an unknown or removed target (`400`), a self-link or any link that would close a cycle in the mixed name/session graph (`409`), and leaves the hidden flag untouched. Writes a `state_change` agent event naming the old and new orchestrator and emits `agent.orchestrator`. Returns the updated roster row |
 | `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, unpriced_tokens, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, models[], sessions[], spend_warn_usd, over_threshold }]`. The agent is resolved from the session id against the current roster at read time, so a rename moves its history and a removed name does not reappear; a removed session's history stays under `unattributed`. `cost` is reported cost only. Tokens whose source reported zero cost are counted in `unpriced_tokens` and must be labelled unpriced, never $0. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
 | `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, reported cost, unpriced tokens, tokens, models) |
 | `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share, each with its own `unpriced_tokens` |
@@ -609,7 +614,8 @@ can serve several OpenCode conversations without sharing an identity. When a
 client cannot supply a per-call id, the MCP omits it and the server resolves
 the session from the agent's registered name; it never borrows a stale session
 left on the name by an earlier process. The orchestrator comes from the agent's
-parent session, and the model is resolved from `usage_sessions` rows keyed by
+parent name first, then the parent session, and the model is resolved from
+`usage_sessions` rows keyed by
 that exact session id.
 
 The model is never inferred from whichever agent was last active.

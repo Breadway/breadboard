@@ -151,6 +151,27 @@ pub async fn prune_abandoned_agents(
             continue;
         }
 
+        // A pruned name is documented as free for reuse. Detach its children
+        // before deleting the row, for both the explicit name edge and the raw
+        // session edge, so a fresh agent that takes the name inherits nobody.
+        sqlx::query(
+            "UPDATE agent_sessions
+                SET parent_agent_name = NULL
+              WHERE lower(parent_agent_name) = ?1",
+        )
+        .bind(&candidate.agent_name)
+        .execute(&mut *tx)
+        .await?;
+        if let Some(session) = candidate.session_id.as_deref() {
+            sqlx::query(
+                "UPDATE agent_sessions
+                    SET parent_session_id = NULL
+                  WHERE parent_session_id = ?1",
+            )
+            .bind(session)
+            .execute(&mut *tx)
+            .await?;
+        }
         let profile_removed =
             sqlx::query("DELETE FROM agent_profiles WHERE lower(agent_name) = ?1")
                 .bind(&candidate.agent_name)

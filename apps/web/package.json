@@ -13,6 +13,7 @@
     "test:links": "node tests/agents-links.browser.mjs",
     "test:hierarchy": "node tests/agents-hierarchy.browser.mjs",
     "test:orchestrator": "node tests/agents-orchestrator.browser.mjs",
+    "test:parent-name": "node tests/agents-parent-name.browser.mjs",
     "test:agents-ux": "node tests/agents-ux.browser.mjs",
     "test:chat-dm": "node tests/chat-dm.browser.mjs",
     "test:chat-followups": "node tests/chat-followups.browser.mjs",

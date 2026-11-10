@@ -2428,6 +2428,20 @@ async fn register_agent(
         .unwrap()
 }
 
+/// Register a name with no OpenCode session id at all. Its registry row still
+/// exists, which is what the name edge lives on.
+async fn register_name_only(c: &reqwest::Client, base: &str, auth: &str, name: &str) -> Value {
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", auth)
+        .json(&json!({ "agent_name": name, "host": "test", "pid": 7 }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
 async fn agent_events(c: &reqwest::Client, base: &str, auth: &str, name: &str) -> Value {
     c.get(format!("{base}/api/agents/{name}/events?kind=state_change"))
         .header("authorization", auth)
@@ -2466,6 +2480,7 @@ async fn orchestrator_set_and_clear_persists() {
         .unwrap();
     assert_eq!(moved["agent_name"], "move-child");
     assert_eq!(moved["parent_session_id"], "ses_move_orch");
+    assert_eq!(moved["parent_agent_name"], "move-orch");
     assert_eq!(moved["orchestrator"], "move-orch");
     assert_eq!(moved["orchestrator_session_id"], "ses_move_orch");
     assert_eq!(moved["hidden"], true);
@@ -2473,6 +2488,7 @@ async fn orchestrator_set_and_clear_persists() {
     let roster = get_roster(&c, &base, &auth).await;
     let row = roster_row(&roster, "move-child");
     assert_eq!(row["parent_session_id"], "ses_move_orch");
+    assert_eq!(row["parent_agent_name"], "move-orch");
     assert_eq!(row["orchestrator"], "move-orch");
     assert_eq!(row["hidden"], true);
 
@@ -2493,6 +2509,10 @@ async fn orchestrator_set_and_clear_persists() {
     assert!(
         cleared.get("parent_session_id").is_none() || cleared["parent_session_id"].is_null(),
         "clear removes parent_session_id: {cleared}"
+    );
+    assert!(
+        cleared.get("parent_agent_name").is_none() || cleared["parent_agent_name"].is_null(),
+        "clear removes parent_agent_name: {cleared}"
     );
     assert!(
         cleared.get("orchestrator").is_none() || cleared["orchestrator"].is_null(),
@@ -2621,6 +2641,211 @@ async fn orchestrator_change_publishes_events() {
     assert_eq!(event["agent"], "event-child");
     assert_eq!(event["previous"], "event-parent");
     assert!(event["orchestrator"].is_null());
+}
+
+/// BB-219: the hierarchy edge is organisational, not a property of the
+/// OpenCode session. A sessionless card can be placed under a sessionful
+/// orchestrator, and a sessionful card under a sessionless one. Both are
+/// persisted as `parent_agent_name`; the session id stays only as a fallback.
+#[tokio::test]
+async fn orchestrator_links_sessionless_child_and_sessionless_target() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_agent(&c, &base, &auth, "session-orch", "ses_session_orch", None).await;
+    register_name_only(&c, &base, &auth, "sessionless-child").await;
+
+    let moved =
+        post_orchestrator(&c, &base, &auth, "sessionless-child", Some("session-orch")).await;
+    assert_eq!(moved.status(), 200, "a sessionless child is placeable");
+    let moved: Value = moved.json().await.unwrap();
+    assert_eq!(moved["parent_agent_name"], "session-orch");
+    assert_eq!(moved["parent_session_id"], "ses_session_orch");
+    assert_eq!(moved["orchestrator"], "session-orch");
+    assert_eq!(moved["orchestrator_session_id"], "ses_session_orch");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "sessionless-child");
+    assert_eq!(row["parent_agent_name"], "session-orch");
+    assert_eq!(row["orchestrator"], "session-orch");
+
+    // The reverse case: a sessionful child under a sessionless orchestrator.
+    register_name_only(&c, &base, &auth, "name-only-orch").await;
+    register_agent(&c, &base, &auth, "session-child", "ses_session_child", None).await;
+
+    let moved = post_orchestrator(&c, &base, &auth, "session-child", Some("name-only-orch")).await;
+    assert_eq!(moved.status(), 200, "a sessionless target accepts a drop");
+    let moved: Value = moved.json().await.unwrap();
+    assert_eq!(moved["parent_agent_name"], "name-only-orch");
+    assert!(
+        moved.get("parent_session_id").is_none() || moved["parent_session_id"].is_null(),
+        "no fake session id is invented for a sessionless target: {moved}"
+    );
+    assert_eq!(moved["orchestrator"], "name-only-orch");
+    assert!(
+        moved.get("orchestrator_session_id").is_none()
+            || moved["orchestrator_session_id"].is_null(),
+        "the resolved orchestrator has no session: {moved}"
+    );
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let row = roster_row(&roster, "session-child");
+    assert_eq!(row["parent_agent_name"], "name-only-orch");
+    assert_eq!(row["orchestrator"], "name-only-orch");
+}
+
+/// The endpoint's target may be a registered session id rather than a name;
+/// it resolves to the name edge and keeps the session for fallback.
+#[tokio::test]
+async fn orchestrator_endpoint_accepts_a_session_id_target() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_agent(&c, &base, &auth, "by-session-orch", "ses_by_session", None).await;
+    register_agent(
+        &c,
+        &base,
+        &auth,
+        "by-session-child",
+        "ses_by_session_child",
+        None,
+    )
+    .await;
+
+    let moved =
+        post_orchestrator(&c, &base, &auth, "by-session-child", Some("ses_by_session")).await;
+    assert_eq!(moved.status(), 200);
+    let moved: Value = moved.json().await.unwrap();
+    assert_eq!(moved["parent_agent_name"], "by-session-orch");
+    assert_eq!(moved["parent_session_id"], "ses_by_session");
+    assert_eq!(moved["orchestrator"], "by-session-orch");
+}
+
+/// Cycle prevention walks the mixed name/session graph, including a chain
+/// where the middle link is a name and the leaf link is a session id.
+#[tokio::test]
+async fn orchestrator_refuses_cycles_in_the_mixed_graph() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_name_only(&c, &base, &auth, "mixed-root").await;
+    register_agent(&c, &base, &auth, "mixed-mid", "ses_mixed_mid", None).await;
+    let set = post_orchestrator(&c, &base, &auth, "mixed-mid", Some("mixed-root")).await;
+    assert_eq!(set.status(), 200);
+    // The leaf is linked by the session edge, so the walk must cross both
+    // representations to spot the loop.
+    register_agent(
+        &c,
+        &base,
+        &auth,
+        "mixed-leaf",
+        "ses_mixed_leaf",
+        Some("ses_mixed_mid"),
+    )
+    .await;
+
+    let cycle = post_orchestrator(&c, &base, &auth, "mixed-root", Some("mixed-leaf")).await;
+    assert_eq!(
+        cycle.status(),
+        409,
+        "mixed names and sessions still form a cycle"
+    );
+    let body: Value = cycle.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("cycle"), "{body}");
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let mid = roster_row(&roster, "mixed-mid");
+    assert_eq!(mid["parent_agent_name"], "mixed-root");
+    assert!(mid["parent_session_id"].is_null());
+    let leaf = roster_row(&roster, "mixed-leaf");
+    assert_eq!(leaf["parent_session_id"], "ses_mixed_mid");
+
+    // A pure name chain refuses the same way.
+    for name in ["name-a", "name-b", "name-c"] {
+        register_name_only(&c, &base, &auth, name).await;
+    }
+    post_orchestrator(&c, &base, &auth, "name-b", Some("name-a")).await;
+    post_orchestrator(&c, &base, &auth, "name-c", Some("name-b")).await;
+    let cycle = post_orchestrator(&c, &base, &auth, "name-a", Some("name-c")).await;
+    assert_eq!(cycle.status(), 409);
+}
+
+/// Renaming an orchestrator moves every name edge that points at it, the same
+/// way rename already moves claims, profiles and chat membership.
+#[tokio::test]
+async fn rename_moves_name_based_parent_edges() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_name_only(&c, &base, &auth, "edge-parent").await;
+    register_name_only(&c, &base, &auth, "edge-child").await;
+    let set = post_orchestrator(&c, &base, &auth, "edge-child", Some("edge-parent")).await;
+    assert_eq!(set.status(), 200);
+
+    let renamed = c
+        .post(format!("{base}/api/agents/edge-parent/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "edge-parent-renamed" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(renamed.status(), 200);
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let child = roster_row(&roster, "edge-child");
+    assert_eq!(
+        child["parent_agent_name"], "edge-parent-renamed",
+        "the name edge followed the rename"
+    );
+    assert_eq!(child["orchestrator"], "edge-parent-renamed");
+}
+
+/// Removing an orchestrator detaches its children instead of leaving a name
+/// edge that a later agent could inherit by reusing the name.
+#[tokio::test]
+async fn removing_an_orchestrator_detaches_name_edges() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    register_name_only(&c, &base, &auth, "doomed-name-orch").await;
+    register_name_only(&c, &base, &auth, "orphaned-name-child").await;
+    post_orchestrator(
+        &c,
+        &base,
+        &auth,
+        "orphaned-name-child",
+        Some("doomed-name-orch"),
+    )
+    .await;
+
+    let killed = c
+        .post(format!("{base}/api/agents/doomed-name-orch/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(killed.status(), 200);
+
+    let roster = get_roster(&c, &base, &auth).await;
+    let child = roster_row(&roster, "orphaned-name-child");
+    assert!(
+        child.get("parent_agent_name").is_none() || child["parent_agent_name"].is_null(),
+        "the removed parent's name edge is gone: {child}"
+    );
+    assert!(
+        child.get("orchestrator").is_none() || child["orchestrator"].is_null(),
+        "the removed parent is not displayed as an orchestrator: {child}"
+    );
 }
 
 fn urlencode(value: &str) -> String {
