@@ -168,6 +168,169 @@ async fn migration_0028_resolves_duplicate_live_names_without_losing_claims() {
 }
 
 #[tokio::test]
+async fn migration_0029_keeps_one_name_per_session_and_preserves_claims() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = SqlitePool::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("one-name-per-session.db").display()
+    ))
+    .await
+    .unwrap();
+    for sql in migrations_before("0029") {
+        sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects (id, key, name, next_number) VALUES (1, 'AGENT', 'Agent work', 4)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    for (id, key) in [(1_i64, "AGENT-1"), (2_i64, "AGENT-2"), (3_i64, "AGENT-3")] {
+        sqlx::query(
+            "INSERT INTO issues
+                (id, key, project_id, title, created_at, updated_at)
+             VALUES (?1, ?2, 1, 'multi-name fixture',
+                     '2026-11-10T05:00:00Z', '2026-11-10T05:00:00Z')",
+        )
+        .bind(id)
+        .bind(key)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    // Two sessions with accumulated names. "ses_multi" has a claim under the
+    // older name; "ses_claims" has a claim under each name, so its extra must
+    // stay registered even though it loses the ranking.
+    for (name, session_id, last_seen) in [
+        ("study pwa", "ses_multi", "2026-11-10T05:00:00Z"),
+        ("doughcartographer", "ses_multi", "2026-11-10T06:30:00Z"),
+        ("butter crumb", "ses_claims", "2026-11-10T07:00:00Z"),
+        ("doughy dynamo", "ses_claims", "2026-11-10T08:00:00Z"),
+        ("keeper", "ses_single", "2026-11-10T09:00:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent_sessions
+                (agent_name, session_id, user_id, first_seen, last_seen)
+             VALUES (?1, ?2, 1, '2026-11-10T05:00:00Z', ?3)",
+        )
+        .bind(name)
+        .bind(session_id)
+        .bind(last_seen)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    for (issue_id, name, session_id, heartbeat) in [
+        (1_i64, "study pwa", "ses_multi", "2026-11-10T05:30:00Z"),
+        (2_i64, "butter crumb", "ses_claims", "2026-11-10T07:30:00Z"),
+        (3_i64, "doughy dynamo", "ses_claims", "2026-11-10T08:30:00Z"),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent_claims
+                (issue_id, claimed_by, agent_name, mode, session_id, state,
+                 board_status, claimed_at, updated_at, last_heartbeat)
+             VALUES (?1, 1, ?2, 'exclusive', ?3, 'implementing',
+                     'doing', '2026-11-10T05:00:00Z', ?4, ?4)",
+        )
+        .bind(issue_id)
+        .bind(name)
+        .bind(session_id)
+        .bind(heartbeat)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0029_one_name_per_session.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let multi: Vec<String> = sqlx::query_scalar(
+        "SELECT agent_name FROM agent_sessions WHERE session_id = 'ses_multi' ORDER BY agent_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        multi,
+        vec!["study pwa".to_string()],
+        "the claimed name must win over the newer claimless name"
+    );
+    let dropped: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE agent_name = 'doughcartographer'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(dropped, 0, "the claimless extra row must be deleted");
+
+    let claim_backed: Vec<String> = sqlx::query_scalar(
+        "SELECT agent_name FROM agent_sessions WHERE session_id = 'ses_claims' ORDER BY agent_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        claim_backed,
+        vec!["butter crumb".to_string(), "doughy dynamo".to_string()],
+        "an extra name that still holds a claim must not be orphaned"
+    );
+
+    let keeper: String =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions WHERE session_id = 'ses_single'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(keeper, "keeper");
+
+    let audit: Vec<(String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT session_id, dropped_name, kept_name, claims_on_dropped, dropped
+           FROM agent_session_conflicts
+          ORDER BY session_id, dropped_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audit,
+        vec![
+            (
+                "ses_claims".to_string(),
+                "butter crumb".to_string(),
+                "doughy dynamo".to_string(),
+                1,
+                0
+            ),
+            (
+                "ses_multi".to_string(),
+                "doughcartographer".to_string(),
+                "study pwa".to_string(),
+                0,
+                1
+            ),
+        ],
+        "every resolved extra must be recorded with whether it was dropped"
+    );
+
+    let claims: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_claims")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(claims, 3, "no claim may be dropped or reattributed");
+}
+
+#[tokio::test]
 async fn migration_removes_pre_existing_killed_rows_and_keeps_audit() {
     let tmp = tempfile::tempdir().unwrap();
     let pool = SqlitePool::connect(&format!(

@@ -467,9 +467,11 @@ pub struct AgentStatusSummary {
     pub claims: Vec<crate::AgentClaim>,
 }
 
-/// `POST /api/agents/register` body. Omit `agent_name` to have the server
-/// assign a unique curated name; include it to register or refresh under a
-/// name the caller chose.
+/// `POST /api/agents/register` body. Omit `agent_name` to reuse the name this
+/// session already holds, or to have the server assign a unique curated name
+/// on first registration; include it to register or refresh under a name the
+/// caller chose. A different explicit name for a session that already holds
+/// one is refused with a 409 that points at rename.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentRegister {
     #[serde(default, skip_serializing_if = "Option::is_none")]

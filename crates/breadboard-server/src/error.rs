@@ -29,6 +29,15 @@ pub enum AppError {
         session_id: Option<String>,
         alternatives: Vec<String>,
     },
+    /// A session already holds exactly one name (BB-188). An explicit different
+    /// name is refused; rename is the only operation that moves the identity.
+    #[error("{message}")]
+    AgentSessionNamed {
+        message: String,
+        agent_name: String,
+        existing_name: String,
+        session_id: Option<String>,
+    },
     #[error("{0}")]
     TooLarge(String),
     #[error("{0}")]
@@ -82,6 +91,24 @@ impl IntoResponse for AppError {
                         "agent_name": agent_name,
                         "session_id": session_id,
                         "alternatives": alternatives,
+                    })),
+                )
+                    .into_response();
+            }
+            AppError::AgentSessionNamed {
+                message,
+                agent_name,
+                existing_name,
+                session_id,
+            } => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "error": message,
+                        "agent_name": agent_name,
+                        "existing_name": existing_name,
+                        "session_id": session_id,
+                        "rename_required": true,
                     })),
                 )
                     .into_response();
