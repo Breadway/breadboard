@@ -1226,16 +1226,16 @@
             · {selected.lastSeen ? `last seen ${ago(selected.lastSeen, now)}` : "no session heartbeat"}
           </div>
         </div>
-        {#if selected.work.length}
-          <span class="completion big">
-            <Ring done={selected.done} total={selected.work.length} color={agentColor(selected.name)} size={18} />
-            <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
-          </span>
-        {/if}
         <button class="close" aria-label="Close" onclick={closeAgent}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
         </button>
         <div class="mhead-actions">
+          {#if selected.work.length}
+            <span class="completion big">
+              <Ring done={selected.done} total={selected.work.length} color={agentColor(selected.name)} size={18} />
+              <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
+            </span>
+          {/if}
           <button
             class="btn sm message-agent"
             title="Open the DM with {selected.name}"
@@ -1655,6 +1655,10 @@
   .group-meta {
     font: 400 10px/1.4 var(--font-mono);
     color: var(--ink-3);
+  }
+  .group-head .budget {
+    padding: 2px 6px;
+    font: 500 10px/1.15 var(--font-mono);
   }
   .raw-parent {
     max-width: 100%;
