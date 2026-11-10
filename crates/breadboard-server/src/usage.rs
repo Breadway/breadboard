@@ -13,9 +13,10 @@
 //! counts.
 //!
 //! Billing mode is resolved from config at read time, never stored with the
-//! rows: a provider is either metered (its reported cost is billed spend) or a
-//! subscription (its tokens are included and its catalog list price is not
-//! billed). Changing the config re-interprets history without a re-import.
+//! rows: a provider is either metered (its reported cost is billed spend) or an
+//! allowance plan (prepaid, so consumption is computed from tokens and
+//! configured rates and OpenCode's reported cost is ignored). Changing the
+//! config re-interprets history without a re-import.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -727,9 +728,9 @@ const RESOLVED_AGENT_SQL: &str = r#"
     )
 "#;
 
-/// Tokens in rows that reported no cost. `cost = 0` with tokens is either
-/// "unpriced" (metered) or "included" (subscription); the provider decides
-/// which at read time, so this only measures the raw condition.
+/// Tokens in rows that reported no cost. `cost = 0` with tokens is "unpriced"
+/// for a metered provider; an allowance provider ignores reported cost anyway,
+/// so this only measures the raw condition and Rust decides which applies.
 const ZERO_COST_TOKENS_SQL: &str = "(CASE WHEN u.cost <= 0 THEN \
     u.input_tokens + u.output_tokens + u.reasoning_tokens \
     + u.cache_read_tokens + u.cache_write_tokens ELSE 0 END)";
