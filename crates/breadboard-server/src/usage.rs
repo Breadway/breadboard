@@ -2004,6 +2004,60 @@ mod tests {
     }
 
     #[test]
+    fn off_peak_window_wraps_midnight() {
+        // 16:30-00:30 UTC.
+        assert!(in_window(17 * 60, 16 * 60 + 30, 30));
+        assert!(in_window(15, 16 * 60 + 30, 30));
+        assert!(!in_window(10 * 60, 16 * 60 + 30, 30));
+        assert!(!in_window(16 * 60 + 29, 16 * 60 + 30, 30));
+        assert!(!in_window(30, 16 * 60 + 30, 30));
+    }
+
+    #[test]
+    fn allowance_charges_use_peak_rates_without_a_time_of_day() {
+        let provider = ProviderBillingConfig {
+            mode: BillingMode::Allowance,
+            plan_price_usd: 10.0,
+            off_peak_start_utc: Some("16:30".into()),
+            off_peak_end_utc: Some("00:30".into()),
+            models: HashMap::from([(
+                "deepseek-v4.1-flash".to_string(),
+                crate::config::ModelAllowanceConfig {
+                    allowance_usd: 100.0,
+                    rates: TokenRates {
+                        input: 0.30,
+                        output: 1.20,
+                        cache_read: 0.006,
+                        cache_write: 0.30,
+                        off_peak: Some(Box::new(TokenRates {
+                            input: 0.15,
+                            output: 0.60,
+                            cache_read: 0.003,
+                            cache_write: 0.15,
+                            off_peak: None,
+                        })),
+                    },
+                },
+            )]),
+        };
+        let tokens = TokenSplit {
+            input: 1_000_000,
+            ..TokenSplit::default()
+        };
+        let peak = allowance_charge(&provider, "deepseek-v4.1-flash", "2026-11-10T10:00", tokens);
+        assert!((peak.usd - 0.30).abs() < 1e-9, "peak: {}", peak.usd);
+        let off = allowance_charge(&provider, "deepseek-v4.1-flash", "2026-11-10T18:00", tokens);
+        assert!((off.usd - 0.15).abs() < 1e-9, "off-peak: {}", off.usd);
+        // Rows imported before 30-minute buckets existed carry only a date; the
+        // conservative choice is peak rates.
+        let legacy = allowance_charge(&provider, "deepseek-v4.1-flash", "2026-11-10", tokens);
+        assert!((legacy.usd - 0.30).abs() < 1e-9, "legacy: {}", legacy.usd);
+        let unlisted = allowance_charge(&provider, "other-model", "2026-11-10T10:00", tokens);
+        assert_eq!(unlisted.usd, 0.0);
+        assert_eq!(unlisted.unrated_tokens, 1_000_000);
+    }
+
+    #[test]
     fn range_parsing_accepts_defaults_and_explicit_days() {
         let window = Window::parse(&UsageQuery::default()).unwrap();
         assert_eq!(window.label, "7d");
