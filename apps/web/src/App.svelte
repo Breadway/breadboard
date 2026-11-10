@@ -28,20 +28,27 @@
   }
 
   // #new (the desktop shell's quick-add hotkey) opens the palette; #KEY
-  // (from "Copy link") opens that issue once the board has loaded.
-  let pendingKey: string | null = null;
+  // (from "Copy link") opens that issue once the board has loaded. Both the
+  // key and the open-effect are reactive: a cold load can finish auth and
+  // issues long after onHash runs, and a runtime hashchange must switch the
+  // drawer. The issue hash is left in the URL so a reload reopens the issue.
+  // Project keys may contain digits (BB-200's fixture does), so accept them.
+  let pendingKey = $state<string | null>(null);
   function onHash() {
     const h = decodeURIComponent(location.hash.slice(1));
     if (!h) return;
-    if (h === "new") store.paletteOpen = true;
-    else if (/^[A-Za-z]+-\d+$/.test(h)) pendingKey = h.toUpperCase();
-    history.replaceState(null, "", location.pathname + location.search);
+    if (h === "new") {
+      store.paletteOpen = true;
+      history.replaceState(null, "", location.pathname + location.search);
+    } else if (/^[A-Za-z][A-Za-z0-9]*-\d+$/.test(h)) {
+      pendingKey = h.toUpperCase();
+    }
   }
   $effect(() => {
-    if (pendingKey && store.auth === "in" && store.issueByKey(pendingKey)) {
-      store.selectedKey = pendingKey;
-      pendingKey = null;
-    }
+    if (!pendingKey || store.auth !== "in") return;
+    if (!store.issueByKey(pendingKey)) return;
+    store.selectedKey = pendingKey;
+    pendingKey = null;
   });
 
   onMount(() => {
@@ -309,26 +316,38 @@
     }
     .tabbar {
       display: flex;
-      justify-content: flex-start;
-      gap: 2px;
+      justify-content: stretch;
+      gap: 1px;
+      /* BB-203: seven labels must fit a 390px phone. Equal-width tabs with
+         tight type keep Settings on screen and make every target reachable
+         without discovering a horizontal swipe. If a future tab still
+         overflows, the bar scrolls and shows a thin scrollbar. */
       overflow-x: auto;
-      scrollbar-width: none;
+      scrollbar-width: thin;
       border-top: 1px solid var(--line);
       background: var(--sunk);
-      padding: 4px 6px calc(6px + env(safe-area-inset-bottom, 0px));
+      padding: 4px 4px calc(6px + env(safe-area-inset-bottom, 0px));
     }
     .tabbar::-webkit-scrollbar {
-      display: none;
+      height: 2px;
+    }
+    .tabbar::-webkit-scrollbar-thumb {
+      background: var(--line-2);
+      border-radius: 99px;
     }
     .tabbar button {
       position: relative;
-      flex: 0 0 auto;
+      flex: 1 1 0;
+      min-width: 0;
+      min-height: 44px;
       border: 0;
       background: none;
-      padding: 10px 9px;
-      font-size: 12px;
+      padding: 10px 0;
+      font-size: 11px;
       color: var(--ink-3);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .tabbar button.on {
       color: var(--accent);
@@ -344,16 +363,16 @@
     }
     .tabbar .pill {
       display: inline-block;
-      margin-left: 4px;
-      min-width: 15px;
-      height: 15px;
-      line-height: 15px;
+      margin-left: 2px;
+      min-width: 13px;
+      height: 13px;
+      line-height: 13px;
       border-radius: 99px;
       background: var(--ok);
       color: #0c0f0c;
-      font: 600 9px/15px var(--font-mono);
+      font: 600 8px/13px var(--font-mono);
       text-align: center;
-      padding: 0 3px;
+      padding: 0 2px;
     }
     .toast {
       bottom: 70px;
