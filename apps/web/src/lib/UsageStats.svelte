@@ -228,11 +228,14 @@
             <div class="arow">
               <span class="mname" title={a.model}>{a.model}</span>
               <span class="mcost">
-                {money(a.used_usd)} of {money(a.allowance_usd)}{#if a.multiplier > 0}<span
+                {money(a.used_usd)} of {money(a.allowance_usd)}
+                {#if a.multiplier > 0}
+                  <span
                     class="mult"
-                    title="Monthly allowance divided by the {money(a.plan_price_usd)} plan price"
+                    title={`Monthly allowance divided by the ${money(a.plan_price_usd)} plan price`}
                     >{a.multiplier}x</span
-                  >{/if}
+                  >
+                {/if}
               </span>
             </div>
             <div class="awins">
