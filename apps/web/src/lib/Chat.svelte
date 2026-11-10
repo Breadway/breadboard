@@ -2,6 +2,7 @@
   import { onMount, tick } from "svelte";
   import { api, errMsg, store } from "./store.svelte";
   import type { ChatMention, ChatMessage, ChatRoom, ChatUpload } from "@breadboard/api-client";
+  import { splitFencedCode } from "./markdown";
   import { agentColor } from "./ui/colors";
 
   let rooms = $state<ChatRoom[]>([]);
@@ -295,6 +296,16 @@
         const fresh = next.filter((m) => !seen.has(m.id));
         if (fresh.length) messages = [...messages, ...fresh];
       }
+      // The fetch itself advances the server's read receipt, but that write
+      // is queued in the background. Clear the badge here so opening a room
+      // does not leave a stale count until the next poll (BB-205). The store
+      // remembers the read point, so a room-list response taken before the
+      // receipt landed cannot put the badge back.
+      const newest = messages[messages.length - 1]?.id;
+      if (newest) {
+        rooms = rooms.map((r) => (r.id === id && r.unread ? { ...r, unread: 0 } : r));
+        store.markChatRoomRead(id, newest);
+      }
     } catch {
       /* ignore */
     }
@@ -508,29 +519,10 @@
 
 <div class="chat" class:narrow class:rooms-open={roomsOpen}>
   <aside class="rooms" aria-label="Chat rooms">
-    <header>
-      <span class="sh">Rooms</span>
-      <button class="mini" title="New room" aria-label="New room" onclick={() => (newRoom = !newRoom)}>+</button>
-    </header>
-
-    {#if newRoom}
-      <form class="newroom" onsubmit={(e) => { e.preventDefault(); void createRoom(); }}>
-        <input class="field" placeholder="room-name" bind:value={roomName} aria-label="Room name" />
-        <input class="field" placeholder="what is it for? (optional)" bind:value={roomDesc} aria-label="Room description" />
-        <button class="btn sm primary" type="submit">Create</button>
-      </form>
-    {/if}
-
-    {#each shared as r (r.id)}
-      <button class="room" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
-        <span class="hash">#</span>
-        <span class="rname">{r.name}</span>
-        {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
-        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
-      </button>
-    {/each}
-
-    <header class="dmhead">
+    <!-- DMs first: with a dozen rooms the DM section otherwise starts below
+         the fold at 1680 and its unread badges are invisible (BB-204). Every
+         room still renders, just ordered by reachability. -->
+    <header class="sect">
       <span class="sh">DMs</span>
       <button class="mini" title="New DM" aria-label="New DM" onclick={() => (dmPicker = !dmPicker)}>+</button>
     </header>
@@ -554,6 +546,28 @@
       </button>
     {/each}
     {#if !dms.length}<p class="none">No DMs yet</p>{/if}
+
+    <header class="sect roomhead">
+      <span class="sh">Rooms</span>
+      <button class="mini" title="New room" aria-label="New room" onclick={() => (newRoom = !newRoom)}>+</button>
+    </header>
+
+    {#if newRoom}
+      <form class="newroom" onsubmit={(e) => { e.preventDefault(); void createRoom(); }}>
+        <input class="field" placeholder="room-name" bind:value={roomName} aria-label="Room name" />
+        <input class="field" placeholder="what is it for? (optional)" bind:value={roomDesc} aria-label="Room description" />
+        <button class="btn sm primary" type="submit">Create</button>
+      </form>
+    {/if}
+
+    {#each shared as r (r.id)}
+      <button class="room" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
+        <span class="hash">#</span>
+        <span class="rname">{r.name}</span>
+        {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
+        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
+      </button>
+    {/each}
   </aside>
 
   <section class="main">
@@ -624,13 +638,24 @@
               </span>
               <div class="content">
                 {#if m.body}
-                  <span class="body">
-                    {#each mentionParts(m.body) as part}
-                      {#if part.mention}
-                        <span class="mention" class:everyone={part.everyone}>{part.text}</span>
-                      {:else}{part.text}{/if}
+                  <div class="body">
+                    {#each splitFencedCode(m.body) as part}
+                      {#if part.type === "code"}
+                        <div class="codeblock">
+                          {#if part.lang}<span class="lang">{part.lang}</span>{/if}
+                          <pre><code>{part.text}</code></pre>
+                        </div>
+                      {:else}
+                        <span class="prose">
+                          {#each mentionParts(part.text) as piece}
+                            {#if piece.mention}
+                              <span class="mention" class:everyone={piece.everyone}>{piece.text}</span>
+                            {:else}{piece.text}{/if}
+                          {/each}
+                        </span>
+                      {/if}
                     {/each}
-                  </span>
+                  </div>
                 {/if}
                 {#if m.attachments.length}
                   <div class="atts">
@@ -760,8 +785,16 @@
     gap: 6px;
     padding: 4px 6px 6px;
   }
-  .dmhead {
-    margin-top: 8px;
+  /* Section labels stay put while the list scrolls, so a DM or room section
+     remains identifiable past the fold. */
+  .rooms header.sect {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    background: var(--sunk);
+  }
+  .roomhead {
+    margin-top: 10px;
   }
   .sh {
     font: 500 10px/1 var(--font-mono);
@@ -801,9 +834,9 @@
   .room {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 2px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px;
     border: 0;
     border-radius: 7px;
     background: none;
@@ -1071,11 +1104,45 @@
     color: var(--ink-3);
   }
   .body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
     font-size: 13px;
     line-height: 1.5;
     color: var(--ink);
+    min-width: 0;
+  }
+  .prose {
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  .codeblock {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--sunk);
+    overflow: hidden;
+    min-width: 0;
+  }
+  .codeblock .lang {
+    display: block;
+    padding: 5px 10px 0;
+    font: 500 9.5px/1.4 var(--font-mono);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .codeblock pre {
+    margin: 0;
+    padding: 7px 10px 9px;
+    overflow-x: auto;
+    font: 400 12px/1.55 var(--font-mono);
+    color: var(--ink);
+    tab-size: 2;
+  }
+  .codeblock code {
+    font: inherit;
+    white-space: pre;
+    overflow-wrap: normal;
   }
   .at {
     font: 400 9.5px/1 var(--font-mono);
