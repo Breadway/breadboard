@@ -2336,6 +2336,11 @@ pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bo
     Ok(n > 0)
 }
 
+/// One `agent_sessions` hierarchy row: lowercased name, session id, explicit
+/// parent name and raw parent session id. Shared by the claim-tree rollup and
+/// cycle detection so both read the mixed graph the same way.
+type AgentHierarchyRow = (String, Option<String>, Option<String>, Option<String>);
+
 /// Live exclusive claim usage plus the resolved orchestrator tree (BB-154).
 ///
 /// The tree comes from `agent_sessions`: an explicit `parent_agent_name` wins,
@@ -2396,7 +2401,7 @@ pub async fn claim_usage(db: &SqlitePool) -> AppResult<ClaimUsage> {
     .await?;
     let counts: HashMap<String, i64> = count_rows.into_iter().collect();
 
-    let sessions: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let sessions: Vec<AgentHierarchyRow> = sqlx::query_as(
         "SELECT lower(agent_name), session_id, parent_agent_name, parent_session_id
            FROM agent_sessions",
     )
@@ -4036,7 +4041,7 @@ struct HierarchySnapshot {
 }
 
 async fn hierarchy_snapshot(db: &SqlitePool) -> AppResult<HierarchySnapshot> {
-    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+    let rows: Vec<AgentHierarchyRow> = sqlx::query_as(
         "SELECT lower(agent_name), session_id, parent_agent_name, parent_session_id
            FROM agent_sessions",
     )
