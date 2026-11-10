@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { UsageRange, UsageSummary } from "@breadboard/api-client";
+  import type { UsageRange, UsageShareBasis, UsageSummary } from "@breadboard/api-client";
   import { api, errMsg } from "./store.svelte";
 
   let {
@@ -84,14 +84,41 @@
   }
 
   /**
-   * Spend with unpriced token rows kept distinct from reported cost. A source
-   * row with tokens but a zero cost is not free, it is unpriced.
+   * One line for a row that can carry metered billed cost, computed allowance
+   * consumption, and the two "cannot price this" states. Values that do not
+   * apply stay out of the string so nothing reads as $0 when it is not.
    */
-  function spendLabel(value: { cost: number; unpriced_tokens: number }): string {
-    if (value.unpriced_tokens > 0) {
-      return value.cost > 0 ? `${money(value.cost)} + unpriced` : "unpriced";
+  function spendLabel(value: {
+    cost: number;
+    allowance_usd: number;
+    unpriced_tokens: number;
+    unrated_tokens: number;
+  }): string {
+    const parts: string[] = [];
+    if (value.cost > 0) parts.push(money(value.cost));
+    if (value.allowance_usd > 0) parts.push(`${money(value.allowance_usd)} allowance`);
+    if (value.unpriced_tokens > 0) parts.push("unpriced");
+    if (value.unrated_tokens > 0) parts.push("unrated");
+    return parts.length > 0 ? parts.join(" + ") : money(0);
+  }
+
+  function billedLabel(value: { cost: number; unpriced_tokens: number }): string {
+    if (value.cost > 0) return money(value.cost);
+    if (value.unpriced_tokens > 0) return "unpriced";
+    return money(0);
+  }
+
+  function basisLabel(basis: UsageShareBasis): string {
+    switch (basis) {
+      case "cost":
+        return "share by cost";
+      case "allowance":
+        return "share by allowance use";
+      case "dollars":
+        return "share by dollars (billed + allowance)";
+      default:
+        return "share by tokens";
     }
-    return money(value.cost);
   }
 
   function tokens(value: number): string {
@@ -126,12 +153,24 @@
 
     {#if summary}
       <div class="grid">
-        <div class="cell" class:bad={summary.over_threshold}>
-          <b title={summary.unpriced_tokens > 0 ? `${tokens(summary.unpriced_tokens)} tokens have no reported cost` : undefined}>
-            {spendLabel(summary)}
-          </b>
-          <span>spend</span>
-        </div>
+        {#if summary.cost > 0 || summary.unpriced_tokens > 0 || !summary.allowance_usd}
+          <div class="cell" class:bad={summary.over_threshold}>
+            <b
+              title={summary.unpriced_tokens > 0
+                ? `${tokens(summary.unpriced_tokens)} metered tokens have no reported cost`
+                : undefined}
+            >
+              {billedLabel(summary)}
+            </b>
+            <span>billed</span>
+          </div>
+        {/if}
+        {#if summary.allowance_usd > 0 || (summary.allowances?.length ?? 0) > 0}
+          <div class="cell" class:bad={summary.over_allowance}>
+            <b>{money(summary.allowance_usd)}</b>
+            <span>allowance used</span>
+          </div>
+        {/if}
         <div class="cell">
           <b>{tokens(summary.total_tokens)}</b>
           <span>tokens</span>
@@ -148,7 +187,12 @@
 
       {#if summary.over_threshold}
         <p class="warn" role="status">
-          Over the {money(summary.spend_warn_usd)} spend warning threshold.
+          Over the {money(summary.spend_warn_usd)} billed-spend warning threshold.
+        </p>
+      {/if}
+      {#if summary.over_allowance}
+        <p class="warn" role="status">
+          A model is over its 5-hour, weekly or monthly allowance window.
         </p>
       {/if}
 
@@ -162,13 +206,58 @@
 
       {#if summary.unpriced_tokens > 0}
         <p class="unpriced" role="status">
-          {tokens(summary.unpriced_tokens)} tokens have no reported cost. They are shown as
-          unpriced, not $0, and are excluded from spend and the warning threshold.
+          {tokens(summary.unpriced_tokens)} metered tokens have no reported cost. They are shown
+          as unpriced, not $0, and are excluded from billed spend and the warning threshold.
         </p>
+      {/if}
+      {#if summary.unrated_tokens > 0}
+        <p class="unpriced" role="status">
+          {tokens(summary.unrated_tokens)} allowance tokens belong to a model with no configured
+          rate, so they are shown as unrated rather than guessed. Add the model to
+          <code>usage.providers</code> in breadboard.toml.
+        </p>
+      {/if}
+
+      {#if summary.allowances?.length}
+        <div class="allowances">
+          <div class="mhead">
+            <span class="slabel">Allowance</span>
+            <span class="basis">used of monthly limit · rolling 5h / weekly / monthly</span>
+          </div>
+          {#each summary.allowances as a (a.provider + "/" + a.model)}
+            <div class="arow">
+              <span class="mname" title={a.model}>{a.model}</span>
+              <span class="mcost">
+                {money(a.used_usd)} of {money(a.allowance_usd)}
+                {#if a.multiplier > 0}
+                  <span
+                    class="mult"
+                    title={`Monthly allowance divided by the ${money(a.plan_price_usd)} plan price`}
+                    >{a.multiplier}x</span
+                  >
+                {/if}
+              </span>
+            </div>
+            <div class="awins">
+              {#each a.windows as w (a.model + w.label)}
+                <span class:over={w.over_limit} title={`${w.from} to ${w.to}`}>
+                  {w.label} {money(w.used_usd)} / {money(w.limit_usd)}
+                </span>
+              {/each}
+              {#if a.unrated_tokens > 0}
+                <span class="unrated">{tokens(a.unrated_tokens)} tok no rate</span>
+              {/if}
+            </div>
+          {/each}
+        </div>
       {/if}
 
       {#if summary.models.length}
         <div class="models">
+          <div class="mhead">
+            <span class="slabel">Models</span>
+            <span class="basis">{basisLabel(summary.share_basis)}</span>
+          </div>
           {#each summary.models as m (m.model + (m.provider ?? ""))}
             <div class="model">
               <div class="mrow">
@@ -186,9 +275,11 @@
         <p class="agents">
           {#each summary.agents as a (a.agent_name)}
             <span class="achip">
-              {a.agent_name} {pct(a.share)}{a.cost <= 0 && a.unpriced_tokens > 0
-                ? " · unpriced"
-                : ""}
+              {a.agent_name} {pct(a.share)}{a.allowance_usd > 0
+                ? " · allowance"
+                : a.cost <= 0 && a.unpriced_tokens > 0
+                  ? " · unpriced"
+                  : ""}
             </span>
           {/each}
         </p>
@@ -226,7 +317,10 @@
           <button class="btn ghost sm" disabled={saving} onclick={() => void saveThreshold()}>
             {saving ? "Saving" : "Save"}
           </button>
-          <span class="hint">0 disables warnings; applies to any agent or issue in this range</span>
+          <span class="hint"
+            >0 disables warnings; compares billed metered cost for any agent or issue in this
+            range</span
+          >
         </div>
       {/if}
     {:else if loading}
@@ -282,7 +376,7 @@
   }
   .grid {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(78px, 1fr));
     gap: 6px;
   }
   .cell {
@@ -340,6 +434,52 @@
     flex-direction: column;
     gap: 7px;
     margin-top: 10px;
+  }
+  .mhead {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    margin-bottom: 2px;
+  }
+  .basis {
+    margin-left: auto;
+    color: var(--ink-3);
+    font: 400 9.5px/1.2 var(--font-mono);
+  }
+  .allowances {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 10px;
+  }
+  .arow {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font: 500 10.5px/1.3 var(--font-mono);
+  }
+  .mult {
+    margin-left: 5px;
+    padding: 1px 4px;
+    border-radius: 99px;
+    background: color-mix(in srgb, var(--ok) 14%, transparent);
+    color: var(--ink);
+    font-size: 9px;
+  }
+  .awins {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px 9px;
+    color: var(--ink-3);
+    font: 400 9.5px/1.3 var(--font-mono);
+  }
+  .awins .over {
+    color: var(--danger);
+    font-weight: 600;
+  }
+  .awins .unrated {
+    color: var(--ink-3);
+    font-style: italic;
   }
   .mrow {
     display: flex;

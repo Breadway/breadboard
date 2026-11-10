@@ -5,7 +5,8 @@
 use std::net::SocketAddr;
 
 use breadboard_server::{
-    auth::sha256_hex, config::Config, config::ForgejoConfig, db, http, store, AppState,
+    auth::sha256_hex, config::Config, config::ForgejoConfig, config::UsageConfig, db, http, store,
+    AppState,
 };
 use chrono::Utc;
 use sqlx::SqlitePool;
@@ -22,19 +23,28 @@ pub struct TestApp {
 }
 
 pub async fn spawn() -> TestApp {
-    spawn_full(None, None).await
+    spawn_full(None, None, |_| {}).await
 }
 
 pub async fn spawn_with_forgejo(fake: Option<(String, String)>) -> TestApp {
-    spawn_full(fake, None).await
+    spawn_full(fake, None, |_| {}).await
 }
 
 /// Spawn with explicit live exclusive claim budgets (per agent, per tree).
 pub async fn spawn_with_claim_limits(per_agent: i64, per_orchestrator: i64) -> TestApp {
-    spawn_full(None, Some((per_agent, per_orchestrator))).await
+    spawn_full(None, Some((per_agent, per_orchestrator)), |_| {}).await
 }
 
-async fn spawn_full(fake: Option<(String, String)>, claim_limits: Option<(i64, i64)>) -> TestApp {
+/// Spawn with a prepared usage config (billing modes and allowance tables).
+pub async fn spawn_with_usage(mutate: impl FnOnce(&mut UsageConfig)) -> TestApp {
+    spawn_full(None, None, mutate).await
+}
+
+async fn spawn_full(
+    fake: Option<(String, String)>,
+    claim_limits: Option<(i64, i64)>,
+    usage: impl FnOnce(&mut UsageConfig),
+) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = Config {
         database_path: tmp.path().join("test.db"),
@@ -55,6 +65,7 @@ async fn spawn_full(fake: Option<(String, String)>, claim_limits: Option<(i64, i
         config.claims.max_exclusive_per_agent = per_agent;
         config.claims.max_exclusive_per_orchestrator = per_orchestrator;
     }
+    usage(&mut config.usage);
 
     let db = db::connect(&config.database_url()).await.unwrap();
     store::ensure_seed(&db).await.unwrap();

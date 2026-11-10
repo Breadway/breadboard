@@ -7,9 +7,10 @@
 //!
 //! Env vars (`BREADBOARD_*`) override file values for secrets in deployment.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -85,8 +86,143 @@ pub struct UsageConfig {
     /// Minutes between import passes. Minimum 1.
     pub import_interval_mins: u64,
     /// Default spend warning threshold in USD. The stored setting wins once it
-    /// has been written.
+    /// has been written. Only metered billed cost counts against it.
     pub spend_warn_usd: f64,
+    /// Billing mode for every provider without a `providers` entry.
+    pub billing_mode: BillingMode,
+    /// Per-provider billing, keyed by the provider id OpenCode records
+    /// (`opencode-go`, not the `provider/model` label). A provider missing here
+    /// uses `billing_mode` with no allowance table.
+    pub providers: HashMap<String, ProviderBillingConfig>,
+}
+
+/// How a provider charges for tokens.
+///
+/// `Metered` providers bill per token, so a reported cost is real spend.
+/// `Allowance` providers are prepaid plans: each model has a monthly dollar
+/// allowance, and usage draws it down at the model's per-token API rates.
+/// OpenCode's own reported cost is ignored for these providers because it is
+/// inconsistent; consumption is computed from tokens and rates instead.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BillingMode {
+    #[default]
+    Metered,
+    Allowance,
+}
+
+impl BillingMode {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "" => None,
+            "metered" => Some(Self::Metered),
+            "allowance" => Some(Self::Allowance),
+            _ => None,
+        }
+    }
+}
+
+/// Per-1M-token USD rates. Reasoning tokens are charged at the output rate.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct TokenRates {
+    pub input: f64,
+    pub output: f64,
+    pub cache_read: f64,
+    pub cache_write: f64,
+    /// Rates inside the provider's off-peak window. Absent means flat pricing.
+    pub off_peak: Option<Box<TokenRates>>,
+}
+
+/// One model on an allowance plan.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ModelAllowanceConfig {
+    /// Monthly dollar allowance for this model under the plan.
+    pub allowance_usd: f64,
+    /// Peak (standard) rates, with optional off-peak overrides.
+    pub rates: TokenRates,
+}
+
+/// Billing configuration for one provider.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ProviderBillingConfig {
+    /// `metered` (default) or `allowance`.
+    pub mode: BillingMode,
+    /// What the plan costs per month. Used only to show leverage
+    /// (monthly allowance / plan price), never to price tokens.
+    pub plan_price_usd: f64,
+    /// Off-peak window in UTC as `HH:MM`. The window may wrap midnight
+    /// (`16:30` to `00:30`). Both ends must be set to take effect; without
+    /// them every bucket is charged at the peak rate.
+    pub off_peak_start_utc: Option<String>,
+    pub off_peak_end_utc: Option<String>,
+    /// Allowance table keyed by model id as OpenCode reports it
+    /// (`deepseek-v4.1-flash`). Unlisted models count as unrated tokens.
+    pub models: HashMap<String, ModelAllowanceConfig>,
+}
+
+impl UsageConfig {
+    /// Per-provider billing config. Matching is case-insensitive; a
+    /// `provider/model` label resolves on its provider prefix so rows that lost
+    /// their provider field still price correctly.
+    pub fn provider_for(&self, provider: Option<&str>) -> Option<&ProviderBillingConfig> {
+        let provider = provider.map(str::trim).filter(|p| !p.is_empty())?;
+        if let Some(cfg) = self
+            .providers
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(provider))
+            .map(|(_, cfg)| cfg)
+        {
+            return Some(cfg);
+        }
+        let (prefix, _) = provider.split_once('/')?;
+        self.providers
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(prefix))
+            .map(|(_, cfg)| cfg)
+    }
+
+    /// Billing mode for a provider id. Missing or unknown providers are
+    /// metered.
+    pub fn billing_for(&self, provider: Option<&str>) -> BillingMode {
+        self.provider_for(provider)
+            .map(|cfg| cfg.mode)
+            .unwrap_or(self.billing_mode)
+    }
+
+    /// Merge a TOML provider table, used by `BREADBOARD_USAGE_PROVIDERS_TOML`
+    /// so a container can configure allowance tables without a mounted config
+    /// file. The text is the body under `[usage.providers]`:
+    ///
+    /// ```toml
+    /// [opencode-go]
+    /// mode = "allowance"
+    /// ```
+    pub fn merge_provider_toml(&mut self, text: &str) -> anyhow::Result<()> {
+        let providers: HashMap<String, ProviderBillingConfig> = toml::from_str(text)
+            .map_err(|error| anyhow::anyhow!("BREADBOARD_USAGE_PROVIDERS_TOML: {error}"))?;
+        self.providers.extend(providers);
+        Ok(())
+    }
+}
+
+impl ProviderBillingConfig {
+    /// Allowance entry for a model id, ignoring case and an optional provider
+    /// prefix (`opencode-go/deepseek-v4.1-flash`).
+    pub fn model_for(&self, model: &str) -> Option<&ModelAllowanceConfig> {
+        if let Some(cfg) = self.models.get(model) {
+            return Some(cfg);
+        }
+        let raw = model.rsplit('/').next().unwrap_or(model);
+        self.models
+            .iter()
+            .find(|(key, _)| {
+                key.trim().eq_ignore_ascii_case(model) || key.trim().eq_ignore_ascii_case(raw)
+            })
+            .map(|(_, cfg)| cfg)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -193,6 +329,8 @@ impl Default for UsageConfig {
             opencode_db: default_opencode_db(),
             import_interval_mins: 5,
             spend_warn_usd: 5.0,
+            billing_mode: BillingMode::Metered,
+            providers: HashMap::new(),
         }
     }
 }
@@ -229,11 +367,11 @@ impl Config {
             }
             _ => Config::default(),
         };
-        cfg.apply_env();
+        cfg.apply_env()?;
         Ok(cfg)
     }
 
-    fn apply_env(&mut self) {
+    fn apply_env(&mut self) -> anyhow::Result<()> {
         if let Ok(v) = std::env::var("BREADBOARD_LISTEN") {
             self.listen = v;
         }
@@ -305,6 +443,14 @@ impl Config {
                 }
             }
         }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_BILLING_MODE") {
+            if let Some(mode) = BillingMode::parse(&v) {
+                self.usage.billing_mode = mode;
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_PROVIDERS_TOML") {
+            self.usage.merge_provider_toml(&v)?;
+        }
         if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT") {
             if let Ok(n) = v.parse::<i64>() {
                 self.claims.max_exclusive_per_agent = n.max(1);
@@ -320,6 +466,7 @@ impl Config {
                 self.agents.prune_after_hours = n;
             }
         }
+        Ok(())
     }
 
     /// Where chat attachments are written. Persisted on the same volume as
@@ -358,4 +505,110 @@ fn default_data_dir() -> PathBuf {
     dirs::data_dir()
         .unwrap_or_else(|| Path::new(".").to_path_buf())
         .join("breadboard")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OPENCODE_GO: &str = r#"
+[usage.providers.opencode-go]
+mode = "allowance"
+plan_price_usd = 10.0
+off_peak_start_utc = "16:30"
+off_peak_end_utc = "00:30"
+
+[usage.providers.opencode-go.models."deepseek-v4.1-flash"]
+allowance_usd = 100.0
+
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates]
+input = 0.30
+output = 1.20
+cache_read = 0.006
+cache_write = 0.30
+
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates.off_peak]
+input = 0.15
+output = 0.60
+cache_read = 0.003
+cache_write = 0.15
+"#;
+
+    #[test]
+    fn allowance_table_parses_from_toml() {
+        let config: Config = toml::from_str(OPENCODE_GO).unwrap();
+        let provider = config.usage.provider_for(Some("opencode-go")).unwrap();
+        assert_eq!(provider.mode, BillingMode::Allowance);
+        assert_eq!(provider.plan_price_usd, 10.0);
+        let model = provider.model_for("deepseek-v4.1-flash").unwrap();
+        assert_eq!(model.allowance_usd, 100.0);
+        assert_eq!(model.rates.input, 0.30);
+        let off_peak = model.rates.off_peak.as_ref().unwrap();
+        assert_eq!(off_peak.input, 0.15);
+        assert_eq!(off_peak.cache_read, 0.003);
+        // The provider prefix on a model label still resolves.
+        assert!(provider
+            .model_for("opencode-go/deepseek-v4.1-flash")
+            .is_some());
+    }
+
+    #[test]
+    fn billing_defaults_to_metered_when_no_provider_entry_exists() {
+        let usage = UsageConfig::default();
+        assert_eq!(usage.billing_for(Some("opencode-go")), BillingMode::Metered);
+        assert_eq!(usage.billing_for(None), BillingMode::Metered);
+        assert!(usage.provider_for(Some("opencode-go")).is_none());
+    }
+
+    #[test]
+    fn shipped_config_parses_and_marks_opencode_go_as_allowance() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../breadboard.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let config: Config = toml::from_str(&text).unwrap();
+        let provider = config.usage.provider_for(Some("opencode-go")).unwrap();
+        assert_eq!(provider.mode, BillingMode::Allowance);
+        assert_eq!(provider.plan_price_usd, 10.0);
+        assert!(provider
+            .model_for("deepseek-v4.1-flash")
+            .is_some_and(|m| m.allowance_usd == 100.0));
+        assert!(provider
+            .model_for("muse-spark-1.3-contributor")
+            .is_some_and(|m| m.allowance_usd == 60.0));
+    }
+
+    #[test]
+    fn provider_table_merges_from_env_shaped_toml() {
+        let mut usage = UsageConfig::default();
+        usage
+            .merge_provider_toml(
+                r#"
+[opencode-go]
+mode = "allowance"
+plan_price_usd = 10.0
+
+[opencode-go.models."deepseek-v4.1-flash"]
+allowance_usd = 100.0
+
+[opencode-go.models."deepseek-v4.1-flash".rates]
+input = 0.30
+output = 1.20
+"#,
+            )
+            .unwrap();
+        let provider = usage.provider_for(Some("opencode-go")).unwrap();
+        assert_eq!(provider.mode, BillingMode::Allowance);
+        assert!(provider.model_for("deepseek-v4.1-flash").is_some());
+        assert!(usage.merge_provider_toml("not = [valid").is_err());
+    }
+
+    #[test]
+    fn billing_mode_parses_known_names_only() {
+        assert_eq!(BillingMode::parse("metered"), Some(BillingMode::Metered));
+        assert_eq!(
+            BillingMode::parse(" Allowance "),
+            Some(BillingMode::Allowance)
+        );
+        assert_eq!(BillingMode::parse(""), None);
+        assert_eq!(BillingMode::parse("subscription"), None);
+    }
 }
