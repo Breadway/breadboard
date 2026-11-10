@@ -518,6 +518,16 @@ pub struct AgentRename {
     pub new_name: String,
 }
 
+/// `POST /api/agents/{name}/orchestrator` body. A registered agent name sets
+/// that agent as the parent; an absent or null `orchestrator` clears the link.
+/// This is the explicit human override: unlike registration it never falls
+/// back to COALESCE, so it can clear a parent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentOrchestratorUpdate {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestrator: Option<String>,
+}
+
 /// One row of `GET /api/agents/roster`: the union of live sessions,
 /// agent profiles and claims, deduplicated by lowercased agent name.
 #[derive(Debug, Clone, Serialize, Deserialize)]

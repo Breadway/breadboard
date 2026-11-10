@@ -148,6 +148,12 @@ fn all_event_names() -> Vec<&'static str> {
             agent: String::new(),
             unhidden_by: None,
         },
+        AgentOrchestrator {
+            agent: String::new(),
+            previous: None,
+            orchestrator: None,
+            changed_by: None,
+        },
         ChatMessage { room_id: 0, id: 0 },
         CycleStarted {
             id: 0,

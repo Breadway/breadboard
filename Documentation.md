@@ -324,6 +324,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/agents/{name}/hide` | hide a known agent from the default Agents view, recording `hidden_by` and `hidden_at`; emits `agent.hidden`. Idempotent, and claims plus chat identity are untouched. `404` for a name the roster does not know |
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile and session row move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
+| `POST` | `/api/agents/{name}/orchestrator` | `{ orchestrator? }`: explicitly set or clear an agent's orchestrator. `orchestrator` is a registered agent name; omit it (or send `null`) to clear the link and make the agent top level. Unlike registration this never COALESCEs, so a clear sticks. Refuses an unknown or removed target (`400`), an agent with no registered session (`400`), a self-link or any link that would close a cycle (`409`), and leaves the hidden flag untouched. Writes a `state_change` agent event naming the old and new orchestrator and emits `agent.orchestrator`. Returns the updated roster row |
 | `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, models[], sessions[], spend_warn_usd, over_threshold }]`. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
 | `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, cost, tokens, models) |
 | `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share |
@@ -452,6 +453,7 @@ after reconnecting to recover missed changes.
 | `agent.resumed` | `bread.board.agent.resumed` | `agent`, `resumed_by` |
 | `agent.hidden` | `bread.board.agent.hidden` | `agent`, `hidden_by` |
 | `agent.unhidden` | `bread.board.agent.unhidden` | `agent`, `unhidden_by` |
+| `agent.orchestrator` | `bread.board.agent.orchestrator` | `agent`, `previous`, `orchestrator` (both names or `null`), `changed_by` |
 | `chat.message` | `bread.board.chat.message` | `room_id`, `id` |
 | `cycle.started` | `bread.board.cycle.started` | `id`, `name`, `issues` |
 | `cycle.ended` | `bread.board.cycle.ended` | `id`, `name` |

@@ -23,6 +23,11 @@
   let openAgentId = $state<string | null>(null);
   let copied = $state<string | null>(null);
   let panelEl: HTMLElement | undefined = $state();
+  let draggingId = $state<string | null>(null);
+  let dropTargetId = $state<string | null>(null);
+  let rootDropOver = $state(false);
+  let menuFor = $state<string | null>(null);
+  let menuChoice = $state<string>("");
 
   onMount(() => {
     void store.loadAgents();
@@ -561,6 +566,116 @@
     await store.unhideAgent(g.name);
   }
 
+  /** True when `candidateId` sits below `ancestorId` in the current tree. */
+  function isDescendant(candidateId: string, ancestorId: string): boolean {
+    const seen = new Set<string>();
+    let current = parentById.get(candidateId);
+    while (current && !seen.has(current)) {
+      if (current === ancestorId) return true;
+      seen.add(current);
+      current = parentById.get(current);
+    }
+    return false;
+  }
+
+  /** The agents this card may be dropped on. Removed agents are absent from the
+   *  roster, hidden ones keep working, and a descendant would close a cycle. */
+  function orchestratorOptions(g: Group): Group[] {
+    return allGroups
+      .filter((o) => o.id !== g.id && !!o.sessionId && !isDescendant(o.id, g.id))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  function openMenu(g: Group) {
+    if (menuFor === g.id) {
+      menuFor = null;
+      return;
+    }
+    menuFor = g.id;
+    menuChoice = parentById.get(g.id) ?? "";
+  }
+
+  function applyMenu(g: Group) {
+    const target = menuChoice || null;
+    menuFor = null;
+    void moveAgent(g.id, target);
+  }
+
+  /** Move one agent under another, or to the top level when `targetId` is
+   *  null. A cycle is refused before the request so the message is immediate;
+   *  the server enforces the same rule. */
+  async function moveAgent(sourceId: string, targetId: string | null) {
+    const source = byId.get(sourceId);
+    if (!source || source.id === targetId) return;
+    if (!source.sessionId) {
+      store.flash(`Can't move ${source.name}: it has no registered session`);
+      return;
+    }
+    let target: Group | undefined;
+    if (targetId) {
+      target = byId.get(targetId);
+      if (!target) return;
+      if (!target.sessionId) {
+        store.flash(`Can't move ${source.name} under ${target.name}: ${target.name} has no registered session`);
+        return;
+      }
+      if (isDescendant(target.id, source.id)) {
+        store.flash(`Can't move ${source.name} under ${target.name}: that would create a cycle`);
+        return;
+      }
+    }
+    draggingId = null;
+    dropTargetId = null;
+    rootDropOver = false;
+    await store.setAgentOrchestrator(source.name, target?.name ?? null);
+  }
+
+  function startDrag(e: DragEvent, g: Group) {
+    if (!g.sessionId) {
+      e.preventDefault();
+      return;
+    }
+    draggingId = g.id;
+    menuFor = null;
+    e.dataTransfer?.setData("text/plain", g.id);
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+  }
+
+  function overCard(e: DragEvent, g: Group) {
+    if (!draggingId || draggingId === g.id || !g.sessionId) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dropTargetId = g.id;
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+  }
+
+  function dropOnCard(e: DragEvent, g: Group) {
+    e.preventDefault();
+    e.stopPropagation();
+    const source = e.dataTransfer?.getData("text/plain") || draggingId;
+    dropTargetId = null;
+    if (source) void moveAgent(source, g.id);
+  }
+
+  function dropOnRoot(e: DragEvent) {
+    e.preventDefault();
+    rootDropOver = false;
+    const source = e.dataTransfer?.getData("text/plain") || draggingId;
+    if (source) void moveAgent(source, null);
+  }
+
+  function endDrag() {
+    draggingId = null;
+    dropTargetId = null;
+    rootDropOver = false;
+  }
+
+  $effect(() => {
+    // A menu belongs to the card that opened it; close it when that card is
+    // filtered out from under the popover.
+    if (menuFor && !byId.has(menuFor)) menuFor = null;
+  });
+
   $effect(() => {
     if (!selected) return;
     queueMicrotask(() => panelEl?.focus());
@@ -642,6 +757,8 @@
     class:hidden={g.hidden}
     class:orchestrator={isOrchestrator}
     class:subagent-card={!!parent || !!unlinkedParent}
+    class:dragging={draggingId === g.id}
+    class:drop-target={dropTargetId === g.id}
     style="--agent:{agentColor(g.name)}"
     data-agent={g.id}
     data-claims={g.work.length}
@@ -649,8 +766,17 @@
     data-role={isOrchestrator ? "orchestrator" : parent ? "subagent" : unlinkedParent ? "unlinked" : "solo"}
     data-parent={parent?.name ?? ""}
     data-direct-subagents={direct.length}
+    data-session={g.sessionId ?? ""}
     role="button"
     tabindex="0"
+    draggable={!!g.sessionId}
+    ondragstart={(e) => startDrag(e, g)}
+    ondragend={endDrag}
+    ondragover={(e) => overCard(e, g)}
+    ondragleave={() => {
+      if (dropTargetId === g.id) dropTargetId = null;
+    }}
+    ondrop={(e) => dropOnCard(e, g)}
     onclick={() => openAgent(g)}
     onkeydown={(e) => {
       if (e.key === "Enter" || e.key === " ") {
@@ -765,6 +891,40 @@
       {/if}
       <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
         {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
+      </span>
+      <span class="card-menu-wrap">
+        <button
+          class="btn ghost sm card-menu-btn"
+          aria-label="Actions for {g.name}"
+          aria-expanded={menuFor === g.id}
+          title="Card actions"
+          onclick={(e) => {
+            e.stopPropagation();
+            openMenu(g);
+          }}
+          onkeydown={(e) => e.stopPropagation()}
+        >⋮</button>
+        {#if menuFor === g.id}
+          <div
+            class="card-menu"
+            role="menu"
+            aria-label="Actions for {g.name}"
+            onclick={(e) => e.stopPropagation()}
+            onkeydown={(e) => e.stopPropagation()}
+          >
+            <label class="menu-label" for="card-orchestrator-{g.id}">Set orchestrator</label>
+            <select id="card-orchestrator-{g.id}" class="menu-select" bind:value={menuChoice}>
+              <option value="">Top level</option>
+              {#each orchestratorOptions(g) as option (option.id)}
+                <option value={option.id}>{option.name}</option>
+              {/each}
+            </select>
+            <span class="menu-actions">
+              <button class="btn sm" role="menuitem" onclick={() => applyMenu(g)}>Apply</button>
+              <button class="btn ghost sm" role="menuitem" onclick={() => (menuFor = null)}>Cancel</button>
+            </span>
+          </div>
+        {/if}
       </span>
       {#if g.hidden}
         <button
@@ -892,6 +1052,24 @@
     </span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
+
+  {#if draggingId}
+    <div
+      class="root-drop"
+      class:over={rootDropOver}
+      data-drop-root="true"
+      ondragover={(e) => {
+        e.preventDefault();
+        rootDropOver = true;
+        if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+      }}
+      ondragleave={() => (rootDropOver = false)}
+      ondrop={dropOnRoot}
+    >
+      <b>Drop here to make top level</b>
+      <span>clears the orchestrator, nothing else changes</span>
+    </div>
+  {/if}
 
   {#if !sections.length}
     <div class="empty">
@@ -1518,7 +1696,16 @@
     break-inside: avoid;
     font: inherit;
     color: inherit;
+    position: relative;
     transition: border-color 0.15s, background-color 0.15s, transform 0.15s;
+  }
+  .agent-card.dragging {
+    opacity: 0.55;
+  }
+  .agent-card.drop-target {
+    border-color: var(--agent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--agent) 45%, transparent);
+    background: color-mix(in srgb, var(--agent) 9%, var(--surface));
   }
   .agent-card:focus-visible {
     outline: 2px solid color-mix(in srgb, var(--agent) 70%, var(--ink));
@@ -2180,5 +2367,70 @@
     .badges {
       max-width: 100%;
     }
+  }
+
+  /* --- manual orchestrator edits ------------------------------------- */
+  .root-drop {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 12px 16px;
+    border: 1px dashed color-mix(in srgb, var(--agent, var(--ink-3)) 60%, var(--line));
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--surface) 70%, var(--sunk));
+    color: var(--ink-2);
+    font: 500 12px/1.4 var(--font-body);
+  }
+  .root-drop b {
+    font: 650 13px/1.3 var(--font-display);
+    color: var(--ink);
+  }
+  .root-drop.over {
+    border-color: var(--ok);
+    background: color-mix(in srgb, var(--ok) 10%, var(--surface));
+    color: var(--ink);
+  }
+  .card-menu-wrap {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+  .card-menu-btn {
+    min-width: 24px;
+    padding-inline: 6px;
+  }
+  .card-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    width: 224px;
+    padding: 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--raise, var(--surface));
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.18);
+    cursor: default;
+  }
+  .menu-label {
+    font: 600 11px/1.2 var(--font-body);
+    color: var(--ink-2);
+  }
+  .menu-select {
+    width: 100%;
+    padding: 5px 6px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+  }
+  .menu-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
   }
 </style>

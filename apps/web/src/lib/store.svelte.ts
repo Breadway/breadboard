@@ -699,6 +699,56 @@ class Store {
     }
   }
 
+  /** Set or clear an agent's orchestrator. The local parent link patches
+   *  optimistically so a drop re-renders before the round trip; the server row
+   *  replaces it on success, and the toast offers one-click undo. A previous
+   *  raw parent session id that never registered cannot be restored by name,
+   *  so no undo is offered in that one case. */
+  async setAgentOrchestrator(name: string, orchestrator: string | null): Promise<boolean> {
+    const child = this.roster.find((r) => r.agent_name === name);
+    if (!child) {
+      this.flash(`Couldn't move ${name}: it is not on the roster`);
+      return false;
+    }
+    const target = orchestrator
+      ? this.roster.find((r) => r.agent_name === orchestrator)
+      : undefined;
+    if (orchestrator && !target) {
+      this.flash(`Couldn't move ${name} under ${orchestrator}: that agent is not on the roster`);
+      return false;
+    }
+    const previousParent = child.parent_session_id ?? null;
+    const previousOrchestrator = child.orchestrator ?? null;
+    const previousOrchestratorSession = child.orchestrator_session_id ?? null;
+
+    child.parent_session_id = target?.session_id ?? null;
+    child.orchestrator = target?.agent_name ?? null;
+    child.orchestrator_session_id = target?.session_id ?? null;
+    this.roster = [...this.roster];
+
+    try {
+      const entry = await api.setAgentOrchestrator(name, orchestrator);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      const where = orchestrator ? `under ${orchestrator}` : "at the top level";
+      const canUndo = previousOrchestrator != null || previousParent == null;
+      this.info(
+        `Moved ${name} ${where}`,
+        canUndo ? () => void this.setAgentOrchestrator(name, previousOrchestrator) : undefined,
+      );
+      return true;
+    } catch (e) {
+      const current = this.roster.find((r) => r.agent_name === name);
+      if (current) {
+        current.parent_session_id = previousParent;
+        current.orchestrator = previousOrchestrator;
+        current.orchestrator_session_id = previousOrchestratorSession;
+        this.roster = [...this.roster];
+      }
+      this.flash(`Couldn't move ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
   async claim(key: string, body: ClaimUpsert): Promise<boolean> {
     try {
       const c = await api.claimIssue(key, body);
@@ -880,6 +930,7 @@ class Store {
       case "agent.resumed":
       case "agent.hidden":
       case "agent.unhidden":
+      case "agent.orchestrator":
         void this.loadAgents();
         break;
       case "agent.updated": {

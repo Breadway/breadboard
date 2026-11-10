@@ -1523,6 +1523,34 @@ pub async fn rename_agent(
     ))
 }
 
+/// Set or clear an agent's orchestrator. The body names a registered agent, or
+/// omits it to clear the link. A cycle or unknown target is refused; a hidden
+/// agent is never unhidden by this call.
+pub async fn set_agent_orchestrator(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+    Json(body): Json<breadboard_core::dto::AgentOrchestratorUpdate>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, previous) = store::set_agent_orchestrator(
+        &app.db,
+        user.0.id,
+        &name,
+        body.orchestrator.as_deref(),
+        &app.config.claim_limits(),
+    )
+    .await?;
+    let event = BoardEvent::AgentOrchestrator {
+        agent: entry.agent_name.clone(),
+        previous,
+        orchestrator: entry.orchestrator.clone(),
+        changed_by: Some(user.0.id),
+    };
+    app.bus.publish(event.clone());
+    notify::emit_bread(&app, &event);
+    Ok(Json(entry))
+}
+
 pub async fn agent_status(
     State(app): State<AppState>,
     _user: AuthUser,

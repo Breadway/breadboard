@@ -95,6 +95,10 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{name}/hide", post(api::hide_agent))
         .route("/agents/{name}/unhide", post(api::unhide_agent))
         .route("/agents/{name}/rename", post(api::rename_agent))
+        .route(
+            "/agents/{name}/orchestrator",
+            post(api::set_agent_orchestrator),
+        )
         // Usage stats: imported from OpenCode's session store, grouped per
         // agent or per issue claim. Additive block; unrelated routes above.
         .route("/usage/agents", get(usage::list_agent_usage))

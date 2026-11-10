@@ -110,6 +110,15 @@ pub enum BoardEvent {
         agent: String,
         unhidden_by: Option<i64>,
     },
+    /// A human set or cleared an agent's orchestrator. Carries both sides so a
+    /// client can re-render the hierarchy and explain the change.
+    #[serde(rename = "agent.orchestrator")]
+    AgentOrchestrator {
+        agent: String,
+        previous: Option<String>,
+        orchestrator: Option<String>,
+        changed_by: Option<i64>,
+    },
     /// A chat message was posted to a room or DM.
     #[serde(rename = "chat.message")]
     ChatMessage { room_id: i64, id: i64 },
@@ -150,6 +159,7 @@ impl BoardEvent {
             BoardEvent::AgentResumed { .. } => "bread.board.agent.resumed",
             BoardEvent::AgentHidden { .. } => "bread.board.agent.hidden",
             BoardEvent::AgentUnhidden { .. } => "bread.board.agent.unhidden",
+            BoardEvent::AgentOrchestrator { .. } => "bread.board.agent.orchestrator",
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
             BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
             BoardEvent::ReviewUpdated { .. } => "bread.board.review.updated",
