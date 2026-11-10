@@ -478,7 +478,13 @@ export interface AgentStatusSummary {
 
 /** Token and cost roll-up imported from OpenCode's session store. */
 export interface UsageTotals {
+  /** Cost the provider reported. Unpriced token rows are excluded. */
   cost: number;
+  /**
+   * Tokens whose source rows reported no cost. No price source exists for
+   * them, so clients label the spend unpriced instead of showing $0.
+   */
+  unpriced_tokens: number;
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
@@ -491,7 +497,9 @@ export interface UsageTotals {
 export interface UsageModelShare {
   model: string;
   provider?: string;
+  /** Reported cost only; see `unpriced_tokens`. */
   cost: number;
+  unpriced_tokens: number;
   total_tokens: number;
   /** Fraction of cost, or of tokens when no cost is recorded. */
   share: number;
@@ -499,7 +507,9 @@ export interface UsageModelShare {
 
 export interface UsageAgentShare {
   agent_name: string;
+  /** Reported cost only; see `unpriced_tokens`. */
   cost: number;
+  unpriced_tokens: number;
   total_tokens: number;
   share: number;
 }
@@ -507,7 +517,9 @@ export interface UsageAgentShare {
 export interface UsageSession {
   session_id: string;
   agent_name?: string;
+  /** Reported cost only; see `unpriced_tokens`. */
   cost: number;
+  unpriced_tokens: number;
   total_tokens: number;
   first_day: string;
   last_day: string;
