@@ -43,3 +43,10 @@ spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; 0 disables war
 # claim frees capacity immediately. Tune here; no migration is needed.
 max_exclusive_per_agent        = 10   # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT
 max_exclusive_per_orchestrator = 100  # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR
+
+[agents]
+# Daily roster hygiene. A row is removed only when it has no claims, no chat
+# membership or DM, no open review request, is not paused, and has not
+# heartbeated for this many hours. Sessionless rows and rows whose OpenCode
+# session disappeared use the same rule. 0 disables pruning.
+prune_after_hours = 24         # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS

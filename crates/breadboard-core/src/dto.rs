@@ -597,6 +597,13 @@ pub struct AgentRosterEntry {
     pub paused: bool,
     /// `live`, `stale` or `paused`.
     pub status: String,
+    /// True when the daily maintenance pass would remove this row: no claims,
+    /// no chat membership or DM, no open review request, not paused, and a
+    /// heartbeat older than the configured prune window.
+    pub abandoned: bool,
+    /// Human-readable explanation when `abandoned` is true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abandoned_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -637,6 +637,10 @@ export interface AgentRosterEntry {
   live: boolean;
   paused: boolean;
   status: "live" | "stale" | "paused";
+  /** True when roster maintenance would prune this row. */
+  abandoned: boolean;
+  /** Why the row qualifies for pruning, when `abandoned` is true. */
+  abandoned_reason?: string | null;
   message?: string | null;
   state?: AgentState | null;
   claim_count: number;

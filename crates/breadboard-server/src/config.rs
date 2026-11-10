@@ -32,6 +32,17 @@ pub struct Config {
     pub summary: SummaryConfig,
     pub usage: UsageConfig,
     pub claims: ClaimBudgetConfig,
+    pub agents: AgentRosterConfig,
+}
+
+/// Agent roster lifecycle. Rows nobody is using are pruned by a daily
+/// maintenance pass; the window is the only tunable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AgentRosterConfig {
+    /// Hours without a heartbeat before a claimless, chatless, review-free
+    /// agent row is considered abandoned. `0` disables pruning. Default 24.
+    pub prune_after_hours: u64,
 }
 
 /// Live exclusive claim budgets. Kept in config, not the database, so the
@@ -136,6 +147,7 @@ impl Default for Config {
             summary: SummaryConfig::default(),
             usage: UsageConfig::default(),
             claims: ClaimBudgetConfig::default(),
+            agents: AgentRosterConfig::default(),
         }
     }
 }
@@ -190,6 +202,14 @@ impl Default for ClaimBudgetConfig {
         Self {
             max_exclusive_per_agent: ClaimLimits::default().per_agent,
             max_exclusive_per_orchestrator: ClaimLimits::default().per_orchestrator,
+        }
+    }
+}
+
+impl Default for AgentRosterConfig {
+    fn default() -> Self {
+        Self {
+            prune_after_hours: 24,
         }
     }
 }
@@ -293,6 +313,11 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR") {
             if let Ok(n) = v.parse::<i64>() {
                 self.claims.max_exclusive_per_orchestrator = n.max(1);
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_AGENTS_PRUNE_AFTER_HOURS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.agents.prune_after_hours = n;
             }
         }
     }
