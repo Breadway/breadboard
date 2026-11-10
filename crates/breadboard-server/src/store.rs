@@ -2338,10 +2338,10 @@ pub async fn has_exclusive_claim(db: &SqlitePool, issue_id: i64) -> AppResult<bo
 
 /// Live exclusive claim usage plus the resolved orchestrator tree (BB-154).
 ///
-/// The tree comes from `agent_sessions`: a name whose `parent_session_id`
-/// matches another registered session's `session_id` rolls up under that
-/// parent. An unlinked name (or a parent that is not a registered session) is
-/// its own root, which matches the roster's resolution rules.
+/// The tree comes from `agent_sessions`: an explicit `parent_agent_name` wins,
+/// then `parent_session_id` matching another registered session's `session_id`.
+/// An unlinked name (or a parent that resolves to nothing) is its own root,
+/// which matches the roster's resolution rules.
 #[derive(Debug, Default)]
 pub struct ClaimUsage {
     /// Lowercased agent name -> live exclusive claims.
@@ -2396,17 +2396,36 @@ pub async fn claim_usage(db: &SqlitePool) -> AppResult<ClaimUsage> {
     .await?;
     let counts: HashMap<String, i64> = count_rows.into_iter().collect();
 
-    let sessions: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT lower(agent_name), session_id, parent_session_id FROM agent_sessions",
+    let sessions: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT lower(agent_name), session_id, parent_agent_name, parent_session_id
+           FROM agent_sessions",
     )
     .fetch_all(db)
     .await?;
     let by_session: HashMap<String, String> = sessions
         .iter()
-        .filter_map(|(name, session, _)| session.clone().map(|id| (id, name.clone())))
+        .filter_map(|(name, session, _, _)| session.clone().map(|id| (id, name.clone())))
+        .collect();
+    let known_names: HashSet<String> = sessions
+        .iter()
+        .map(|(name, _, _, _)| name.clone())
+        .chain(counts.keys().cloned())
         .collect();
     let mut parents: HashMap<String, String> = HashMap::new();
-    for (name, _, parent_session) in &sessions {
+    for (name, _, parent_name, parent_session) in &sessions {
+        // Name edge wins, matching roster display; only a resolvable parent
+        // rolls up, otherwise the name is its own root.
+        if let Some(parent_name) = parent_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .map(str::to_lowercase)
+        {
+            if &parent_name != name && known_names.contains(&parent_name) {
+                parents.insert(name.clone(), parent_name);
+                continue;
+            }
+        }
         if let Some(parent_name) = parent_session.as_ref().and_then(|id| by_session.get(id)) {
             if parent_name != name {
                 parents.insert(name.clone(), parent_name.clone());
@@ -2419,7 +2438,7 @@ pub async fn claim_usage(db: &SqlitePool) -> AppResult<ClaimUsage> {
     // once instead of summing its claims once per source.
     for name in sessions
         .iter()
-        .map(|(name, _, _)| name)
+        .map(|(name, _, _, _)| name)
         .chain(counts.keys())
     {
         if !roots.contains_key(name) {
@@ -3076,6 +3095,7 @@ struct AgentSessionRow {
     session_id: Option<String>,
     session_title: Option<String>,
     parent_session_id: Option<String>,
+    parent_agent_name: Option<String>,
     host: Option<String>,
     pid: Option<i64>,
     note: Option<String>,
@@ -3106,7 +3126,7 @@ struct AgentHiddenRow {
 }
 
 const AGENT_SESSION_COLS: &str =
-    "s.agent_name, s.session_id, s.session_title, s.parent_session_id, \
+    "s.agent_name, s.session_id, s.session_title, s.parent_session_id, s.parent_agent_name, \
     s.host, s.pid, s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.paused, \
     s.paused_by, p.login AS paused_by_login, s.paused_at";
 
@@ -3149,6 +3169,7 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         hidden_by_login: None,
         hidden_at: None,
         parent_session_id: None,
+        parent_agent_name: None,
         orchestrator: None,
         orchestrator_session_id: None,
     }
@@ -3193,6 +3214,7 @@ async fn upsert_agent_session(
     session_id: Option<&str>,
     session_title: Option<&str>,
     parent_session_id: Option<&str>,
+    parent_agent_name: Option<&str>,
     host: Option<&str>,
     pid: Option<i64>,
     note: Option<&str>,
@@ -3206,15 +3228,16 @@ async fn upsert_agent_session(
     let stale_before = (Utc::now() - chrono::Duration::seconds(AGENT_LIVE_SECS)).to_rfc3339();
     let result = sqlx::query(
         "INSERT INTO agent_sessions
-            (agent_name, session_id, session_title, parent_session_id, host, pid, note,
-             user_id, first_seen, last_seen)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9)
+            (agent_name, session_id, session_title, parent_session_id, parent_agent_name,
+             host, pid, note, user_id, first_seen, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
          ON CONFLICT(agent_name) DO UPDATE SET
             session_id         = COALESCE(excluded.session_id, agent_sessions.session_id),
             -- Only a new non-empty title replaces the stored one. An omitted
             -- or empty title (heartbeat, rename, older client) never clears it.
             session_title      = COALESCE(excluded.session_title, agent_sessions.session_title),
             parent_session_id  = COALESCE(excluded.parent_session_id, agent_sessions.parent_session_id),
+            parent_agent_name  = COALESCE(excluded.parent_agent_name, agent_sessions.parent_agent_name),
             host               = COALESCE(excluded.host, agent_sessions.host),
             pid                = COALESCE(excluded.pid, agent_sessions.pid),
             note               = COALESCE(excluded.note, agent_sessions.note),
@@ -3223,12 +3246,13 @@ async fn upsert_agent_session(
          WHERE ?2 IS NULL
             OR agent_sessions.session_id IS NULL
             OR agent_sessions.session_id IS ?2
-            OR julianday(agent_sessions.last_seen) < julianday(?10)",
+            OR julianday(agent_sessions.last_seen) < julianday(?11)",
     )
     .bind(name)
     .bind(session_id)
     .bind(session_title)
     .bind(parent_session_id)
+    .bind(parent_agent_name)
     .bind(host)
     .bind(pid)
     .bind(note)
@@ -3399,27 +3423,36 @@ pub async fn register_agent(
             .await?
             == 0;
 
-    // Prefer the exact parent session id from the plugin. If only an
-    // orchestrator name is known, resolve that name to its registered session;
-    // an unknown name is ignored rather than failing registration.
-    let parent_session_id = match input
+    // Prefer the exact parent session id from the plugin. An explicit known
+    // orchestrator name is stored as the name edge (it wins on display and can
+    // point at a sessionless agent); we still keep its registered session id
+    // when there is one so older readers see the same tree. An unknown name is
+    // ignored rather than failing registration.
+    let raw_parent_session = input
         .parent_session_id
         .as_deref()
         .map(str::trim)
-        .filter(|id| !id.is_empty())
-    {
-        Some(id) => Some(id.to_string()),
-        None => match input
+        .filter(|id| !id.is_empty());
+    let parent_agent_name = {
+        let known_parents = known_agent_names(db).await?;
+        match input
             .orchestrator
             .as_deref()
             .map(names::normalize)
-            .filter(|name| !name.is_empty())
+            .filter(|candidate| !candidate.is_empty() && candidate != &name)
         {
+            Some(orchestrator) if known_parents.contains(&orchestrator) => Some(orchestrator),
+            _ => None,
+        }
+    };
+    let parent_session_id = match raw_parent_session {
+        Some(id) => Some(id.to_string()),
+        None => match parent_agent_name.as_deref() {
             Some(orchestrator) => sqlx::query_scalar(
                 "SELECT session_id FROM agent_sessions
                   WHERE agent_name = ?1 AND session_id IS NOT NULL",
             )
-            .bind(&orchestrator)
+            .bind(orchestrator)
             .fetch_optional(db)
             .await?
             .flatten(),
@@ -3435,6 +3468,7 @@ pub async fn register_agent(
         session_id,
         session_title,
         parent_session_id.as_deref(),
+        parent_agent_name.as_deref(),
         input.host.as_deref(),
         input.pid,
         input.note.as_deref(),
@@ -3491,6 +3525,7 @@ pub async fn register_agent(
         session_id: entry.session_id,
         session_title: entry.session_title,
         parent_session_id: entry.parent_session_id,
+        parent_agent_name: entry.parent_agent_name,
         orchestrator: entry.orchestrator,
         orchestrator_session_id: entry.orchestrator_session_id,
     })
@@ -3521,6 +3556,7 @@ pub async fn ensure_agent_writable(
         user_id,
         &name,
         session_id,
+        None,
         None,
         None,
         None,
@@ -3575,6 +3611,12 @@ pub async fn remove_agent(
 
     let ts = now_rfc3339();
     let member = format!("agent:{name}");
+    let removed_session: Option<String> =
+        sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?
+            .flatten();
     let mut tx = crate::db::begin_write(db).await?;
 
     let claims_released = sqlx::query("DELETE FROM agent_claims WHERE lower(agent_name) = ?1")
@@ -3616,6 +3658,23 @@ pub async fn remove_agent(
     .bind(i64::from(profile_removed))
     .execute(&mut *tx)
     .await?;
+    // A removed agent is not a drop target any more, and a dangling name edge
+    // must not attach children to a future agent that reuses the name. Detach
+    // both raw links as part of the same removal.
+    sqlx::query(
+        "UPDATE agent_sessions SET parent_agent_name = NULL WHERE lower(parent_agent_name) = ?1",
+    )
+    .bind(&name)
+    .execute(&mut *tx)
+    .await?;
+    if let Some(session) = removed_session.as_deref() {
+        sqlx::query(
+            "UPDATE agent_sessions SET parent_session_id = NULL WHERE parent_session_id = ?1",
+        )
+        .bind(session)
+        .execute(&mut *tx)
+        .await?;
+    }
     sqlx::query("DELETE FROM agent_sessions WHERE agent_name = ?1")
         .bind(&name)
         .execute(&mut *tx)
@@ -3662,7 +3721,10 @@ pub async fn pause_agent(
     let ts = now_rfc3339();
     // A claim-only or profile-only name still gets a session row so the pause
     // flag has somewhere to live; registration preserves that flag.
-    upsert_agent_session(db, user_id, &name, None, None, None, None, None, None, &ts).await?;
+    upsert_agent_session(
+        db, user_id, &name, None, None, None, None, None, None, None, &ts,
+    )
+    .await?;
     let was_paused: Option<i64> =
         sqlx::query_scalar("SELECT paused FROM agent_sessions WHERE agent_name = ?1")
             .bind(&name)
@@ -3930,6 +3992,16 @@ pub async fn rename_agent(
         .bind(&new)
         .execute(&mut *tx)
         .await?;
+    // Name-based hierarchy edges follow the rename the same way claims and chat
+    // membership do. Session-based edges need no rewrite: the session id is
+    // unchanged by a rename.
+    sqlx::query(
+        "UPDATE agent_sessions SET parent_agent_name = ?2 WHERE lower(parent_agent_name) = ?1",
+    )
+    .bind(&old)
+    .bind(&new)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query("UPDATE agent_hidden SET agent_name = ?2 WHERE agent_name = ?1")
         .bind(&old)
         .bind(&new)
@@ -3951,18 +4023,43 @@ pub async fn rename_agent(
         .ok_or(AppError::NotFound)
 }
 
-/// The current `parent_session_id` links of every agent registered on one
-/// session id. A session id can appear on more than one row (historical data),
-/// so cycle detection has to consider all of them.
-async fn parent_session_ids(db: &SqlitePool, session_id: &str) -> AppResult<Vec<String>> {
-    let rows: Vec<Option<String>> = sqlx::query_scalar(
-        "SELECT parent_session_id FROM agent_sessions
-          WHERE session_id = ?1 AND parent_session_id IS NOT NULL",
+/// The mixed name/session hierarchy graph, keyed by lowercased agent name.
+///
+/// A row's `parent_agent_name`, when present, wins over `parent_session_id`,
+/// exactly like roster display. A session id can appear on more than one row
+/// (historical data), so session fallback keeps every candidate.
+#[derive(Debug, Default)]
+struct HierarchySnapshot {
+    parent_name: HashMap<String, String>,
+    parent_session: HashMap<String, String>,
+    names_by_session: HashMap<String, Vec<String>>,
+}
+
+async fn hierarchy_snapshot(db: &SqlitePool) -> AppResult<HierarchySnapshot> {
+    let rows: Vec<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT lower(agent_name), session_id, parent_agent_name, parent_session_id
+           FROM agent_sessions",
     )
-    .bind(session_id)
     .fetch_all(db)
     .await?;
-    Ok(rows.into_iter().flatten().collect())
+    let mut snapshot = HierarchySnapshot::default();
+    for (name, session, parent_name, parent_session) in rows {
+        if let Some(session) = session {
+            snapshot
+                .names_by_session
+                .entry(session)
+                .or_default()
+                .push(name.clone());
+        }
+        if let Some(parent) = parent_name.filter(|parent| !parent.trim().is_empty()) {
+            snapshot
+                .parent_name
+                .insert(name.clone(), parent.to_lowercase());
+        } else if let Some(parent) = parent_session.filter(|parent| !parent.trim().is_empty()) {
+            snapshot.parent_session.insert(name, parent);
+        }
+    }
+    Ok(snapshot)
 }
 
 /// The agent name currently registered on a session id, if any.
@@ -3978,17 +4075,14 @@ async fn agent_name_for_session(db: &SqlitePool, session_id: &str) -> AppResult<
     .await?)
 }
 
-/// Walk up from the proposed parent. If the walk reaches the agent being
-/// moved, the link would close a loop and is refused.
-async fn ensure_no_cycle(
-    db: &SqlitePool,
-    child_session: &str,
-    target_session: &str,
-) -> AppResult<()> {
+/// Walk up from the proposed parent through the mixed graph. If the walk
+/// reaches the agent being moved, the link would close a loop and is refused.
+async fn ensure_no_cycle(db: &SqlitePool, child_name: &str, target_name: &str) -> AppResult<()> {
+    let snapshot = hierarchy_snapshot(db).await?;
     let mut seen = HashSet::new();
-    let mut frontier = vec![target_session.to_string()];
+    let mut frontier = vec![target_name.to_string()];
     while let Some(current) = frontier.pop() {
-        if current == child_session {
+        if current == child_name {
             return Err(AppError::Conflict(
                 "that change would create an orchestrator cycle".into(),
             ));
@@ -3996,18 +4090,63 @@ async fn ensure_no_cycle(
         if !seen.insert(current.clone()) {
             continue;
         }
-        frontier.extend(parent_session_ids(db, &current).await?);
+        if let Some(parent) = snapshot.parent_name.get(&current) {
+            frontier.push(parent.clone());
+            continue;
+        }
+        if let Some(session) = snapshot.parent_session.get(&current) {
+            if let Some(names) = snapshot.names_by_session.get(session) {
+                frontier.extend(names.iter().cloned());
+            }
+        }
     }
     Ok(())
+}
+
+/// Resolve an endpoint target that may be either a registered agent name or a
+/// registered session id. Names win, so a sessionless agent name is a valid
+/// target; a raw session id falls back to the row registered on it.
+async fn resolve_orchestrator_target(
+    db: &SqlitePool,
+    known: &HashSet<String>,
+    raw: &str,
+) -> AppResult<(String, Option<String>)> {
+    let trimmed = raw.trim();
+    let normalized = names::normalize(trimmed);
+    if known.contains(&normalized) {
+        let session: Option<Option<String>> =
+            sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
+                .bind(&normalized)
+                .fetch_optional(db)
+                .await?;
+        return Ok((normalized, session.flatten()));
+    }
+    // Not a name: accept a session id whose row is registered.
+    let name: Option<String> = sqlx::query_scalar(
+        "SELECT lower(agent_name) FROM agent_sessions
+          WHERE session_id = ?1
+          ORDER BY last_seen DESC, agent_name ASC
+          LIMIT 1",
+    )
+    .bind(trimmed)
+    .fetch_optional(db)
+    .await?;
+    match name {
+        Some(name) => Ok((name, Some(trimmed.to_string()))),
+        None => Err(AppError::bad_request(format!(
+            "orchestrator '{trimmed}' is not a registered agent"
+        ))),
+    }
 }
 
 /// Explicitly set or clear one agent's orchestrator. Unlike registration,
 /// `None` clears the link: the register path uses COALESCE, so it can only
 /// preserve or set a parent and has no way to remove one.
 ///
-/// A non-empty target must be a known agent with a registered session, and the
-/// resulting link must not close a cycle. Hiding is untouched: this only edits
-/// the parent session id, never the hidden flag.
+/// The subject and target do not need a session id. A non-empty target is
+/// resolved name-first, then as a registered session id, and the resulting
+/// mixed-graph link must not close a cycle. Hiding is untouched: this only
+/// edits the parent edge, never the hidden flag.
 pub async fn set_agent_orchestrator(
     db: &SqlitePool,
     user_id: i64,
@@ -4022,72 +4161,60 @@ pub async fn set_agent_orchestrator(
         return Err(AppError::NotFound);
     }
 
-    let child_session: Option<Option<String>> =
-        sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
-            .bind(&name)
-            .fetch_optional(db)
-            .await?;
-    let child_session = child_session.flatten().ok_or_else(|| {
-        AppError::bad_request(format!(
-            "agent '{name}' has no registered session; it cannot be placed under an orchestrator"
-        ))
-    })?;
-    let old_parent: Option<Option<String>> =
-        sqlx::query_scalar("SELECT parent_session_id FROM agent_sessions WHERE agent_name = ?1")
-            .bind(&name)
-            .fetch_optional(db)
-            .await?;
-    let old_parent = old_parent.flatten();
-    let previous = match old_parent.as_deref() {
-        Some(session) => agent_name_for_session(db, session).await?,
-        None => None,
+    // A sessionless name is a first-class subject; the edge lives on its
+    // registry row even when session_id is NULL.
+    let old_parent: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT parent_agent_name, parent_session_id FROM agent_sessions WHERE agent_name = ?1",
+    )
+    .bind(&name)
+    .fetch_optional(db)
+    .await?;
+    let (old_parent_name, old_parent_session) = old_parent.unwrap_or_default();
+    let previous = match old_parent_name.as_deref() {
+        Some(parent) => Some(parent.to_string()),
+        None => match old_parent_session.as_deref() {
+            Some(session) => agent_name_for_session(db, session).await?,
+            None => None,
+        },
     };
 
     let target = raw_orchestrator
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(names::normalize);
-    let (new_parent, target_name) = match target {
+        .filter(|value| !value.is_empty());
+    let (new_parent_name, new_parent_session, target_name) = match target {
         Some(target) => {
-            if target == name {
+            let (target_name, target_session) =
+                resolve_orchestrator_target(db, &known, target).await?;
+            if target_name == name {
                 return Err(AppError::Conflict(format!(
                     "'{name}' cannot be its own orchestrator"
                 )));
             }
-            // A removed agent is gone from the session table, so it fails the
-            // same known-name check as a typo instead of silently linking to a
-            // dead session id.
-            if !known.contains(&target) {
-                return Err(AppError::bad_request(format!(
-                    "orchestrator '{target}' is not a registered agent"
-                )));
-            }
-            let target_session: Option<Option<String>> =
-                sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
-                    .bind(&target)
-                    .fetch_optional(db)
-                    .await?;
-            let target_session = target_session.flatten().ok_or_else(|| {
-                AppError::bad_request(format!("orchestrator '{target}' has no registered session"))
-            })?;
-            ensure_no_cycle(db, &child_session, &target_session).await?;
-            (Some(target_session), Some(target))
+            // Removed agents are gone from the roster, so they fail the same
+            // known-name/session check as a typo instead of linking to a ghost.
+            ensure_no_cycle(db, &name, &target_name).await?;
+            (Some(target_name.clone()), target_session, Some(target_name))
         }
-        None => (None, None),
+        None => (None, None, None),
     };
 
-    if old_parent != new_parent {
+    if old_parent_name != new_parent_name || old_parent_session != new_parent_session {
         let mut tx = crate::db::begin_write(db).await?;
-        sqlx::query("UPDATE agent_sessions SET parent_session_id = ?2 WHERE agent_name = ?1")
-            .bind(&name)
-            .bind(new_parent.as_deref())
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE agent_sessions
+                SET parent_agent_name = ?2, parent_session_id = ?3
+              WHERE agent_name = ?1",
+        )
+        .bind(&name)
+        .bind(new_parent_name.as_deref())
+        .bind(new_parent_session.as_deref())
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
 
         let old_label = previous.as_deref().unwrap_or("none");
         let new_label = target_name.as_deref().unwrap_or("none");
-        let verb = if new_parent.is_some() {
+        let verb = if new_parent_name.is_some() {
             if previous.is_some() {
                 "changed"
             } else {
@@ -4204,6 +4331,7 @@ pub async fn agent_roster(
         entry.session_id = session.session_id.clone();
         entry.session_title = session.session_title.clone();
         entry.parent_session_id = session.parent_session_id.clone();
+        entry.parent_agent_name = session.parent_agent_name.clone();
         entry.host = session.host.clone();
         entry.pid = session.pid;
         if session.note.is_some() {
@@ -4256,9 +4384,11 @@ pub async fn agent_roster(
             entry
         })
         .collect();
-    // Resolve parent session ids to orchestrator names after the union is
-    // built. An unregistered parent keeps only the raw id, so the UI can show
-    // it instead of dropping the link. This never participates in sorting.
+    // Resolve the displayed orchestrator after the union is built: the
+    // explicit parent name wins, then the agent registered on the parent
+    // session id. An unresolvable name or unregistered parent keeps only the
+    // raw link, so the UI can show it instead of dropping the edge. This never
+    // participates in sorting.
     let by_session: HashMap<String, String> = roster
         .iter()
         .filter_map(|entry| {
@@ -4268,7 +4398,26 @@ pub async fn agent_roster(
                 .map(|session| (session.clone(), entry.agent_name.clone()))
         })
         .collect();
+    let by_name: HashMap<String, Option<String>> = roster
+        .iter()
+        .map(|entry| (entry.agent_name.to_lowercase(), entry.session_id.clone()))
+        .collect();
     for entry in &mut roster {
+        if let Some(parent) = entry
+            .parent_agent_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|parent| !parent.is_empty())
+            .map(str::to_lowercase)
+        {
+            if let Some(session) = by_name.get(&parent) {
+                if parent != entry.agent_name {
+                    entry.orchestrator = Some(parent);
+                    entry.orchestrator_session_id = session.clone();
+                    continue;
+                }
+            }
+        }
         if let Some(parent) = entry.parent_session_id.clone() {
             if let Some(orchestrator) = by_session.get(&parent) {
                 if orchestrator != &entry.agent_name {

@@ -524,8 +524,8 @@ pub struct AgentRegister {
     /// reporter; the roster resolves it to an orchestrator name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
-    /// Optional orchestrator name. When `parent_session_id` is absent, the
-    /// server resolves a known name to its registered session id.
+    /// Optional orchestrator name. Stored as the explicit parent edge when the
+    /// name is known; its registered session, when any, is kept for fallback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<String>,
 }
@@ -546,6 +546,10 @@ pub struct AgentRegistration {
     pub session_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
+    /// Explicit parent agent name. Takes precedence over `parent_session_id`;
+    /// unlike the session edge it survives a sessionless child or parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -558,10 +562,10 @@ pub struct AgentRename {
     pub new_name: String,
 }
 
-/// `POST /api/agents/{name}/orchestrator` body. A registered agent name sets
-/// that agent as the parent; an absent or null `orchestrator` clears the link.
-/// This is the explicit human override: unlike registration it never falls
-/// back to COALESCE, so it can clear a parent.
+/// `POST /api/agents/{name}/orchestrator` body. A registered agent name (or a
+/// registered session id) sets that agent as the parent; an absent or null
+/// `orchestrator` clears the link. This is the explicit human override: unlike
+/// registration it never falls back to COALESCE, so it can clear a parent.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentOrchestratorUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -633,7 +637,12 @@ pub struct AgentRosterEntry {
     /// The session that spawned this agent, as reported by the plugin.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
-    /// Resolved orchestrator agent name, when the parent session is registered.
+    /// Explicit parent agent name. When present and resolvable it wins over
+    /// `parent_session_id`, so sessionless agents can be linked either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_name: Option<String>,
+    /// Resolved orchestrator agent name: the explicit parent name first, then
+    /// the agent registered on `parent_session_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestrator: Option<String>,
     /// The orchestrator's session id (the same value as parent_session_id when

@@ -1538,9 +1538,9 @@ pub async fn rename_agent(
     ))
 }
 
-/// Set or clear an agent's orchestrator. The body names a registered agent, or
-/// omits it to clear the link. A cycle or unknown target is refused; a hidden
-/// agent is never unhidden by this call.
+/// Set or clear an agent's orchestrator. The body names a registered agent or
+/// passes a registered session id; either side may be sessionless. A cycle or
+/// unknown target is refused; a hidden agent is never unhidden by this call.
 pub async fn set_agent_orchestrator(
     State(app): State<AppState>,
     user: AuthUser,

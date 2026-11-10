@@ -257,12 +257,25 @@ async fn resolve_orchestrator(
     db: &SqlitePool,
     agent_name: &str,
 ) -> AppResult<(Option<String>, Option<String>)> {
-    let parent: Option<Option<String>> =
-        sqlx::query_scalar("SELECT parent_session_id FROM agent_sessions WHERE agent_name = ?1")
-            .bind(agent_name)
-            .fetch_optional(db)
-            .await?;
-    let Some(parent) = parent.flatten().filter(|value| !value.trim().is_empty()) else {
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT parent_agent_name, parent_session_id FROM agent_sessions WHERE agent_name = ?1",
+    )
+    .bind(agent_name)
+    .fetch_optional(db)
+    .await?;
+    let (parent_name, parent_session) = row.unwrap_or_default();
+    if let Some(parent_name) = parent_name.filter(|value| !value.trim().is_empty()) {
+        // The explicit name edge wins even when the orchestrator has no
+        // session, which is the whole point of BB-219.
+        let session: Option<String> =
+            sqlx::query_scalar("SELECT session_id FROM agent_sessions WHERE agent_name = ?1")
+                .bind(&parent_name)
+                .fetch_optional(db)
+                .await?
+                .flatten();
+        return Ok((Some(parent_name), session));
+    }
+    let Some(parent) = parent_session.filter(|value| !value.trim().is_empty()) else {
         return Ok((None, None));
     };
     let name = sqlx::query_scalar::<_, String>(
