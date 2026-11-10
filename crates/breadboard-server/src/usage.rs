@@ -1604,7 +1604,7 @@ fn next_day(day: &str) -> String {
 }
 
 fn bucket_in_range(bucket: &str, from: Option<&str>, to_exclusive: &str) -> bool {
-    from.map_or(true, |from| bucket >= from) && bucket < to_exclusive
+    from.is_none_or(|from| bucket >= from) && bucket < to_exclusive
 }
 
 async fn session_rows(
@@ -1780,7 +1780,6 @@ fn model_shares(
             share.billing = BillingMode::Allowance;
             share.allowance_usd = round_cost(acc.range_usd);
             share.unrated_tokens = acc.range_unrated;
-            share.total_tokens = acc.range_tokens;
             continue;
         }
         order.push(key.clone());

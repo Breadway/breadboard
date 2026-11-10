@@ -374,10 +374,10 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/agents/{name}/unhide` | clear the hidden flag; emits `agent.unhidden`. Idempotent. `404` when the name was never registered |
 | `POST` | `/api/agents/{name}/rename` | `{ new_name }`: rename an agent. Claims, profile, session row and `parent_agent_name` edges that point at the old name move in one transaction; refuse with `409` if the target is in use. Before claims exist the rename is free. Only the user owning the claims/profile/session may rename. Returns the new roster row |
 | `POST` | `/api/agents/{name}/orchestrator` | `{ orchestrator? }`: explicitly set or clear an agent's orchestrator. `orchestrator` is a registered agent name or a registered session id, and either side may be sessionless; omit it (or send `null`) to clear the link and make the agent top level. Unlike registration this never COALESCEs, so a clear sticks. Refuses an unknown or removed target (`400`), a self-link or any link that would close a cycle in the mixed name/session graph (`409`), and leaves the hidden flag untouched. Writes a `state_change` agent event naming the old and new orchestrator and emits `agent.orchestrator`. Returns the updated roster row |
-| `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, unpriced_tokens, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, models[], sessions[], spend_warn_usd, over_threshold }]`. The agent is resolved from the session id against the current roster at read time, so a rename moves its history and a removed name does not reappear; a removed session's history stays under `unattributed`. `cost` is reported cost only. Tokens whose source reported zero cost are counted in `unpriced_tokens` and must be labelled unpriced, never $0. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
-| `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, reported cost, unpriced tokens, tokens, models) |
-| `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share, each with its own `unpriced_tokens` |
-| `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global spend warning threshold. `0` disables the warning; cost above zero then reports `over_threshold: false` |
+| `GET` | `/api/usage/agents` | token and cost totals per agent: `[{ subject, kind, range, from, to, cost, allowance_usd, unpriced_tokens, unrated_tokens, input_tokens, output_tokens, reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, session_count, share_basis, models[], allowances[], sessions[], spend_warn_usd, over_threshold, over_allowance }]`. The agent is resolved from the session id against the current roster at read time, so a rename moves its history and a removed name does not reappear; a removed session's history stays under `unattributed`. `cost` is billed cost from metered providers only. `allowance_usd` is computed consumption on allowance providers, priced from tokens and configured rates, never from OpenCode's reported cost. Metered tokens whose source reported zero cost are counted in `unpriced_tokens` and must be labelled unpriced, never $0; allowance tokens for a model with no configured rate are counted in `unrated_tokens`. `share_basis` is `cost`, `allowance`, `dollars` (both) or `tokens`. Each `allowances[]` entry is `{ provider, model, allowance_usd, plan_price_usd, multiplier, used_usd, unrated_tokens, windows[] }` where a window is `{ label, used_usd, limit_usd, over_limit, from, to }` for `5h`, `weekly` and `monthly`, at 20%, 50% and 100% of the model's monthly allowance. Accepts `?range=24h\|7d\|30d\|90d\|all` (default `7d`), or `?from=YYYY-MM-DD&to=YYYY-MM-DD` |
+| `GET` | `/api/usage/agents/{name}` | one agent's summary, including `sessions[]` (session id, first/last day, billed cost, allowance used, unpriced and unrated tokens, tokens, models) and `allowances[]` |
+| `GET` | `/api/usage/issues/{key}` | the same totals for the sessions recorded as touching the issue, plus `agents[]` split by share, each with its own `cost`, `allowance_usd`, `unpriced_tokens` and `unrated_tokens` |
+| `GET`/`PUT` | `/api/usage/settings` | `{ spend_warn_usd }`: the global billed-spend threshold. `0` disables the warning; cost above zero then reports `over_threshold: false`. Allowance consumption is reported against allowance windows and never counts toward this threshold |
 | `POST` | `/api/usage/import` | import now. Body `{ path? }`; defaults to `usage.opencode_db`. Returns `{ path, sessions, rows, skipped_sessions }`. Importing the same session again replaces its rows, so totals never double count. A missing database file is a `500`; no configured path is a `400` |
 | `GET` | `/api/agents/{name}/events` | per-agent activity timeline, newest first: `{ events[], has_more, next_before }`; each event is `{ id, agent_name, kind, issue_id?, issue_key?, pr_url?, pr_number?, room_id?, message_id?, summary, detail?, actor?, at }`. `kind` is `registered`, `claimed`, `released`, `state_change`, `paused`, `removed`, `pr_opened`, `pr_merged`, `ci_result`, `chat_sent` or `handoff`. Filter with a comma-separated `kind`, bound with RFC 3339 `since` / `until`, and page with `limit` (1-200, default 50) plus `before` from the previous page's `next_before`. Rows are written where the action happens and retained for 90 days; a kind whose action does not exist yet simply has no rows |
 | `GET` | `/api/repos` | synced repos: `{ repo, project_key, enabled, last_synced_at }` |
@@ -408,15 +408,49 @@ First run without the mount: the scheduled importer stays idle without an error,
 an on-demand `POST /api/usage/import` returns `500` for the missing file, and
 setting `BREADBOARD_USAGE_OPENCODE_DB` to an empty value disables the importer
 and makes the import route return `400`. Import runs every
-`usage.import_interval_mins` (default 5) and on demand. A
-`spend_warn_usd` of `0` disables the spend warning. Cost is the value OpenCode reported for each assistant
-message, in USD. A source row with tokens but zero cost is not free and is not
-estimated: the infra model registry carries no cloud price table, so those
-tokens are surfaced separately as `unpriced_tokens` and the UI shows "unpriced"
-instead of `$0`. The threshold compares reported cost only. An issue totals the sessions recorded as touching it: claiming
-records a permanent session-to-issue link, so releasing the claim does not erase
-history. A claim without a session id inherits the session registered for that
-agent name.
+`usage.import_interval_mins` (default 5) and on demand.
+
+Billing mode is read from config at request time, never stored with the rows, so
+changing it reinterprets history without a re-import. `usage.billing_mode`
+(default `metered`) is the mode for providers without their own entry;
+`BREADBOARD_USAGE_BILLING_MODE` overrides it. A provider's mode is `metered` or
+`allowance`:
+
+- `metered` providers bill per token. Their assistant rows carry the cost the
+  provider reported, which is real spend. A source row with tokens but zero cost
+  is not free and is not estimated: the infra model registry carries no cloud
+  price table, so those tokens are surfaced separately as `unpriced_tokens` and
+  the UI shows "unpriced" instead of `$0`.
+- `allowance` providers are prepaid plans. Each model has a monthly dollar
+  allowance, and consumption is computed from tokens at that model's per-1M-token
+  rates (`input`, `output`, `cache_read`, `cache_write`; reasoning tokens use the
+  output rate). OpenCode's reported cost is ignored for these providers because
+  it is inconsistent. Rolling windows show consumption against 20% (5 hours),
+  50% (weekly) and 100% (monthly) of the monthly allowance. An optional
+  `off_peak_start_utc`/`off_peak_end_utc` window (which may wrap midnight) selects
+  the `rates.off_peak` table; buckets outside it use peak rates, and rows imported
+  before time-of-day buckets existed are charged at peak rates, the conservative
+  choice. A model missing from the allowance table still counts its tokens but is
+  reported as `unrated_tokens` instead of a guessed figure.
+
+Allowance tables live in `usage.providers.<id>` in `breadboard.toml`; the shipped
+config seeds `opencode-go` with its plan price, DeepSeek and Muse Spark rates.
+A container without a mounted config can supply the same table as
+`BREADBOARD_USAGE_PROVIDERS_TOML`, which takes the TOML body under
+`[usage.providers]`; invalid TOML fails startup instead of silently marking
+every allowance model unrated.
+The `multiplier` shown for a model is monthly allowance divided by plan price
+(leverage), not a price multiplier.
+
+The billed-spend warning threshold compares metered `cost` only. An issue totals
+the sessions recorded as touching it: claiming records a permanent
+session-to-issue link, so releasing the claim does not erase history. A claim
+without a session id inherits the session registered for that agent name.
+Usage rows are bucketed per 30 minutes of UTC time, which is what makes the
+rolling windows and peak/off-peak split recoverable; `first_day` and `last_day`
+still report dates. Allowance consumption and its windows cover the current
+rolling 30-day cycle, so a 90-day or all-time query still shows token totals in
+full but prices only the cycle the allowance applies to.
 
 **IssuePatch**: every field optional; absent = unchanged. `title`, `body`,
 `status`, `priority` take a value. `estimate`, `assignee_id`, `epic_id`,

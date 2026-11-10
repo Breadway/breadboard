@@ -37,6 +37,50 @@ digest_hour  = 8               # local hour 0-23 to send it (BREADBOARD_NOTIFICA
 # opencode_db          = "/var/lib/opencode/opencode.db"
 import_interval_mins = 5       # BREADBOARD_USAGE_IMPORT_INTERVAL_MINS
 spend_warn_usd       = 5.0     # BREADBOARD_USAGE_SPEND_WARN_USD; 0 disables warnings
+# Billing mode for providers without an entry below: "metered" (default) or
+# "allowance". BREADBOARD_USAGE_BILLING_MODE overrides this key.
+billing_mode = "metered"
+
+# OpenCode Go is a prepaid plan (Go $10/month, Go Plus $40), not per-token
+# billing. Each model has its own monthly dollar allowance; usage draws it down
+# at the model's per-1M-token API rates. OpenCode's own reported cost is ignored
+# for this provider because it is inconsistent. Windows are slices of the
+# monthly allowance: 5 hours 20%, weekly 50%, monthly 100%. In a container
+# without a mounted config file the same table can be supplied as
+# BREADBOARD_USAGE_PROVIDERS_TOML (the TOML body under [usage.providers]).
+[usage.providers.opencode-go]
+mode               = "allowance"
+plan_price_usd     = 10.0
+# DeepSeek off-peak discount: 16:30-00:30 UTC. Buckets outside it pay peak.
+off_peak_start_utc = "16:30"
+off_peak_end_utc   = "00:30"
+
+# Keys are OpenCode model ids. Add a model here to price it; an unlisted model
+# still counts its tokens but is shown as unrated instead of a guessed dollar
+# figure. `allowance_usd` is that model's monthly allowance on the plan.
+[usage.providers.opencode-go.models."deepseek-v4.1-flash"]
+allowance_usd = 100.0
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates]
+input       = 0.30   # USD per 1M input tokens
+output      = 1.20   # USD per 1M output tokens (reasoning uses this rate)
+cache_read  = 0.006
+cache_write = 0.30   # DeepSeek charges cache writes at the input rate
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates.off_peak]
+input       = 0.15
+output      = 0.60
+cache_read  = 0.003
+cache_write = 0.15
+
+[usage.providers.opencode-go.models."muse-spark-1.3-contributor"]
+allowance_usd = 60.0
+[usage.providers.opencode-go.models."muse-spark-1.3-contributor".rates]
+input       = 0.10
+output      = 0.20
+cache_read  = 0.002
+cache_write = 0.10
+
+# Most other models carry a $60 monthly allowance and flagships $15. Add each
+# one with its rates; there is no wildcard pricing because rates are real money.
 
 [claims]
 # Live exclusive claim budgets. Intents are never capped, and releasing a

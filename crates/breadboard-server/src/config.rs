@@ -191,6 +191,21 @@ impl UsageConfig {
             .map(|cfg| cfg.mode)
             .unwrap_or(self.billing_mode)
     }
+
+    /// Merge a TOML provider table, used by `BREADBOARD_USAGE_PROVIDERS_TOML`
+    /// so a container can configure allowance tables without a mounted config
+    /// file. The text is the body under `[usage.providers]`:
+    ///
+    /// ```toml
+    /// [opencode-go]
+    /// mode = "allowance"
+    /// ```
+    pub fn merge_provider_toml(&mut self, text: &str) -> anyhow::Result<()> {
+        let providers: HashMap<String, ProviderBillingConfig> = toml::from_str(text)
+            .map_err(|error| anyhow::anyhow!("BREADBOARD_USAGE_PROVIDERS_TOML: {error}"))?;
+        self.providers.extend(providers);
+        Ok(())
+    }
 }
 
 impl ProviderBillingConfig {
@@ -352,11 +367,11 @@ impl Config {
             }
             _ => Config::default(),
         };
-        cfg.apply_env();
+        cfg.apply_env()?;
         Ok(cfg)
     }
 
-    fn apply_env(&mut self) {
+    fn apply_env(&mut self) -> anyhow::Result<()> {
         if let Ok(v) = std::env::var("BREADBOARD_LISTEN") {
             self.listen = v;
         }
@@ -433,6 +448,9 @@ impl Config {
                 self.usage.billing_mode = mode;
             }
         }
+        if let Ok(v) = std::env::var("BREADBOARD_USAGE_PROVIDERS_TOML") {
+            self.usage.merge_provider_toml(&v)?;
+        }
         if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT") {
             if let Ok(n) = v.parse::<i64>() {
                 self.claims.max_exclusive_per_agent = n.max(1);
@@ -448,6 +466,7 @@ impl Config {
                 self.agents.prune_after_hours = n;
             }
         }
+        Ok(())
     }
 
     /// Where chat attachments are written. Persisted on the same volume as
@@ -499,16 +518,16 @@ plan_price_usd = 10.0
 off_peak_start_utc = "16:30"
 off_peak_end_utc = "00:30"
 
-[usage.providers.opencode-go.models.deepseek-v4.1-flash]
+[usage.providers.opencode-go.models."deepseek-v4.1-flash"]
 allowance_usd = 100.0
 
-[usage.providers.opencode-go.models.deepseek-v4.1-flash.rates]
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates]
 input = 0.30
 output = 1.20
 cache_read = 0.006
 cache_write = 0.30
 
-[usage.providers.opencode-go.models.deepseek-v4.1-flash.rates.off_peak]
+[usage.providers.opencode-go.models."deepseek-v4.1-flash".rates.off_peak]
 input = 0.15
 output = 0.60
 cache_read = 0.003
@@ -539,6 +558,47 @@ cache_write = 0.15
         assert_eq!(usage.billing_for(Some("opencode-go")), BillingMode::Metered);
         assert_eq!(usage.billing_for(None), BillingMode::Metered);
         assert!(usage.provider_for(Some("opencode-go")).is_none());
+    }
+
+    #[test]
+    fn shipped_config_parses_and_marks_opencode_go_as_allowance() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../breadboard.toml");
+        let text = std::fs::read_to_string(path).unwrap();
+        let config: Config = toml::from_str(&text).unwrap();
+        let provider = config.usage.provider_for(Some("opencode-go")).unwrap();
+        assert_eq!(provider.mode, BillingMode::Allowance);
+        assert_eq!(provider.plan_price_usd, 10.0);
+        assert!(provider
+            .model_for("deepseek-v4.1-flash")
+            .is_some_and(|m| m.allowance_usd == 100.0));
+        assert!(provider
+            .model_for("muse-spark-1.3-contributor")
+            .is_some_and(|m| m.allowance_usd == 60.0));
+    }
+
+    #[test]
+    fn provider_table_merges_from_env_shaped_toml() {
+        let mut usage = UsageConfig::default();
+        usage
+            .merge_provider_toml(
+                r#"
+[opencode-go]
+mode = "allowance"
+plan_price_usd = 10.0
+
+[opencode-go.models."deepseek-v4.1-flash"]
+allowance_usd = 100.0
+
+[opencode-go.models."deepseek-v4.1-flash".rates]
+input = 0.30
+output = 1.20
+"#,
+            )
+            .unwrap();
+        let provider = usage.provider_for(Some("opencode-go")).unwrap();
+        assert_eq!(provider.mode, BillingMode::Allowance);
+        assert!(provider.model_for("deepseek-v4.1-flash").is_some());
+        assert!(usage.merge_provider_toml("not = [valid").is_err());
     }
 
     #[test]

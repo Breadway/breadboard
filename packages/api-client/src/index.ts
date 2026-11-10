@@ -478,13 +478,17 @@ export interface AgentStatusSummary {
 
 /** Token and cost roll-up imported from OpenCode's session store. */
 export interface UsageTotals {
-  /** Cost the provider reported. Unpriced token rows are excluded. */
+  /** Billed spend: reported cost from metered providers only. */
   cost: number;
+  /** Computed allowance consumption in the selected range. */
+  allowance_usd: number;
   /**
-   * Tokens whose source rows reported no cost. No price source exists for
-   * them, so clients label the spend unpriced instead of showing $0.
+   * Metered tokens whose source rows reported no cost. No price source exists
+   * for them, so clients label the spend unpriced instead of showing $0.
    */
   unpriced_tokens: number;
+  /** Allowance tokens with no rate configured for that model. */
+  unrated_tokens: number;
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
@@ -494,22 +498,30 @@ export interface UsageTotals {
   session_count: number;
 }
 
+/** What the share fields in one summary are a fraction of. */
+export type UsageShareBasis = "cost" | "allowance" | "dollars" | "tokens";
+
 export interface UsageModelShare {
   model: string;
   provider?: string;
-  /** Reported cost only; see `unpriced_tokens`. */
+  billing: "metered" | "allowance";
+  /** Billed cost for a metered row; always 0 for an allowance row. */
   cost: number;
+  /** Computed allowance consumption for an allowance row; 0 for metered. */
+  allowance_usd: number;
   unpriced_tokens: number;
+  unrated_tokens: number;
   total_tokens: number;
-  /** Fraction of cost, or of tokens when no cost is recorded. */
+  /** Fraction of the subject's dollars, or of its tokens when none exist. */
   share: number;
 }
 
 export interface UsageAgentShare {
   agent_name: string;
-  /** Reported cost only; see `unpriced_tokens`. */
   cost: number;
+  allowance_usd: number;
   unpriced_tokens: number;
+  unrated_tokens: number;
   total_tokens: number;
   share: number;
 }
@@ -517,13 +529,39 @@ export interface UsageAgentShare {
 export interface UsageSession {
   session_id: string;
   agent_name?: string;
-  /** Reported cost only; see `unpriced_tokens`. */
   cost: number;
+  allowance_usd: number;
   unpriced_tokens: number;
+  unrated_tokens: number;
   total_tokens: number;
   first_day: string;
   last_day: string;
   models: string[];
+}
+
+/** One rolling rate-limit window over a model's monthly allowance. */
+export interface UsageAllowanceWindow {
+  label: "5h" | "weekly" | "monthly";
+  used_usd: number;
+  /** The window's share of the monthly allowance (20%, 50%, 100%). */
+  limit_usd: number;
+  over_limit: boolean;
+  from: string;
+  to: string;
+}
+
+export interface UsageModelAllowance {
+  provider: string;
+  model: string;
+  /** Monthly allowance for this model. */
+  allowance_usd: number;
+  plan_price_usd: number;
+  /** Monthly allowance divided by plan price, not a price multiplier. */
+  multiplier: number;
+  /** Computed consumption in the selected range. */
+  used_usd: number;
+  unrated_tokens: number;
+  windows: UsageAllowanceWindow[];
 }
 
 export interface UsageSummary extends UsageTotals {
@@ -532,8 +570,11 @@ export interface UsageSummary extends UsageTotals {
   range: string;
   from?: string;
   to: string;
+  share_basis: UsageShareBasis;
   models: UsageModelShare[];
   sessions: UsageSession[];
+  allowances?: UsageModelAllowance[];
+  over_allowance?: boolean;
   agents?: UsageAgentShare[];
   spend_warn_usd: number;
   over_threshold: boolean;
