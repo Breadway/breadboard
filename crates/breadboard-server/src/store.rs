@@ -3131,6 +3131,8 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         live: false,
         paused: false,
         status: "stale".to_string(),
+        abandoned: false,
+        abandoned_reason: None,
         message: None,
         state: None,
         claim_count: 0,
@@ -4116,14 +4118,43 @@ pub async fn set_agent_orchestrator(
         .map(|entry| (entry, previous))
 }
 
+/// Default idle window used when a caller builds a roster entry without
+/// passing the live config (mutation responses). The API roster uses the
+/// configured window.
+pub const AGENT_ABANDONED_AFTER_HOURS: u64 = 24;
+
 /// The union of sessions, profiles and claims, deduplicated by lowercased
 /// agent name. This is what the Agents page renders.
 pub async fn agent_roster(
     db: &SqlitePool,
     limits: &ClaimLimits,
 ) -> AppResult<Vec<AgentRosterEntry>> {
+    agent_roster_with_window(db, limits, AGENT_ABANDONED_AFTER_HOURS).await
+}
+
+/// Roster with the abandoned flag computed against the configured window.
+/// The same predicate as the maintenance pass: no claims, no chat membership
+/// or DM, no open review request, not paused, and a stale heartbeat.
+pub async fn agent_roster_with_window(
+    db: &SqlitePool,
+    limits: &ClaimLimits,
+    prune_after_hours: u64,
+) -> AppResult<Vec<AgentRosterEntry>> {
     let claims = list_claims(db).await?;
     let usage = claim_usage(db).await?;
+    let chat_members: std::collections::HashSet<String> =
+        sqlx::query_scalar("SELECT member FROM chat_room_members WHERE member LIKE 'agent:%'")
+            .fetch_all(db)
+            .await?
+            .into_iter()
+            .collect();
+    let open_reviewers: std::collections::HashSet<String> = sqlx::query_scalar(
+        "SELECT DISTINCT lower(reviewer) FROM review_requests WHERE state != 'approved'",
+    )
+    .fetch_all(db)
+    .await?
+    .into_iter()
+    .collect();
     let profiles: Vec<AgentProfileRow> = sqlx::query_as(
         "SELECT lower(p.agent_name) AS agent_name, p.message, p.user_id,
                 u.login AS login
@@ -4248,6 +4279,31 @@ pub async fn agent_roster(
             } else {
                 "stale".to_string()
             };
+            let has_chat = chat_members.contains(&format!("agent:{}", entry.agent_name));
+            let has_review = open_reviewers.contains(&entry.agent_name);
+            entry.abandoned = crate::agent_prune::is_abandoned(
+                entry.claim_count,
+                entry.paused,
+                has_chat,
+                has_review,
+                entry.last_seen,
+                prune_after_hours,
+                now,
+            );
+            if entry.abandoned {
+                let idle_hours = entry
+                    .last_seen
+                    .map(|at| (now - at).num_hours().max(0))
+                    .unwrap_or(0);
+                entry.abandoned_reason = Some(format!(
+                    "no claims, chat or reviews; idle {idle_hours}h{}",
+                    if entry.session_id.is_none() {
+                        " (sessionless)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
             // Budget visibility: per-agent usage is `exclusive_count`, and the
             // orchestrator roll-up counts the whole tree this name belongs to.
             entry.exclusive_limit = limits.per_agent;

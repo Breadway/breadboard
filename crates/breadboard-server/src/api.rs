@@ -1420,7 +1420,12 @@ pub async fn agent_roster(
     _user: AuthUser,
 ) -> AppResult<Json<Vec<breadboard_core::dto::AgentRosterEntry>>> {
     Ok(Json(
-        store::agent_roster(&app.db, &app.config.claim_limits()).await?,
+        store::agent_roster_with_window(
+            &app.db,
+            &app.config.claim_limits(),
+            app.config.agents.prune_after_hours,
+        )
+        .await?,
     ))
 }
 
