@@ -46,7 +46,13 @@ pub struct UsageQuery {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageTotals {
+    /// Cost the provider reported. Rows with tokens but no reported cost are
+    /// excluded here and counted in `unpriced_tokens` instead.
     pub cost: f64,
+    /// Tokens whose source rows reported zero cost. These are never shown as
+    /// $0 spend: no price source exists for them, so clients label them
+    /// unpriced.
+    pub unpriced_tokens: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
@@ -61,7 +67,9 @@ pub struct ModelShare {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Reported cost only; see `unpriced_tokens`.
     pub cost: f64,
+    pub unpriced_tokens: i64,
     pub total_tokens: i64,
     /// Share of the subject's cost, or of its tokens when no cost is recorded.
     pub share: f64,
@@ -70,7 +78,9 @@ pub struct ModelShare {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentShare {
     pub agent_name: String,
+    /// Reported cost only; see `unpriced_tokens`.
     pub cost: f64,
+    pub unpriced_tokens: i64,
     pub total_tokens: i64,
     pub share: f64,
 }
@@ -80,7 +90,9 @@ pub struct SessionUsage {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
+    /// Reported cost only; see `unpriced_tokens`.
     pub cost: f64,
+    pub unpriced_tokens: i64,
     pub total_tokens: i64,
     pub first_day: String,
     pub last_day: String,
@@ -139,10 +151,16 @@ pub async fn list_agent_usage(
 ) -> AppResult<Json<Vec<UsageSummary>>> {
     let window = Window::parse(&q)?;
     let threshold = load_threshold(&app.db, app.config.usage.spend_warn_usd).await?;
-    let names: Vec<String> = sqlx::query_scalar(
-        "SELECT DISTINCT lower(agent_name) FROM usage_sessions
-          WHERE agent_name IS NOT NULL ORDER BY 1",
-    )
+    // Resolve names at read time, not import time: a rename must move the
+    // spend with the agent, and a removed session must not resurrect a dead
+    // name. Sessions with no current owner fall back to their stored name only
+    // while that name is still on the roster; otherwise their history shows
+    // under the `unattributed` bucket rather than disappearing.
+    let names: Vec<String> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT {RESOLVED_AGENT_SQL} AS resolved
+           FROM usage_sessions u
+          ORDER BY 1"
+    ))
     .fetch_all(&app.db)
     .await?;
     let mut out = Vec::with_capacity(names.len());
@@ -573,6 +591,52 @@ pub async fn session_for_agent(
 // Summaries
 // ---------------------------------------------------------------------------
 
+/// The agent a usage row belongs to, resolved from the session id against the
+/// current roster rather than the name captured at import time.
+///
+/// `agent_sessions` is authoritative because rename updates it in place. A
+/// claim can still name a session whose session row was cleaned up, so it is
+/// the second choice. If the session has no current owner, the stored name is
+/// used only when it is still on the roster; a name that was removed entirely
+/// becomes `unattributed`, which keeps its history without putting a dead name
+/// back in the agent list.
+///
+/// Every query using this fragment must alias `usage_sessions` as `u`.
+const RESOLVED_AGENT_SQL: &str = r#"
+    COALESCE(
+        (SELECT s.agent_name
+           FROM agent_sessions s
+          WHERE s.session_id = u.session_id
+          ORDER BY s.last_seen DESC, s.agent_name ASC
+          LIMIT 1),
+        (SELECT lower(c.agent_name)
+           FROM agent_claims c
+          WHERE c.session_id = u.session_id
+          ORDER BY c.last_heartbeat DESC, c.agent_name ASC
+          LIMIT 1),
+        CASE
+            WHEN u.agent_name IS NOT NULL
+             AND EXISTS (
+                    SELECT 1
+                      FROM agent_sessions r
+                     WHERE lower(r.agent_name) = lower(u.agent_name)
+                 )
+            THEN lower(u.agent_name)
+            ELSE 'unattributed'
+        END
+    )
+"#;
+
+/// Tokens in rows that reported no cost. `cost = 0` with tokens is "unpriced",
+/// not "free": the provider omitted a price and the infra model registry has
+/// no per-model price table to estimate from.
+const UNPRICED_TOKENS_SQL: &str = "(CASE WHEN u.cost <= 0 THEN \
+    u.input_tokens + u.output_tokens + u.reasoning_tokens \
+    + u.cache_read_tokens + u.cache_write_tokens ELSE 0 END)";
+
+const TOTAL_TOKENS_SQL: &str = "(u.input_tokens + u.output_tokens + u.reasoning_tokens \
+    + u.cache_read_tokens + u.cache_write_tokens)";
+
 #[derive(Debug, Clone)]
 struct Window {
     label: String,
@@ -631,6 +695,7 @@ struct TotalsRow {
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     cost: f64,
+    unpriced_tokens: i64,
     session_count: i64,
 }
 
@@ -638,6 +703,7 @@ impl TotalsRow {
     fn into_totals(self) -> UsageTotals {
         UsageTotals {
             cost: round_cost(self.cost),
+            unpriced_tokens: self.unpriced_tokens,
             input_tokens: self.input_tokens,
             output_tokens: self.output_tokens,
             reasoning_tokens: self.reasoning_tokens,
@@ -658,6 +724,7 @@ struct ModelRow {
     model: String,
     provider: Option<String>,
     cost: f64,
+    unpriced_tokens: i64,
     total_tokens: i64,
 }
 
@@ -665,6 +732,7 @@ struct ModelRow {
 struct AgentRow {
     agent_name: String,
     cost: f64,
+    unpriced_tokens: i64,
     total_tokens: i64,
 }
 
@@ -673,6 +741,7 @@ struct SessionRow {
     session_id: String,
     agent_name: Option<String>,
     cost: f64,
+    unpriced_tokens: i64,
     total_tokens: i64,
     first_day: String,
     last_day: String,
@@ -687,38 +756,39 @@ async fn agent_summary(
     detailed: bool,
 ) -> AppResult<UsageSummary> {
     let name = name.trim().to_lowercase();
-    let totals: TotalsRow = sqlx::query_as(
+    let totals: TotalsRow = sqlx::query_as(&format!(
         "SELECT
-            CAST(COALESCE(SUM(input_tokens), 0) AS INTEGER) AS input_tokens,
-            CAST(COALESCE(SUM(output_tokens), 0) AS INTEGER) AS output_tokens,
-            CAST(COALESCE(SUM(reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
-            CAST(COALESCE(SUM(cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
-            CAST(COALESCE(SUM(cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
-            CAST(COALESCE(SUM(cost), 0.0) AS REAL) AS cost,
-            COUNT(DISTINCT session_id) AS session_count
-         FROM usage_sessions
-         WHERE lower(agent_name) = lower(?1)
-           AND (?2 IS NULL OR day >= ?2)
-           AND day <= ?3",
-    )
+            CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+            CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+            CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+            CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+            CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
+            CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
+            CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
+            COUNT(DISTINCT u.session_id) AS session_count
+         FROM usage_sessions u
+         WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
+           AND (?2 IS NULL OR u.day >= ?2)
+           AND u.day <= ?3"
+    ))
     .bind(&name)
     .bind(&window.from)
     .bind(&window.to)
     .fetch_one(db)
     .await?;
 
-    let models: Vec<ModelRow> = sqlx::query_as(
-        "SELECT model, provider,
-                CAST(COALESCE(SUM(cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM(input_tokens + output_tokens + reasoning_tokens
-                     + cache_read_tokens + cache_write_tokens), 0) AS INTEGER) AS total_tokens
-         FROM usage_sessions
-         WHERE lower(agent_name) = lower(?1)
-           AND (?2 IS NULL OR day >= ?2)
-           AND day <= ?3
-         GROUP BY model, provider
-         ORDER BY cost DESC, total_tokens DESC",
-    )
+    let models: Vec<ModelRow> = sqlx::query_as(&format!(
+        "SELECT u.model, u.provider,
+                CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
+                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
+                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
+         FROM usage_sessions u
+         WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
+           AND (?2 IS NULL OR u.day >= ?2)
+           AND u.day <= ?3
+         GROUP BY u.model, u.provider
+         ORDER BY cost DESC, total_tokens DESC"
+    ))
     .bind(&name)
     .bind(&window.from)
     .bind(&window.to)
@@ -763,7 +833,7 @@ async fn issue_summary(
         return Err(AppError::NotFound);
     }
 
-    let totals: TotalsRow = sqlx::query_as(
+    let totals: TotalsRow = sqlx::query_as(&format!(
         "SELECT
             CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
             CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
@@ -771,25 +841,26 @@ async fn issue_summary(
             CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
             CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
             CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
+            CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
             COUNT(DISTINCT u.session_id) AS session_count
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
          WHERE i.key = ?1
            AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3",
-    )
+           AND u.day <= ?3"
+    ))
     .bind(key)
     .bind(&window.from)
     .bind(&window.to)
     .fetch_one(db)
     .await?;
 
-    let models: Vec<ModelRow> = sqlx::query_as(
+    let models: Vec<ModelRow> = sqlx::query_as(&format!(
         "SELECT u.model, u.provider,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM(u.input_tokens + u.output_tokens + u.reasoning_tokens
-                     + u.cache_read_tokens + u.cache_write_tokens), 0) AS INTEGER) AS total_tokens
+                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
+                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
@@ -797,28 +868,28 @@ async fn issue_summary(
            AND (?2 IS NULL OR u.day >= ?2)
            AND u.day <= ?3
          GROUP BY u.model, u.provider
-         ORDER BY cost DESC, total_tokens DESC",
-    )
+         ORDER BY cost DESC, total_tokens DESC"
+    ))
     .bind(key)
     .bind(&window.from)
     .bind(&window.to)
     .fetch_all(db)
     .await?;
 
-    let agents: Vec<AgentRow> = sqlx::query_as(
-        "SELECT COALESCE(lower(u.agent_name), 'unattributed') AS agent_name,
+    let agents: Vec<AgentRow> = sqlx::query_as(&format!(
+        "SELECT {RESOLVED_AGENT_SQL} AS agent_name,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM(u.input_tokens + u.output_tokens + u.reasoning_tokens
-                     + u.cache_read_tokens + u.cache_write_tokens), 0) AS INTEGER) AS total_tokens
+                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
+                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
          WHERE i.key = ?1
            AND (?2 IS NULL OR u.day >= ?2)
            AND u.day <= ?3
-         GROUP BY COALESCE(lower(u.agent_name), 'unattributed')
-         ORDER BY cost DESC, total_tokens DESC",
-    )
+         GROUP BY {RESOLVED_AGENT_SQL}
+         ORDER BY cost DESC, total_tokens DESC"
+    ))
     .bind(key)
     .bind(&window.from)
     .bind(&window.to)
@@ -834,6 +905,7 @@ async fn issue_summary(
             AgentShare {
                 agent_name: row.agent_name,
                 cost: round_cost(row.cost),
+                unpriced_tokens: row.unpriced_tokens,
                 total_tokens: row.total_tokens,
                 share,
             }
@@ -862,17 +934,17 @@ async fn session_rows(
     issue_key: Option<&str>,
     window: &Window,
 ) -> AppResult<Vec<SessionUsage>> {
-    let rows: Vec<SessionRow> = sqlx::query_as(
+    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
         "SELECT u.session_id,
-                MIN(COALESCE(lower(u.agent_name), 'unattributed')) AS agent_name,
+                MIN({RESOLVED_AGENT_SQL}) AS agent_name,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM(u.input_tokens + u.output_tokens + u.reasoning_tokens
-                     + u.cache_read_tokens + u.cache_write_tokens), 0) AS INTEGER) AS total_tokens,
+                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
+                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens,
                 MIN(u.day) AS first_day,
                 MAX(u.day) AS last_day,
                 GROUP_CONCAT(DISTINCT u.model) AS models
          FROM usage_sessions u
-         WHERE (?1 IS NULL OR lower(u.agent_name) = lower(?1))
+         WHERE (?1 IS NULL OR lower({RESOLVED_AGENT_SQL}) = lower(?1))
            AND (?2 IS NULL OR u.session_id IN (
                 SELECT DISTINCT l.session_id FROM usage_issue_links l
                 JOIN issues i ON i.id = l.issue_id
@@ -881,8 +953,8 @@ async fn session_rows(
            AND u.day <= ?4
          GROUP BY u.session_id
          ORDER BY MAX(u.day) DESC, total_tokens DESC
-         LIMIT 50",
-    )
+         LIMIT 50"
+    ))
     .bind(agent)
     .bind(issue_key)
     .bind(&window.from)
@@ -895,6 +967,7 @@ async fn session_rows(
             session_id: row.session_id,
             agent_name: row.agent_name,
             cost: round_cost(row.cost),
+            unpriced_tokens: row.unpriced_tokens,
             total_tokens: row.total_tokens,
             first_day: row.first_day,
             last_day: row.last_day,
@@ -917,6 +990,7 @@ fn model_shares(rows: Vec<ModelRow>, total_cost: f64, total_tokens: i64) -> Vec<
                 model: row.model,
                 provider: row.provider,
                 cost: round_cost(row.cost),
+                unpriced_tokens: row.unpriced_tokens,
                 total_tokens: row.total_tokens,
                 share,
             }

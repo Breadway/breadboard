@@ -83,6 +83,17 @@
     return value === 0 ? "$0" : `$${value.toFixed(4)}`;
   }
 
+  /**
+   * Spend with unpriced token rows kept distinct from reported cost. A source
+   * row with tokens but a zero cost is not free, it is unpriced.
+   */
+  function spendLabel(value: { cost: number; unpriced_tokens: number }): string {
+    if (value.unpriced_tokens > 0) {
+      return value.cost > 0 ? `${money(value.cost)} + unpriced` : "unpriced";
+    }
+    return money(value.cost);
+  }
+
   function tokens(value: number): string {
     if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)}B`;
     if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
@@ -116,7 +127,9 @@
     {#if summary}
       <div class="grid">
         <div class="cell" class:bad={summary.over_threshold}>
-          <b>{money(summary.cost)}</b>
+          <b title={summary.unpriced_tokens > 0 ? `${tokens(summary.unpriced_tokens)} tokens have no reported cost` : undefined}>
+            {spendLabel(summary)}
+          </b>
           <span>spend</span>
         </div>
         <div class="cell">
@@ -147,6 +160,13 @@
         <span>{tokens(summary.cache_write_tokens)} cache write</span>
       </p>
 
+      {#if summary.unpriced_tokens > 0}
+        <p class="unpriced" role="status">
+          {tokens(summary.unpriced_tokens)} tokens have no reported cost. They are shown as
+          unpriced, not $0, and are excluded from spend and the warning threshold.
+        </p>
+      {/if}
+
       {#if summary.models.length}
         <div class="models">
           {#each summary.models as m (m.model + (m.provider ?? ""))}
@@ -154,7 +174,7 @@
               <div class="mrow">
                 <span class="mname" title={m.model}>{m.model}</span>
                 <span class="share">{pct(m.share)}</span>
-                <span class="mcost">{money(m.cost)} · {tokens(m.total_tokens)} tok</span>
+                <span class="mcost">{spendLabel(m)} · {tokens(m.total_tokens)} tok</span>
               </div>
               <div class="bar"><i style="width:{Math.max(2, m.share * 100)}%"></i></div>
             </div>
@@ -165,7 +185,11 @@
       {#if !agent && summary.agents?.length}
         <p class="agents">
           {#each summary.agents as a (a.agent_name)}
-            <span class="achip">{a.agent_name} {pct(a.share)}</span>
+            <span class="achip">
+              {a.agent_name} {pct(a.share)}{a.cost <= 0 && a.unpriced_tokens > 0
+                ? " · unpriced"
+                : ""}
+            </span>
           {/each}
         </p>
       {/if}
@@ -177,7 +201,7 @@
             <div class="srow">
               <code>{s.session_id.slice(0, 14)}</code>
               <span>{s.first_day}{s.last_day !== s.first_day ? ` → ${s.last_day}` : ""}</span>
-              <span>{money(s.cost)} · {tokens(s.total_tokens)} tok</span>
+              <span>{spendLabel(s)} · {tokens(s.total_tokens)} tok</span>
             </div>
           {/each}
         </div>
@@ -302,6 +326,14 @@
     margin: 9px 0 0;
     color: var(--ink-3);
     font: 400 10px/1.4 var(--font-mono);
+  }
+  .unpriced {
+    margin: 8px 0 0;
+    padding: 6px 8px;
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--ink) 6%, transparent);
+    color: var(--ink);
+    font: 500 11px/1.3 var(--font-mono);
   }
   .models {
     display: flex;
