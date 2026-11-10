@@ -14,9 +14,10 @@ export type BodySegment =
   | { type: "code"; text: string; lang: string | null };
 
 // A fence opens with three or more backticks (optionally indented) and an
-// optional language tag. Four backticks are valid too, so match a run.
-const OPEN_FENCE = /^\s*```+([^\s`]*)[^\n]*$/;
-const CLOSE_FENCE = /^\s*```+\s*$/;
+// optional language tag. The closing run must be at least as long as the
+// opening one, so a four-backtick block can wrap a three-backtick example.
+const OPEN_FENCE = /^\s*(`{3,})([^\s`]*)[^\n]*$/;
+const CLOSE_FENCE = /^\s*(`{3,})\s*$/;
 
 /**
  * Split a chat body into prose and fenced code segments.
@@ -28,11 +29,13 @@ const CLOSE_FENCE = /^\s*```+\s*$/;
  * the backticks would look more broken than an open block.
  */
 export function splitFencedCode(src: string): BodySegment[] {
-  const lines = (src ?? "").split("\n");
+  if (!src) return [];
+  const lines = src.split("\n");
   const out: BodySegment[] = [];
   let text: string[] = [];
   let code: string[] | null = null;
   let lang: string | null = null;
+  let fenceLength = 3;
 
   const flushText = () => {
     if (!text.length) return;
@@ -52,13 +55,15 @@ export function splitFencedCode(src: string): BodySegment[] {
       if (open) {
         flushText();
         code = [];
-        lang = open[1] || null;
+        fenceLength = open[1].length;
+        lang = open[2] || null;
       } else {
         text.push(line);
       }
       continue;
     }
-    if (CLOSE_FENCE.test(line)) {
+    const close = CLOSE_FENCE.exec(line);
+    if (close && close[1].length >= fenceLength) {
       flushCode();
       continue;
     }

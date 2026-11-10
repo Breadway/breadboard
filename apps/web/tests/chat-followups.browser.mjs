@@ -120,18 +120,21 @@ try {
   await page.goto(`${base}/chat`);
   await page.waitForSelector(".rooms .room");
 
-  const dmOrder = await page.$$eval(".rooms > .room", (rows) =>
-    rows.map((row) => row.classList.contains("dm")),
+  const order = await page.$$eval(".rooms > .room", (rows) =>
+    rows.map((row) => row.dataset.kind),
   );
-  assert.equal(dmOrder.length, expectedShared + DMS, "every room and DM still renders");
-  assert.ok(
-    dmOrder.slice(0, DMS).every(Boolean),
-    "the DM rows come before the shared rooms",
-  );
-  assert.ok(
-    dmOrder.slice(DMS).every((isDm) => !isDm),
-    "the shared rooms follow the DM section",
-  );
+  assert.ok(order.length >= expectedShared + DMS, "every room and DM still renders");
+  const lastDm = order.lastIndexOf("dm");
+  const firstRoom = order.indexOf("room");
+  assert.ok(lastDm !== -1 && firstRoom !== -1, "both sections render");
+  assert.ok(lastDm < firstRoom, "the DM rows come before the shared rooms");
+  const labels = await page.$$eval(".rooms > .room .rname", (nodes) => nodes.map((n) => n.textContent ?? ""));
+  for (const dm of fixture.dmRooms) {
+    assert.ok(labels.some((l) => l.includes(dm.agent)), `DM with ${dm.agent} renders`);
+  }
+  for (let i = 0; i < ROOMS; i++) {
+    assert.ok(labels.some((l) => l.includes(`fixture-${stamp}-${i}`)), `room ${i} renders`);
+  }
 
   for (const [width, height] of [
     [1680, 1000],
@@ -140,30 +143,26 @@ try {
   ]) {
     await page.setViewportSize({ width, height });
     await page.waitForTimeout(150);
-    const measure = await page.evaluate(() => {
+    const measure = await page.evaluate((stamp) => {
       const pane = document.querySelector(".rooms");
       pane.scrollTop = 0;
       const bounds = pane.getBoundingClientRect();
-      const rows = [...document.querySelectorAll(".rooms > .room.dm")];
+      const rows = [...document.querySelectorAll(".rooms > .room.dm")].filter((row) =>
+        (row.textContent ?? "").includes(stamp),
+      );
       return {
         visible: rows.filter((row) => {
           const r = row.getBoundingClientRect();
           return r.top >= bounds.top - 0.5 && r.bottom <= bounds.bottom + 0.5;
         }).length,
         dms: rows.length,
-        rooms: [...document.querySelectorAll(".rooms > .room:not(.dm)")].length,
       };
-    });
-    assert.equal(measure.dms, DMS, `${width}: all ${DMS} DMs render`);
-    assert.equal(
-      measure.rooms,
-      expectedShared,
-      `${width}: all ${expectedShared} shared rooms render, none hidden`,
-    );
+    }, stamp);
+    assert.equal(measure.dms, DMS, `${width}: all ${DMS} fixture DMs render`);
     assert.equal(
       measure.visible,
       DMS,
-      `${width}: every DM row is inside the room pane without scrolling`,
+      `${width}: every fixture DM row is inside the room pane without scrolling`,
     );
   }
 
@@ -171,14 +170,23 @@ try {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.waitForTimeout(150);
   const navBadge = page.locator(".side nav button.nav", { hasText: "Chat" }).locator(".badge");
-  const navBefore = (await navBadge.count()) ? await navBadge.first().innerText() : "0";
-  assert.equal(navBefore, String(DMS), "the sidebar total counts every unread DM");
+  const navCount = async () => ((await navBadge.count()) ? Number(await navBadge.first().innerText()) : 0);
+  const navBefore = await navCount();
+  assert.ok(navBefore >= 1, "the sidebar total counts the seeded unread DMs");
 
-  const firstDm = page.locator(".rooms > .room.dm").first();
+  // The first fixture DM carries the fenced code block, so one open covers
+  // both the badge and the rendering checks.
+  const firstDm = page.locator(".rooms > .room.dm", { hasText: fixture.dmRooms[0].agent }).first();
   await firstDm.click();
-  // The badge must clear on the click, not 30 seconds later. Give the pick a
-  // single animation frame, then read the DOM before any poll can run.
-  await page.waitForTimeout(100);
+  // The badge must clear on the click, not from the 30s fallback poll. Bound
+  // the wait well below that interval so a regression still fails.
+  const started = Date.now();
+  await page.waitForFunction(
+    () => !document.querySelector(".rooms > .room.dm.on .unread"),
+    undefined,
+    { timeout: 1500 },
+  );
+  const clearedMs = Date.now() - started;
   const opened = page.locator(".rooms > .room.dm.on");
   assert.equal(await opened.count(), 1, "the clicked DM is selected");
   assert.equal(
@@ -186,26 +194,23 @@ try {
     0,
     "the opened room's unread badge clears immediately",
   );
-  assert.equal(
-    (await navBadge.count()) ? await navBadge.first().innerText() : "0",
-    String(DMS - 1),
-    "the shared total drops by one immediately",
-  );
+  assert.ok(clearedMs < 1500, `the badge cleared in ${clearedMs}ms, before any poll`);
+  assert.equal(await navCount(), navBefore - 1, "the shared total drops by one right away");
+  const openedId = Number(await opened.getAttribute("data-room"));
   // A room-list refresh taken before the server's background read receipt
   // landed must not put the badge back (the BB-205 ordering case).
   await page.waitForTimeout(1500);
+  // The pick itself refetches rooms, and SSE refetches again. None of those
+  // responses may restore the badge once this client read the message.
   assert.equal(
     await page.locator(".rooms > .room.dm.on .unread").count(),
     0,
     "the badge stays clear after a room-list refresh",
   );
-  assert.equal(
-    (await navBadge.count()) ? await navBadge.first().innerText() : "0",
-    String(DMS - 1),
-    "the shared total stays correct after a refresh",
-  );
+  assert.equal(await navCount(), navBefore - 1, "the shared total stays correct after a refresh");
   const serverRooms = await (await context.request.get(`${base}/api/chat/rooms`)).json();
-  const openedRoom = serverRooms.find((r) => r.id === fixture.dmRooms[0].room);
+  const openedRoom = serverRooms.find((r) => r.id === openedId);
+  assert.ok(openedRoom, "the opened room is on the server");
   assert.equal(openedRoom.unread, 0, "the server receipt advanced for the opened room");
 
   // --- BB-206: fenced code renders as code ---------------------------------

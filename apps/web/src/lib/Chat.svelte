@@ -78,6 +78,15 @@
     return room.members.map(memberDisplay).join(" ↔ ");
   }
 
+  /** One-line room-list preview. Fence markers are structural, not content,
+   *  so keep them out of the preview while leaving the code text readable. */
+  function preview(body: string): string {
+    return body
+      .replace(/```+[A-Za-z0-9_+.#-]*/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function roomTint(room: ChatRoom): string {
     const agent = room.members.find((m) => m.startsWith("agent:"));
     return agent ? agentColor(memberDisplay(agent)) : "var(--ink-3)";
@@ -538,11 +547,11 @@
     {/if}
 
     {#each dms as r (r.id)}
-      <button class="room dm" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
+      <button class="room dm" class:on={r.id === selectedId} data-room={r.id} data-kind="dm" onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
         <span class="dmDot"></span>
         <span class="rname">{roomLabel(r)}</span>
         {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
-        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
+        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {preview(r.last_message.body)}</span>{/if}
       </button>
     {/each}
     {#if !dms.length}<p class="none">No DMs yet</p>{/if}
@@ -561,11 +570,11 @@
     {/if}
 
     {#each shared as r (r.id)}
-      <button class="room" class:on={r.id === selectedId} onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
+      <button class="room" class:on={r.id === selectedId} data-room={r.id} data-kind="room" onclick={() => pick(r.id)} style="--tint:{roomTint(r)}">
         <span class="hash">#</span>
         <span class="rname">{r.name}</span>
         {#if r.unread > 0}<span class="unread" title="{r.unread} unread">{r.unread > 99 ? "99+" : r.unread}</span>{/if}
-        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {r.last_message.body}</span>{/if}
+        {#if r.last_message}<span class="rprev">{memberDisplay(r.last_message.author_member)}: {preview(r.last_message.body)}</span>{/if}
       </button>
     {/each}
   </aside>
@@ -831,10 +840,15 @@
     font-size: 12px;
     padding: 5px 7px;
   }
+  /* One grid row for the marker, name and badge, a second for the preview.
+     The old column flex stacked the hash on its own line, which is what made
+     every row 63-68px tall at 1680 (BB-204). */
   .room {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: 5px;
+    row-gap: 2px;
     width: 100%;
     padding: 6px 8px;
     border: 0;
@@ -851,10 +865,7 @@
     box-shadow: inset 2px 0 0 var(--tint, var(--accent));
   }
   .rname {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    flex: 1;
+    min-width: 0;
     font-size: 12.5px;
     font-weight: 550;
     color: var(--ink);
@@ -871,13 +882,13 @@
     height: 6px;
     border-radius: 50%;
     background: var(--tint, var(--ink-3));
-    display: none;
+    /* Reserve the marker column so DM names line up with room names. */
+    visibility: hidden;
   }
   .room.dm .rname {
     padding-left: 2px;
   }
   .unread {
-    margin-left: auto;
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
@@ -889,6 +900,7 @@
     flex: none;
   }
   .rprev {
+    grid-column: 1 / -1;
     font: 400 10.5px/1.3 var(--font-mono);
     color: var(--ink-3);
     white-space: nowrap;
