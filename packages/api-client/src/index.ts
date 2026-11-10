@@ -598,6 +598,8 @@ export interface NewCommitAttribution {
 export interface AgentRegister {
   agent_name?: string;
   session_id?: string;
+  /** Human-readable OpenCode session title; an empty value never clears one. */
+  session_title?: string;
   host?: string;
   pid?: number;
   note?: string;
@@ -614,6 +616,7 @@ export interface AgentRegistration {
   live: boolean;
   paused: boolean;
   session_id?: string | null;
+  session_title?: string | null;
   parent_session_id?: string | null;
   orchestrator?: string | null;
   orchestrator_session_id?: string | null;
@@ -624,6 +627,8 @@ export interface AgentRegistration {
 export interface AgentRosterEntry {
   agent_name: string;
   session_id?: string | null;
+  /** Human-readable session title; absent means the UI shows nothing extra. */
+  session_title?: string | null;
   host?: string | null;
   pid?: number | null;
   note?: string | null;

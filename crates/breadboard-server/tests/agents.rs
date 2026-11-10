@@ -838,6 +838,168 @@ async fn roster_unions_sessions_profiles_and_claims() {
     assert_eq!(brioche["session_id"], "ses_e45b3c0cffehLdDqi1zIPhaBM");
 }
 
+/// BB-189: registration stores the human session title, a later non-empty
+/// report refreshes it, and the roster returns it alongside the full id.
+#[tokio::test]
+async fn registration_stores_and_refreshes_session_title() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    let reg: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "titled-agent",
+            "session_id": "ses_titled",
+            "session_title": "Implement BB-170 name uniqueness"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reg["session_title"], "Implement BB-170 name uniqueness");
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = roster_row(&roster, "titled-agent");
+    assert_eq!(row["session_id"], "ses_titled");
+    assert_eq!(row["session_title"], "Implement BB-170 name uniqueness");
+
+    // A later non-empty title wins, still on the same live session.
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "titled-agent",
+            "session_id": "ses_titled",
+            "session_title": "  Wire routers and deploy live  "
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = roster_row(&roster, "titled-agent");
+    assert_eq!(row["session_title"], "Wire routers and deploy live");
+}
+
+/// BB-189: an empty or omitted title, a claim heartbeat and a rename never
+/// clear a stored title. Only a new non-empty report replaces it.
+#[tokio::test]
+async fn blank_session_title_never_clears_stored_title() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    let created = create_issue(&c, &base, &auth, "title keeper").await;
+    let key = created["key"].as_str().unwrap().to_string();
+
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "title-keeper",
+            "session_id": "ses_keeper",
+            "session_title": "Keep this title"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let title_of = |roster: &Value, name: &str| {
+        roster_row(roster, name)["session_title"]
+            .as_str()
+            .map(str::to_string)
+    };
+
+    // Empty title, then an omitted one.
+    for body in [
+        json!({
+            "agent_name": "title-keeper",
+            "session_id": "ses_keeper",
+            "session_title": "   "
+        }),
+        json!({
+            "agent_name": "title-keeper",
+            "session_id": "ses_keeper"
+        }),
+    ] {
+        c.post(format!("{base}/api/agents/register"))
+            .header("authorization", &auth)
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // A claim write auto-registers through the writable path without a title.
+    c.post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "title-keeper",
+            "session_id": "ses_keeper",
+            "state": "implementing"
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(&roster, "title-keeper").as_deref(),
+        Some("Keep this title")
+    );
+
+    // Rename moves the row; the title moves with it.
+    c.post(format!("{base}/api/agents/title-keeper/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "title-keeper-renamed" }))
+        .send()
+        .await
+        .unwrap();
+
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        title_of(&roster, "title-keeper-renamed").as_deref(),
+        Some("Keep this title")
+    );
+}
+
 /// Registering without a name assigns a unique curated name and returns
 /// alternatives, so a caller can pick without rerolling.
 #[tokio::test]

@@ -1402,6 +1402,8 @@ pub async fn list_agents(
 
 /// Register or refresh this session. Omit `agent_name` for a curated,
 /// server-assigned name; the response carries alternatives either way.
+/// `session_title` is display-only: a non-empty value replaces the stored
+/// title, while an omitted or empty one never clears it.
 pub async fn register_agent(
     State(app): State<AppState>,
     user: AuthUser,
