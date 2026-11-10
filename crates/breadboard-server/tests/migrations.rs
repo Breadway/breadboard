@@ -501,3 +501,140 @@ async fn migration_removes_pre_existing_killed_rows_and_keeps_audit() {
             .unwrap();
     assert_eq!(keeper, (0, 0));
 }
+
+/// BB-215: the one attribution written under a borrowed MCP session is
+/// corrected, and an unrelated row with the same id fields but another repo is
+/// not touched.
+#[tokio::test]
+async fn migration_0031_repairs_borrowed_commit_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = SqlitePool::connect(&format!(
+        "sqlite://{}?mode=rwc",
+        tmp.path().join("commit-identity.db").display()
+    ))
+    .await
+    .unwrap();
+    for sql in migrations_before("0031") {
+        sqlx::raw_sql(&sql).execute(&pool).await.unwrap();
+    }
+
+    sqlx::query(
+        "INSERT INTO users (forgejo_id, login, display_name) VALUES (1, 'tester', 'Tester')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO projects (id, key, name, next_number) VALUES (1, 'COMMIT', 'Commit', 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO issues
+            (id, key, project_id, title, created_at, updated_at)
+         VALUES (1, 'BB-199', 1, 'borrowed identity', '2026-11-10T10:00:00Z',
+                 '2026-11-10T10:00:00Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let sha = "9e7dfddb0d4a0866e682f5cb578ce54b722fa0e2";
+    for (id, repo, agent, session) in [
+        (
+            3_i64,
+            "Breadway/breadboard",
+            "ciabatta captain",
+            "ses_e3af688a2ffeVHhZrE50ZBqNu6",
+        ),
+        (
+            4_i64,
+            "Breadway/other",
+            "ciabatta captain",
+            "ses_e3af688a2ffeVHhZrE50ZBqNu6",
+        ),
+    ] {
+        sqlx::query(
+            "INSERT INTO commit_attribution
+                (id, repo, sha, issue_id, issue_key, agent_name, session_id,
+                 orchestrator, orchestrator_session_id, model, provider,
+                 model_source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, 1, 'BB-199', ?4, ?5, 'study steward',
+                     'ses_e40fdf71dffeMli12lMmM0XVAF',
+                     'deepseek-v4.1-flash', 'opencode-go', 'session',
+                     '2026-11-10T11:03:58Z', '2026-11-10T11:03:58Z')",
+        )
+        .bind(id)
+        .bind(repo)
+        .bind(sha)
+        .bind(agent)
+        .bind(session)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query(
+        "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, at)
+         VALUES (1, 'commit', NULL,
+                 'Breadway/breadboard@9e7dfddb0d by ciabatta captain (opencode-go/deepseek-v4.1-flash)',
+                 'breadboard', '2026-11-10T11:03:58Z')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    sqlx::raw_sql(include_str!(
+        "../../../migrations/0031_repair_commit_attribution.sql"
+    ))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let identity: (String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT agent_name, session_id, orchestrator, orchestrator_session_id
+           FROM commit_attribution WHERE id = 3",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(identity.0, "buttered crumpet");
+    assert_eq!(
+        identity.1.as_deref(),
+        Some("ses_e3afa697affepTJpGLIu9XZcvz")
+    );
+    assert_eq!(identity.2, None, "the borrowed orchestrator must be cleared");
+    assert_eq!(
+        identity.3, None,
+        "the borrowed orchestrator session must be cleared"
+    );
+
+    let model: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT model, provider FROM commit_attribution WHERE id = 3")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        model.0.as_deref(),
+        Some("deepseek-v4.1-flash"),
+        "the model was correct and must survive the repair"
+    );
+    assert_eq!(model.1.as_deref(), Some("opencode-go"));
+
+    let decoy: (String, Option<String>) = sqlx::query_as(
+        "SELECT agent_name, orchestrator FROM commit_attribution WHERE id = 4",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(decoy.0, "ciabatta captain", "another repo must not be repaired");
+    assert_eq!(decoy.1.as_deref(), Some("study steward"));
+
+    let activity: String =
+        sqlx::query_scalar("SELECT new_value FROM sync_log WHERE field = 'commit'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(activity.contains("by buttered crumpet"), "{activity}");
+    assert!(!activity.contains("ciabatta captain"), "{activity}");
+}

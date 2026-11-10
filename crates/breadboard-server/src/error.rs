@@ -120,6 +120,16 @@ impl IntoResponse for AppError {
             AppError::Db(sqlx::Error::RowNotFound) => {
                 (StatusCode::NOT_FOUND, "not found".to_string())
             }
+            // Writer contention is temporary, and reporting it as an opaque
+            // internal error sends an agent into a retry loop that cannot tell
+            // a lock from a broken write. Name it so the caller can retry.
+            AppError::Db(e) if crate::db::is_busy(e) => {
+                tracing::warn!(error = %e, "database busy");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "database is busy; retry the request".to_string(),
+                )
+            }
             AppError::Db(e) => {
                 tracing::error!(error = %e, "database error");
                 (
