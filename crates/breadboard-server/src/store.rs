@@ -3258,6 +3258,42 @@ async fn live_name_holder(db: &SqlitePool, name: &str) -> AppResult<Option<Strin
     }
 }
 
+/// Names a session already registered under, best first. One session holds
+/// exactly one name (BB-188), so a nameless registration must reuse the row it
+/// already owns instead of assigning another curated name that would stay
+/// registered and pollable. The ordering is deterministic even against a
+/// pre-0029 database: a name holding claims wins, then the most recent row.
+async fn session_registered_names(db: &SqlitePool, session_id: &str) -> AppResult<Vec<String>> {
+    let names: Vec<String> = sqlx::query_scalar(
+        "SELECT s.agent_name
+           FROM agent_sessions s
+          WHERE s.session_id = ?1
+          ORDER BY EXISTS (SELECT 1 FROM agent_claims c
+                            WHERE lower(c.agent_name) = lower(s.agent_name)) DESC,
+                   julianday(s.last_seen) DESC,
+                   s.agent_name ASC",
+    )
+    .bind(session_id)
+    .fetch_all(db)
+    .await?;
+    Ok(names)
+}
+
+/// Refuse an explicit name that differs from the one this session already
+/// holds. Rename is the only operation that moves an identity (BB-188).
+fn agent_session_already_named(session_id: &str, existing: &str, requested: &str) -> AppError {
+    AppError::AgentSessionNamed {
+        message: format!(
+            "session {session_id} is already registered as '{existing}'; an explicit different \
+             name '{requested}' is refused. Use POST /api/agents/{existing}/rename to move the \
+             identity"
+        ),
+        agent_name: requested.to_string(),
+        existing_name: existing.to_string(),
+        session_id: Some(session_id.to_string()),
+    }
+}
+
 /// Build the 409 used by registration, claiming and chat when a live name is
 /// already held by a different session. Registration gets curated
 /// alternatives in the same response so the caller can rename before claiming.
@@ -3306,18 +3342,45 @@ pub async fn register_agent(
         .as_deref()
         .map(names::normalize)
         .filter(|name| !name.is_empty());
+    let session_id = input
+        .session_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+
+    // One session holds one name. A nameless registration from a session that
+    // already registered (including the every-restart auto-registration) reuses
+    // that name; an explicit different name must go through rename instead.
+    let existing_names = match session_id {
+        Some(session) => session_registered_names(db, session).await?,
+        None => Vec::new(),
+    };
 
     let (name, mut alternatives) = match explicit {
-        Some(name) => (name, Vec::new()),
-        None => {
-            let known = known_agent_names(db).await?;
-            let picks = names::pick_names(&known, 4);
-            let mut picks = picks.into_iter();
-            let name = picks.next().ok_or_else(|| {
-                AppError::Other(anyhow::anyhow!("no curated agent names are available"))
-            })?;
-            (name, picks.collect())
+        Some(name) => {
+            if let Some(session) = session_id {
+                if !existing_names.is_empty() && !existing_names.contains(&name) {
+                    return Err(agent_session_already_named(
+                        session,
+                        &existing_names[0],
+                        &name,
+                    ));
+                }
+            }
+            (name, Vec::new())
         }
+        None => match existing_names.into_iter().next() {
+            Some(name) => (name, Vec::new()),
+            None => {
+                let known = known_agent_names(db).await?;
+                let picks = names::pick_names(&known, 4);
+                let mut picks = picks.into_iter();
+                let name = picks.next().ok_or_else(|| {
+                    AppError::Other(anyhow::anyhow!("no curated agent names are available"))
+                })?;
+                (name, picks.collect())
+            }
+        },
     };
     validate_agent_name(&name)?;
     // A title is display-only. Trim it and treat blank as absent so an empty
@@ -3369,7 +3432,7 @@ pub async fn register_agent(
         db,
         user_id,
         &name,
-        input.session_id.as_deref(),
+        session_id,
         session_title,
         parent_session_id.as_deref(),
         input.host.as_deref(),
@@ -3445,6 +3508,13 @@ pub async fn ensure_agent_writable(
 ) -> AppResult<String> {
     let name = names::normalize(raw_name);
     validate_agent_name(&name)?;
+
+    if let Some(session) = session_id {
+        let existing = session_registered_names(db, session).await?;
+        if !existing.is_empty() && !existing.contains(&name) {
+            return Err(agent_session_already_named(session, &existing[0], &name));
+        }
+    }
 
     let registered = upsert_agent_session(
         db,
