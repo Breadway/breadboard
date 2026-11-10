@@ -605,6 +605,14 @@
     void moveAgent(g.id, target);
   }
 
+  /** Explicit non-drag path for the one action that used to need a drop on the
+   *  page-top target: make this card top level. Works with mouse, keyboard and
+   *  touch because it is a menu button, not a drag. */
+  function clearMenuParent(g: Group) {
+    menuFor = null;
+    void moveAgent(g.id, null);
+  }
+
   /** Move one agent under another, or to the top level when `targetId` is
    *  null. A cycle is refused before the request so the message is immediate;
    *  the server enforces the same rule. */
@@ -881,15 +889,14 @@
         class:full={g.exclusiveLimit > 0 && g.work.length >= g.exclusiveLimit}
         title="Live exclusive claims: {g.work.length} of {g.exclusiveLimit} allowed per agent"
       >{g.work.length}/{g.exclusiveLimit}</span>
-      {#if isOrchestrator || parent}
+      {#if isOrchestrator}
         <span
           class="budget tree"
           class:warn={g.treeLimit > 0 && g.treeExclusive * 5 >= g.treeLimit * 4}
           class:full={g.treeLimit > 0 && g.treeExclusive >= g.treeLimit}
-          title="Live exclusive claims across {isOrchestrator ? "this orchestrator and its subagents" : "this agent's orchestrator tree"}: {g.treeExclusive} of {g.treeLimit}"
+          title="Live exclusive claims across this orchestrator and its subagents: {g.treeExclusive} of {g.treeLimit}"
         >tree {g.treeExclusive}/{g.treeLimit}</span>
       {/if}
-      <span class="grow"></span>
       {#if g.work.length}
         <span class="completion">
           <Ring done={g.done} total={g.work.length} color={agentColor(g.name)} size={14} />
@@ -901,6 +908,16 @@
       <span class="gtick" title={g.lastHeartbeat ?? "no heartbeat"}>
         {g.lastHeartbeat ? ago(g.lastHeartbeat, now) : "no heartbeat"}
       </span>
+      {#if g.hidden}
+        <button
+          class="btn sm unhide-card"
+          onclick={(e) => {
+            e.stopPropagation();
+            void unhideGroup(g);
+          }}
+          onkeydown={(e) => e.stopPropagation()}
+        >Unhide</button>
+      {/if}
       <span class="card-menu-wrap">
         <button
           class="btn ghost sm card-menu-btn"
@@ -933,19 +950,17 @@
               <button class="btn sm" role="menuitem" onclick={() => applyMenu(g)}>Apply</button>
               <button class="btn ghost sm" role="menuitem" onclick={() => (menuFor = null)}>Cancel</button>
             </span>
+            {#if parentId}
+              <button
+                class="btn ghost sm menu-clear"
+                role="menuitem"
+                title="Clear the orchestrator and make {g.name} top level"
+                onclick={() => clearMenuParent(g)}
+              >Clear orchestrator</button>
+            {/if}
           </div>
         {/if}
       </span>
-      {#if g.hidden}
-        <button
-          class="btn sm unhide-card"
-          onclick={(e) => {
-            e.stopPropagation();
-            void unhideGroup(g);
-          }}
-          onkeydown={(e) => e.stopPropagation()}
-        >Unhide</button>
-      {/if}
     </footer>
   </div>
 {/snippet}
@@ -1070,7 +1085,7 @@
     data-drop-root="true"
     role="button"
     tabindex="-1"
-    aria-label="Drop here to make top level"
+    aria-label="Drop here to make a card top level, or use the card menu's Clear orchestrator entry"
     ondragover={(e) => {
       e.preventDefault();
       rootDropOver = true;
@@ -1080,7 +1095,8 @@
     ondrop={dropOnRoot}
   >
     <b>Top level</b>
-    <span>drop a card here to clear its orchestrator</span>
+    <span class="drop-hint">drop a card here to clear its orchestrator</span>
+    <span class="touch-hint">no drag on touch: open a card's ⋮ menu and choose Clear orchestrator</span>
   </div>
 
   {#if !sections.length}
@@ -1124,6 +1140,14 @@
               <span class="group-meta">
                 {section.directTotal} subagent{section.directTotal === 1 ? "" : "s"} · {section.directLive} live
               </span>
+              {#if root.treeLimit > 0}
+                <span
+                  class="budget tree"
+                  class:warn={root.treeExclusive * 5 >= root.treeLimit * 4}
+                  class:full={root.treeExclusive >= root.treeLimit}
+                  title="Live exclusive claims across this orchestrator tree: {root.treeExclusive} of {root.treeLimit}"
+                >tree {root.treeExclusive}/{root.treeLimit}</span>
+              {/if}
               <span class="grow"></span>
               {#if !section.rootRendered}
                 <button class="btn ghost sm" onclick={() => void unhideGroup(root)}>Unhide</button>
@@ -1202,31 +1226,33 @@
             · {selected.lastSeen ? `last seen ${ago(selected.lastSeen, now)}` : "no session heartbeat"}
           </div>
         </div>
-        {#if selected.work.length}
-          <span class="completion big">
-            <Ring done={selected.done} total={selected.work.length} color={agentColor(selected.name)} size={18} />
-            <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
-          </span>
-        {/if}
-        <button
-          class="btn sm message-agent"
-          title="Open the DM with {selected.name}"
-          onclick={() => messageAgent(selected)}
-        >Message</button>
-        {#if selected.hidden}
-          <button class="btn sm" onclick={() => void unhideGroup(selected)}>Unhide</button>
-        {:else}
-          <button class="btn sm" onclick={() => void hideGroup(selected)}>Hide</button>
-        {/if}
-        {#if selected.paused}
-          <button class="btn sm" onclick={() => void resumeGroup(selected)}>Resume</button>
-        {:else}
-          <button class="btn sm" onclick={() => void pauseGroup(selected)}>Pause</button>
-        {/if}
-        <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
         <button class="close" aria-label="Close" onclick={closeAgent}>
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
         </button>
+        <div class="mhead-actions">
+          {#if selected.work.length}
+            <span class="completion big">
+              <Ring done={selected.done} total={selected.work.length} color={agentColor(selected.name)} size={18} />
+              <b>{selected.done}</b><span class="cslash">/</span>{selected.work.length} done
+            </span>
+          {/if}
+          <button
+            class="btn sm message-agent"
+            title="Open the DM with {selected.name}"
+            onclick={() => messageAgent(selected)}
+          >Message</button>
+          {#if selected.hidden}
+            <button class="btn sm" onclick={() => void unhideGroup(selected)}>Unhide</button>
+          {:else}
+            <button class="btn sm" onclick={() => void hideGroup(selected)}>Hide</button>
+          {/if}
+          {#if selected.paused}
+            <button class="btn sm" onclick={() => void resumeGroup(selected)}>Resume</button>
+          {:else}
+            <button class="btn sm" onclick={() => void pauseGroup(selected)}>Pause</button>
+          {/if}
+          <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
+        </div>
       </header>
 
       <div class="session">
@@ -1339,10 +1365,25 @@
     gap: 14px;
   }
 
+  /* BB-209: the shared --ink-3 mix (62% ink-dim over bg) measures about 3.07:1
+     on the card surfaces, and everything it colours here is functional small
+     text: claim budgets, heartbeat age, legend swatches and stat labels. Lift
+     the token for this page and the agent panel only, so the Chat and board
+     pages keep their current look. 90% measures 5.7:1 on --surface and 4.8:1
+     on the --raise hover surface, both above the 4.5:1 AA floor. */
+  .wrap,
+  .scrim {
+    --ink-3: color-mix(in srgb, var(--ink-dim) 90%, var(--bg));
+  }
+
   /* --- summary ------------------------------------------------------- */
+  /* The roll-up sentence is the point of this card, so it gets a reserved
+     column and is allowed to wrap. Before, `auto` gave the eleven stat tiles
+     all the space at 1280 and the sentence was clipped to 14 characters in a
+     107px box (BB-202). */
   .summary {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.6fr);
     gap: 20px;
     align-items: center;
     padding: 14px 16px;
@@ -1360,10 +1401,12 @@
     display: flex;
     align-items: baseline;
     gap: 10px;
+    flex-wrap: wrap;
   }
   .plabel {
     font: 650 15px/1 var(--font-display);
     letter-spacing: -0.01em;
+    white-space: nowrap;
   }
   .plive {
     margin-left: auto;
@@ -1407,14 +1450,14 @@
   .widget-line {
     font: 400 10.5px/1.4 var(--font-mono);
     color: var(--ink-3);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
   .stats {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
+    min-width: 0;
   }
   .stat {
     min-width: 54px;
@@ -1612,6 +1655,10 @@
   .group-meta {
     font: 400 10px/1.4 var(--font-mono);
     color: var(--ink-3);
+  }
+  .group-head .budget {
+    padding: 2px 6px;
+    font: 500 10px/1.15 var(--font-mono);
   }
   .raw-parent {
     max-width: 100%;
@@ -1975,13 +2022,21 @@
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 65%, transparent);
   }
 
+  /* BB-198: the footer is a wrapping row. Nothing shrinks below its own text
+     and the menu keeps `margin-left: auto`, so a dense card puts a second
+     footer line on the card instead of pushing the ⋮ button past the edge. */
   .afoot {
     display: flex;
     align-items: center;
-    gap: 7px;
+    flex-wrap: wrap;
+    gap: 4px 7px;
     padding-top: 2px;
-    font: 400 10px/1 var(--font-mono);
+    font: 400 10px/1.2 var(--font-mono);
     color: var(--ink-3);
+  }
+  .afoot > * {
+    flex: none;
+    white-space: nowrap;
   }
   .counts {
     color: var(--ink-3);
@@ -2031,6 +2086,9 @@
   .gtick {
     color: var(--ink-3);
   }
+  .card-menu-wrap {
+    margin-left: auto;
+  }
 
   /* --- modal ---------------------------------------------------------- */
   .scrim {
@@ -2057,25 +2115,38 @@
   }
   .mhead {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
+    flex-wrap: wrap;
     gap: 10px;
     padding: 12px 14px;
     border-bottom: 1px solid var(--line);
     background: linear-gradient(90deg, color-mix(in srgb, var(--agent) 9%, transparent), transparent 55%);
   }
   .mid {
+    flex: 1 1 220px;
     min-width: 0;
+  }
+  .mhead-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-left: auto;
   }
   .mname {
     display: flex;
     align-items: baseline;
+    flex-wrap: wrap;
     gap: 8px;
     font: 650 16px/1.2 var(--font-display);
+    overflow-wrap: anywhere;
   }
   .msub {
     margin-top: 3px;
     font: 400 10.5px/1.3 var(--font-mono);
     color: var(--ink-3);
+    overflow-wrap: anywhere;
   }
   .msub .bad {
     color: var(--danger);
@@ -2408,6 +2479,16 @@
     color: var(--ink-2);
     font: 500 12px/1.4 var(--font-body);
   }
+  /* BB-211: a drag that starts several screens down needs a target it can
+     actually see. While a drag is live the zone pins to the top of the
+     scroller and paints an opaque background over the cards beneath it. */
+  .root-drop.active {
+    position: sticky;
+    top: 0;
+    z-index: 6;
+    background: color-mix(in srgb, var(--surface) 88%, var(--sunk));
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  }
   .root-drop b {
     font: 650 13px/1.3 var(--font-display);
     color: var(--ink);
@@ -2416,6 +2497,17 @@
     border-color: var(--ok);
     background: color-mix(in srgb, var(--ok) 10%, var(--surface));
     color: var(--ink);
+  }
+  .touch-hint {
+    display: none;
+  }
+  @media (hover: none), (pointer: coarse) {
+    .drop-hint {
+      display: none;
+    }
+    .touch-hint {
+      display: block;
+    }
   }
   .card-menu-wrap {
     position: relative;
@@ -2459,5 +2551,13 @@
     display: flex;
     gap: 6px;
     justify-content: flex-end;
+  }
+  .menu-clear {
+    justify-content: center;
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
+    margin-top: 1px;
+    height: auto;
+    padding-block: 7px;
   }
 </style>

@@ -13,6 +13,7 @@
     "test:links": "node tests/agents-links.browser.mjs",
     "test:hierarchy": "node tests/agents-hierarchy.browser.mjs",
     "test:orchestrator": "node tests/agents-orchestrator.browser.mjs",
+    "test:agents-ux": "node tests/agents-ux.browser.mjs",
     "test:chat-dm": "node tests/chat-dm.browser.mjs",
     "test:web-a11y": "node tests/web-a11y.browser.mjs",
     "preview": "vite preview",
