@@ -11,6 +11,11 @@
 //! idempotent against breadboard's own `usage_sessions` table: re-importing a
 //! session replaces that session's rows, so a growing session never double
 //! counts.
+//!
+//! Billing mode is resolved from config at read time, never stored with the
+//! rows: a provider is either metered (its reported cost is billed spend) or a
+//! subscription (its tokens are included and its catalog list price is not
+//! billed). Changing the config re-interprets history without a re-import.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,12 +25,13 @@ use axum::{
     extract::{Path as AxumPath, Query, State},
     Json,
 };
-use chrono::{NaiveDate, Utc};
+use chrono::{NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::FromRow;
 
 use crate::auth::AuthUser;
+use crate::config::{BillingMode, ProviderBillingConfig, TokenRates, UsageConfig};
 use crate::error::{AppError, AppResult};
 use crate::AppState;
 
@@ -46,13 +52,21 @@ pub struct UsageQuery {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageTotals {
-    /// Cost the provider reported. Rows with tokens but no reported cost are
-    /// excluded here and counted in `unpriced_tokens` instead.
+    /// Billed spend in USD: reported cost from metered providers only.
+    /// Allowance providers contribute nothing here because their tokens draw
+    /// down a prepaid allowance instead of a per-token invoice.
     pub cost: f64,
-    /// Tokens whose source rows reported zero cost. These are never shown as
-    /// $0 spend: no price source exists for them, so clients label them
-    /// unpriced.
+    /// Computed allowance consumption in USD for the selected range. This is
+    /// the number that counts against a model's monthly allowance. It is never
+    /// OpenCode's reported cost for that provider, which is inconsistent.
+    pub allowance_usd: f64,
+    /// Metered tokens whose source rows reported zero cost. These are never
+    /// shown as $0 spend: no price source exists for them, so clients label
+    /// them unpriced (BB-220).
     pub unpriced_tokens: i64,
+    /// Allowance tokens with no rate configured for that model. They cannot be
+    /// priced, so clients label them unrated instead of guessing a number.
+    pub unrated_tokens: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub reasoning_tokens: i64,
@@ -62,25 +76,48 @@ pub struct UsageTotals {
     pub session_count: i64,
 }
 
+/// Which quantity the `share` fields in one summary are a fraction of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareBasis {
+    /// Metered reported cost.
+    Cost,
+    /// Computed allowance consumption.
+    Allowance,
+    /// Both in dollars, with different provenance (metered plus allowance).
+    Dollars,
+    /// No dollars exist; shares are token fractions.
+    Tokens,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelShare {
     pub model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Reported cost only; see `unpriced_tokens`.
+    /// Billing mode resolved from config at read time.
+    pub billing: BillingMode,
+    /// Billed cost for a metered row; always 0 for an allowance row.
     pub cost: f64,
+    /// Computed allowance consumption for an allowance row; 0 for metered.
+    pub allowance_usd: f64,
     pub unpriced_tokens: i64,
+    pub unrated_tokens: i64,
     pub total_tokens: i64,
-    /// Share of the subject's cost, or of its tokens when no cost is recorded.
+    /// Fraction of the subject's dollars, or of its tokens when no dollars
+    /// exist. See `UsageSummary::share_basis`.
     pub share: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentShare {
     pub agent_name: String,
-    /// Reported cost only; see `unpriced_tokens`.
+    /// Billed cost only.
     pub cost: f64,
+    /// Computed allowance consumption only.
+    pub allowance_usd: f64,
     pub unpriced_tokens: i64,
+    pub unrated_tokens: i64,
     pub total_tokens: i64,
     pub share: f64,
 }
@@ -90,13 +127,50 @@ pub struct SessionUsage {
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_name: Option<String>,
-    /// Reported cost only; see `unpriced_tokens`.
+    /// Billed cost only.
     pub cost: f64,
+    /// Computed allowance consumption only.
+    pub allowance_usd: f64,
     pub unpriced_tokens: i64,
+    pub unrated_tokens: i64,
     pub total_tokens: i64,
     pub first_day: String,
     pub last_day: String,
     pub models: Vec<String>,
+}
+
+/// One rolling rate-limit window over a model's monthly allowance.
+#[derive(Debug, Clone, Serialize)]
+pub struct AllowanceWindow {
+    /// `5h`, `weekly` or `monthly`.
+    pub label: String,
+    /// Computed consumption inside the window.
+    pub used_usd: f64,
+    /// The window's share of the monthly allowance (20%, 50%, 100%).
+    pub limit_usd: f64,
+    pub over_limit: bool,
+    /// Inclusive UTC bucket the window starts at.
+    pub from: String,
+    /// UTC bucket the window ends at (the request time, truncated).
+    pub to: String,
+}
+
+/// Allowance state for one model on one allowance provider.
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelAllowance {
+    pub provider: String,
+    pub model: String,
+    /// Monthly allowance for this model, from config.
+    pub allowance_usd: f64,
+    /// Plan price, from config. Used only for the leverage multiplier.
+    pub plan_price_usd: f64,
+    /// Monthly allowance divided by plan price: the plan's leverage on this
+    /// model, not a price multiplier.
+    pub multiplier: f64,
+    /// Computed consumption in the selected range.
+    pub used_usd: f64,
+    pub unrated_tokens: i64,
+    pub windows: Vec<AllowanceWindow>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -111,8 +185,16 @@ pub struct UsageSummary {
     pub to: String,
     #[serde(flatten)]
     pub totals: UsageTotals,
+    /// What every `share` field below is a fraction of.
+    pub share_basis: ShareBasis,
     pub models: Vec<ModelShare>,
     pub sessions: Vec<SessionUsage>,
+    /// Allowance providers touched by the subject, one entry per model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowances: Vec<ModelAllowance>,
+    /// True when any allowance window is over its share of the allowance.
+    #[serde(default)]
+    pub over_allowance: bool,
     /// Present on an issue summary: which agents spent the tokens.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<AgentShare>,
@@ -165,7 +247,9 @@ pub async fn list_agent_usage(
     .await?;
     let mut out = Vec::with_capacity(names.len());
     for name in names {
-        out.push(agent_summary(&app.db, &name, &window, threshold, false).await?);
+        out.push(
+            agent_summary(&app.db, &name, &window, threshold, &app.config.usage, false).await?,
+        );
     }
     Ok(Json(out))
 }
@@ -179,7 +263,7 @@ pub async fn get_agent_usage(
     let window = Window::parse(&q)?;
     let threshold = load_threshold(&app.db, app.config.usage.spend_warn_usd).await?;
     Ok(Json(
-        agent_summary(&app.db, &name, &window, threshold, true).await?,
+        agent_summary(&app.db, &name, &window, threshold, &app.config.usage, true).await?,
     ))
 }
 
@@ -192,7 +276,7 @@ pub async fn get_issue_usage(
     let window = Window::parse(&q)?;
     let threshold = load_threshold(&app.db, app.config.usage.spend_warn_usd).await?;
     Ok(Json(
-        issue_summary(&app.db, &key, &window, threshold).await?,
+        issue_summary(&app.db, &key, &window, threshold, &app.config.usage).await?,
     ))
 }
 
@@ -427,18 +511,22 @@ impl UsageRow {
     }
 }
 
-/// Aggregate assistant messages per session, model and day. The fallback covers
-/// sessions whose messages have already been pruned but whose aggregate row in
-/// `session_v2` still holds the totals.
+/// Aggregate assistant messages per session, model and 30-minute UTC bucket.
+/// The fallback covers sessions whose messages have already been pruned but
+/// whose aggregate row in `session_v2` still holds the totals.
+///
+/// Bucket granularity is deliberate: rolling allowance windows (5h) and the
+/// provider's peak/off-peak window cannot be recovered from a whole-day row.
 async fn read_usage_rows(source: &sqlx::SqlitePool) -> AppResult<Vec<UsageRow>> {
-    let mut rows: Vec<UsageRow> = sqlx::query_as(
+    let created = bucket_sql("time_created");
+    let mut rows: Vec<UsageRow> = sqlx::query_as(&format!(
         r#"
         SELECT
             session_id,
             NULL AS agent_name,
             NULLIF(json_extract(data, '$.model.providerID'), '') AS provider,
             json_extract(data, '$.model.id') AS model,
-            COALESCE(date(time_created / 1000, 'unixepoch'), '1970-01-01') AS day,
+            {created} AS day,
             CAST(COALESCE(SUM(json_extract(data, '$.tokens.input')), 0) AS INTEGER) AS input_tokens,
             CAST(COALESCE(SUM(json_extract(data, '$.tokens.output')), 0) AS INTEGER) AS output_tokens,
             CAST(COALESCE(SUM(json_extract(data, '$.tokens.reasoning')), 0) AS INTEGER) AS reasoning_tokens,
@@ -452,9 +540,9 @@ async fn read_usage_rows(source: &sqlx::SqlitePool) -> AppResult<Vec<UsageRow>> 
         GROUP BY session_id,
                  json_extract(data, '$.model.providerID'),
                  json_extract(data, '$.model.id'),
-                 date(time_created / 1000, 'unixepoch')
-        "#,
-    )
+                 {created}
+        "#
+    ))
     .fetch_all(source)
     .await
     .map_err(|error| {
@@ -463,14 +551,15 @@ async fn read_usage_rows(source: &sqlx::SqlitePool) -> AppResult<Vec<UsageRow>> 
         ))
     })?;
 
-    let fallback: Vec<UsageRow> = sqlx::query_as(
+    let updated = bucket_sql("time_updated");
+    let fallback: Vec<UsageRow> = sqlx::query_as(&format!(
         r#"
         SELECT
             id AS session_id,
             NULL AS agent_name,
             NULLIF(json_extract(model, '$.providerID'), '') AS provider,
             COALESCE(json_extract(model, '$.id'), model, 'unknown') AS model,
-            COALESCE(date(time_updated / 1000, 'unixepoch'), '1970-01-01') AS day,
+            {updated} AS day,
             tokens_input AS input_tokens,
             tokens_output AS output_tokens,
             tokens_reasoning AS reasoning_tokens,
@@ -483,8 +572,8 @@ async fn read_usage_rows(source: &sqlx::SqlitePool) -> AppResult<Vec<UsageRow>> 
              WHERE "type" = 'assistant'
                AND json_extract(data, '$.tokens') IS NOT NULL
         )
-        "#,
-    )
+        "#
+    ))
     .fetch_all(source)
     .await
     .map_err(|error| AppError::Other(anyhow::anyhow!("reading OpenCode session_v2: {error}")))?;
@@ -495,6 +584,17 @@ async fn read_usage_rows(source: &sqlx::SqlitePool) -> AppResult<Vec<UsageRow>> 
         row.model = Some(label);
     }
     Ok(rows)
+}
+
+/// `YYYY-MM-DDTHH:MM` for the start of the 30-minute bucket containing the
+/// given epoch-millisecond column. Kept in SQL so a single scan does the
+/// grouping.
+fn bucket_sql(column: &str) -> String {
+    format!(
+        "COALESCE(strftime('%Y-%m-%dT%H:', {column} / 1000, 'unixepoch') || \
+         CASE WHEN CAST(strftime('%M', {column} / 1000, 'unixepoch') AS INTEGER) < 30 \
+              THEN '00' ELSE '30' END, '1970-01-01T00:00')"
+    )
 }
 
 /// Session id to breadboard agent name. Roster rows win over stale claims.
@@ -627,15 +727,12 @@ const RESOLVED_AGENT_SQL: &str = r#"
     )
 "#;
 
-/// Tokens in rows that reported no cost. `cost = 0` with tokens is "unpriced",
-/// not "free": the provider omitted a price and the infra model registry has
-/// no per-model price table to estimate from.
-const UNPRICED_TOKENS_SQL: &str = "(CASE WHEN u.cost <= 0 THEN \
+/// Tokens in rows that reported no cost. `cost = 0` with tokens is either
+/// "unpriced" (metered) or "included" (subscription); the provider decides
+/// which at read time, so this only measures the raw condition.
+const ZERO_COST_TOKENS_SQL: &str = "(CASE WHEN u.cost <= 0 THEN \
     u.input_tokens + u.output_tokens + u.reasoning_tokens \
     + u.cache_read_tokens + u.cache_write_tokens ELSE 0 END)";
-
-const TOTAL_TOKENS_SQL: &str = "(u.input_tokens + u.output_tokens + u.reasoning_tokens \
-    + u.cache_read_tokens + u.cache_write_tokens)";
 
 #[derive(Debug, Clone)]
 struct Window {
@@ -687,34 +784,29 @@ fn parse_day(value: &str) -> AppResult<NaiveDate> {
     )))
 }
 
+/// Tokens and cost for one provider in one scope. Billing mode is resolved in
+/// Rust (it is config, not data), so every query groups by provider and the
+/// split into billed, unpriced and allowance consumption happens once here.
 #[derive(Debug, Clone, FromRow)]
-struct TotalsRow {
+struct ProviderTotalsRow {
+    provider: Option<String>,
     input_tokens: i64,
     output_tokens: i64,
     reasoning_tokens: i64,
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     cost: f64,
-    unpriced_tokens: i64,
-    session_count: i64,
+    zero_cost_tokens: i64,
 }
 
-impl TotalsRow {
-    fn into_totals(self) -> UsageTotals {
-        UsageTotals {
-            cost: round_cost(self.cost),
-            unpriced_tokens: self.unpriced_tokens,
-            input_tokens: self.input_tokens,
-            output_tokens: self.output_tokens,
-            reasoning_tokens: self.reasoning_tokens,
-            cache_read_tokens: self.cache_read_tokens,
-            cache_write_tokens: self.cache_write_tokens,
-            total_tokens: self.input_tokens
-                + self.output_tokens
-                + self.reasoning_tokens
-                + self.cache_read_tokens
-                + self.cache_write_tokens,
-            session_count: self.session_count,
+impl ProviderTotalsRow {
+    fn split(&self) -> TokenSplit {
+        TokenSplit {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            reasoning: self.reasoning_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_write_tokens,
         }
     }
 }
@@ -723,29 +815,190 @@ impl TotalsRow {
 struct ModelRow {
     model: String,
     provider: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
     cost: f64,
-    unpriced_tokens: i64,
-    total_tokens: i64,
+    zero_cost_tokens: i64,
+}
+
+impl ModelRow {
+    fn split(&self) -> TokenSplit {
+        TokenSplit {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            reasoning: self.reasoning_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_write_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
 struct AgentRow {
     agent_name: String,
+    provider: Option<String>,
+    input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
     cost: f64,
-    unpriced_tokens: i64,
-    total_tokens: i64,
+    zero_cost_tokens: i64,
 }
 
+impl AgentRow {
+    fn split(&self) -> TokenSplit {
+        TokenSplit {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            reasoning: self.reasoning_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_write_tokens,
+        }
+    }
+}
+
+/// One (session, provider, model, 30-minute bucket) row. Bucket granularity is
+/// what lets summaries compute rolling allowance windows and decide whether a
+/// request was billed at peak or off-peak rates.
 #[derive(Debug, Clone, FromRow)]
-struct SessionRow {
+struct SessionBucketRow {
     session_id: String,
     agent_name: Option<String>,
+    provider: Option<String>,
+    model: String,
+    day: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+    cost: f64,
+    zero_cost_tokens: i64,
+}
+
+impl SessionBucketRow {
+    fn split(&self) -> TokenSplit {
+        TokenSplit {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            reasoning: self.reasoning_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_write_tokens,
+        }
+    }
+}
+
+/// Allowance-provider rows for one scope, one bucket per (provider, model, day).
+#[derive(Debug, Clone, FromRow)]
+struct AllowanceBucketRow {
+    agent_name: String,
+    provider: Option<String>,
+    model: String,
+    day: String,
+    input_tokens: i64,
+    output_tokens: i64,
+    reasoning_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+}
+
+impl AllowanceBucketRow {
+    fn split(&self) -> TokenSplit {
+        TokenSplit {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            reasoning: self.reasoning_tokens,
+            cache_read: self.cache_read_tokens,
+            cache_write: self.cache_write_tokens,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct TokenSplit {
+    input: i64,
+    output: i64,
+    reasoning: i64,
+    cache_read: i64,
+    cache_write: i64,
+}
+
+impl TokenSplit {
+    fn total(&self) -> i64 {
+        self.input + self.output + self.reasoning + self.cache_read + self.cache_write
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AllowanceCharge {
+    usd: f64,
+    unrated_tokens: i64,
+}
+
+/// Billed/unpriced split for metered providers. Allowance providers never
+/// contribute here: their reported catalog cost is not billed.
+#[derive(Debug, Clone, Copy, Default)]
+struct BillingSplit {
     cost: f64,
     unpriced_tokens: i64,
-    total_tokens: i64,
-    first_day: String,
-    last_day: String,
-    models: Option<String>,
+}
+
+impl BillingSplit {
+    fn add(&mut self, billing: BillingMode, cost: f64, zero_cost_tokens: i64) {
+        if billing == BillingMode::Metered {
+            self.cost += cost;
+            self.unpriced_tokens += zero_cost_tokens;
+        }
+    }
+}
+
+fn totals_from_rows(
+    rows: &[ProviderTotalsRow],
+    billing: &UsageConfig,
+    session_count: i64,
+    allowance_usd: f64,
+    unrated_tokens: i64,
+) -> UsageTotals {
+    let mut split = BillingSplit::default();
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut reasoning_tokens = 0;
+    let mut cache_read_tokens = 0;
+    let mut cache_write_tokens = 0;
+    for row in rows {
+        let tokens = row.split();
+        split.add(
+            billing.billing_for(row.provider.as_deref()),
+            row.cost,
+            row.zero_cost_tokens,
+        );
+        input_tokens += tokens.input;
+        output_tokens += tokens.output;
+        reasoning_tokens += tokens.reasoning;
+        cache_read_tokens += tokens.cache_read;
+        cache_write_tokens += tokens.cache_write;
+    }
+    UsageTotals {
+        cost: round_cost(split.cost),
+        allowance_usd: round_cost(allowance_usd),
+        unpriced_tokens: split.unpriced_tokens,
+        unrated_tokens,
+        input_tokens,
+        output_tokens,
+        reasoning_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        total_tokens: input_tokens
+            + output_tokens
+            + reasoning_tokens
+            + cache_read_tokens
+            + cache_write_tokens,
+        session_count,
+    }
 }
 
 async fn agent_summary(
@@ -753,41 +1006,24 @@ async fn agent_summary(
     name: &str,
     window: &Window,
     threshold: f64,
+    billing: &UsageConfig,
     detailed: bool,
 ) -> AppResult<UsageSummary> {
     let name = name.trim().to_lowercase();
-    let totals: TotalsRow = sqlx::query_as(&format!(
-        "SELECT
+    let totals_rows: Vec<ProviderTotalsRow> = sqlx::query_as(&format!(
+        "SELECT u.provider,
             CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
             CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
             CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
             CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
             CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
             CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-            CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-            COUNT(DISTINCT u.session_id) AS session_count
+            CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
          FROM usage_sessions u
          WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
            AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3"
-    ))
-    .bind(&name)
-    .bind(&window.from)
-    .bind(&window.to)
-    .fetch_one(db)
-    .await?;
-
-    let models: Vec<ModelRow> = sqlx::query_as(&format!(
-        "SELECT u.model, u.provider,
-                CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
-         FROM usage_sessions u
-         WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
-           AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3
-         GROUP BY u.model, u.provider
-         ORDER BY cost DESC, total_tokens DESC"
+           AND u.day < date(?3, '+1 day')
+         GROUP BY u.provider"
     ))
     .bind(&name)
     .bind(&window.from)
@@ -795,11 +1031,65 @@ async fn agent_summary(
     .fetch_all(db)
     .await?;
 
-    let totals = totals.into_totals();
-    let models = model_shares(models, totals.cost, totals.total_tokens);
+    let session_count: i64 = sqlx::query_scalar(&format!(
+        "SELECT COUNT(DISTINCT u.session_id)
+           FROM usage_sessions u
+          WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
+            AND (?2 IS NULL OR u.day >= ?2)
+            AND u.day < date(?3, '+1 day')"
+    ))
+    .bind(&name)
+    .bind(&window.from)
+    .bind(&window.to)
+    .fetch_one(db)
+    .await?;
+
+    let model_rows: Vec<ModelRow> = sqlx::query_as(&format!(
+        "SELECT u.model, u.provider,
+                CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+                CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+                CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+                CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+                CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
+                CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
+                CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
+         FROM usage_sessions u
+         WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
+           AND (?2 IS NULL OR u.day >= ?2)
+           AND u.day < date(?3, '+1 day')
+         GROUP BY u.model, u.provider"
+    ))
+    .bind(&name)
+    .bind(&window.from)
+    .bind(&window.to)
+    .fetch_all(db)
+    .await?;
+
+    let now = Utc::now();
+    let month_from = bucket_start(now - chrono::Duration::days(30));
+    let allowance_rows =
+        allowance_buckets(db, UsageScope::Agent(&name), billing, &month_from).await?;
+    let rollup = rollup_allowance(allowance_rows, billing, window, now, &month_from);
+
+    let totals = totals_from_rows(
+        &totals_rows,
+        billing,
+        session_count,
+        rollup.range_usd,
+        rollup.range_unrated,
+    );
+    let basis = share_basis(totals.cost, totals.allowance_usd);
+    let models = model_shares(
+        model_rows,
+        &rollup,
+        billing,
+        basis,
+        totals.cost + totals.allowance_usd,
+        totals.total_tokens,
+    );
 
     let sessions = if detailed {
-        session_rows(db, Some(&name), None, window).await?
+        session_rows(db, Some(&name), None, window, billing).await?
     } else {
         Vec::new()
     };
@@ -813,8 +1103,11 @@ async fn agent_summary(
         over_threshold: threshold > 0.0 && totals.cost > threshold,
         spend_warn_usd: threshold,
         totals,
+        share_basis: basis,
         models,
         sessions,
+        allowances: rollup.allowances,
+        over_allowance: rollup.over_allowance,
         agents: Vec::new(),
     })
 }
@@ -824,6 +1117,7 @@ async fn issue_summary(
     key: &str,
     window: &Window,
     threshold: f64,
+    billing: &UsageConfig,
 ) -> AppResult<UsageSummary> {
     let exists: Option<i64> = sqlx::query_scalar("SELECT id FROM issues WHERE key = ?1")
         .bind(key)
@@ -833,42 +1127,60 @@ async fn issue_summary(
         return Err(AppError::NotFound);
     }
 
-    let totals: TotalsRow = sqlx::query_as(&format!(
-        "SELECT
+    let totals_rows: Vec<ProviderTotalsRow> = sqlx::query_as(&format!(
+        "SELECT u.provider,
             CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
             CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
             CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
             CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
             CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
             CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-            CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-            COUNT(DISTINCT u.session_id) AS session_count
+            CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
          WHERE i.key = ?1
            AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3"
+           AND u.day < date(?3, '+1 day')
+         GROUP BY u.provider"
     ))
+    .bind(key)
+    .bind(&window.from)
+    .bind(&window.to)
+    .fetch_all(db)
+    .await?;
+
+    let session_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT u.session_id)
+           FROM usage_sessions u
+           JOIN usage_issue_links c ON c.session_id = u.session_id
+           JOIN issues i ON i.id = c.issue_id
+          WHERE i.key = ?1
+            AND (?2 IS NULL OR u.day >= ?2)
+            AND u.day < date(?3, '+1 day')",
+    )
     .bind(key)
     .bind(&window.from)
     .bind(&window.to)
     .fetch_one(db)
     .await?;
 
-    let models: Vec<ModelRow> = sqlx::query_as(&format!(
+    let model_rows: Vec<ModelRow> = sqlx::query_as(&format!(
         "SELECT u.model, u.provider,
+                CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+                CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+                CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+                CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+                CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
+                CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
          WHERE i.key = ?1
            AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3
-         GROUP BY u.model, u.provider
-         ORDER BY cost DESC, total_tokens DESC"
+           AND u.day < date(?3, '+1 day')
+         GROUP BY u.model, u.provider"
     ))
     .bind(key)
     .bind(&window.from)
@@ -876,19 +1188,22 @@ async fn issue_summary(
     .fetch_all(db)
     .await?;
 
-    let agents: Vec<AgentRow> = sqlx::query_as(&format!(
-        "SELECT {RESOLVED_AGENT_SQL} AS agent_name,
+    let agent_rows: Vec<AgentRow> = sqlx::query_as(&format!(
+        "SELECT {RESOLVED_AGENT_SQL} AS agent_name, u.provider,
+                CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+                CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+                CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+                CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+                CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens
+                CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
          FROM usage_sessions u
          JOIN usage_issue_links c ON c.session_id = u.session_id
          JOIN issues i ON i.id = c.issue_id
          WHERE i.key = ?1
            AND (?2 IS NULL OR u.day >= ?2)
-           AND u.day <= ?3
-         GROUP BY {RESOLVED_AGENT_SQL}
-         ORDER BY cost DESC, total_tokens DESC"
+           AND u.day < date(?3, '+1 day')
+         GROUP BY {RESOLVED_AGENT_SQL}, u.provider"
     ))
     .bind(key)
     .bind(&window.from)
@@ -896,22 +1211,38 @@ async fn issue_summary(
     .fetch_all(db)
     .await?;
 
-    let totals = totals.into_totals();
-    let models = model_shares(models, totals.cost, totals.total_tokens);
-    let agents = agents
-        .into_iter()
-        .map(|row| {
-            let share = share(row.cost, row.total_tokens, totals.cost, totals.total_tokens);
-            AgentShare {
-                agent_name: row.agent_name,
-                cost: round_cost(row.cost),
-                unpriced_tokens: row.unpriced_tokens,
-                total_tokens: row.total_tokens,
-                share,
-            }
-        })
-        .collect();
-    let sessions = session_rows(db, None, Some(key), window).await?;
+    let now = Utc::now();
+    let month_from = bucket_start(now - chrono::Duration::days(30));
+    let allowance_rows =
+        allowance_buckets(db, UsageScope::Issue(key), billing, &month_from).await?;
+    let rollup = rollup_allowance(allowance_rows, billing, window, now, &month_from);
+
+    let totals = totals_from_rows(
+        &totals_rows,
+        billing,
+        session_count,
+        rollup.range_usd,
+        rollup.range_unrated,
+    );
+    let basis = share_basis(totals.cost, totals.allowance_usd);
+    let total_dollars = totals.cost + totals.allowance_usd;
+    let models = model_shares(
+        model_rows,
+        &rollup,
+        billing,
+        basis,
+        total_dollars,
+        totals.total_tokens,
+    );
+    let agents = agent_shares(
+        agent_rows,
+        &rollup,
+        billing,
+        basis,
+        total_dollars,
+        totals.total_tokens,
+    );
+    let sessions = session_rows(db, None, Some(key), window, billing).await?;
 
     Ok(UsageSummary {
         subject: key.to_string(),
@@ -922,10 +1253,358 @@ async fn issue_summary(
         over_threshold: threshold > 0.0 && totals.cost > threshold,
         spend_warn_usd: threshold,
         totals,
+        share_basis: basis,
         models,
         sessions,
+        allowances: rollup.allowances,
+        over_allowance: rollup.over_allowance,
         agents,
     })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UsageScope<'a> {
+    Agent(&'a str),
+    Issue(&'a str),
+}
+
+/// Providers configured with allowance billing, lowercased for a SQL `IN`.
+fn allowance_provider_keys(billing: &UsageConfig) -> Vec<String> {
+    let mut keys: Vec<String> = billing
+        .providers
+        .iter()
+        .filter(|(_, cfg)| cfg.mode == BillingMode::Allowance)
+        .map(|(key, _)| key.trim().to_ascii_lowercase())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+/// Allowance-provider buckets since the start of the rolling monthly cycle.
+/// Billing is computed in Rust so a config change re-interprets history with no
+/// re-import.
+async fn allowance_buckets(
+    db: &sqlx::SqlitePool,
+    scope: UsageScope<'_>,
+    billing: &UsageConfig,
+    month_from: &str,
+) -> AppResult<Vec<AllowanceBucketRow>> {
+    let providers = allowance_provider_keys(billing);
+    if providers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list = (3..3 + providers.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sums = "CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+            CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+            CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+            CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+            CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens";
+    let (sql, subject) = match scope {
+        UsageScope::Agent(name) => (
+            format!(
+                "SELECT {RESOLVED_AGENT_SQL} AS agent_name, u.provider, u.model, u.day, {sums}
+                   FROM usage_sessions u
+                  WHERE lower({RESOLVED_AGENT_SQL}) = lower(?1)
+                    AND u.day >= ?2
+                    AND lower(u.provider) IN ({list})
+                  GROUP BY {RESOLVED_AGENT_SQL}, u.provider, u.model, u.day"
+            ),
+            name.to_string(),
+        ),
+        UsageScope::Issue(key) => (
+            format!(
+                "SELECT {RESOLVED_AGENT_SQL} AS agent_name, u.provider, u.model, u.day, {sums}
+                   FROM usage_sessions u
+                   JOIN usage_issue_links c ON c.session_id = u.session_id
+                   JOIN issues i ON i.id = c.issue_id
+                  WHERE i.key = ?1
+                    AND u.day >= ?2
+                    AND lower(u.provider) IN ({list})
+                  GROUP BY {RESOLVED_AGENT_SQL}, u.provider, u.model, u.day"
+            ),
+            key.to_string(),
+        ),
+    };
+    let mut query = sqlx::query_as::<_, AllowanceBucketRow>(&sql)
+        .bind(subject)
+        .bind(month_from);
+    for provider in &providers {
+        query = query.bind(provider);
+    }
+    Ok(query.fetch_all(db).await?)
+}
+
+#[derive(Debug, Clone, Default)]
+struct AllowanceModelAcc {
+    provider: String,
+    model: String,
+    range_usd: f64,
+    range_unrated: i64,
+    range_tokens: i64,
+    five_usd: f64,
+    week_usd: f64,
+    month_usd: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AgentAllowanceAcc {
+    usd: f64,
+    unrated_tokens: i64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AllowanceRollup {
+    range_usd: f64,
+    range_unrated: i64,
+    by_model: HashMap<(String, String), AllowanceModelAcc>,
+    by_agent: HashMap<String, AgentAllowanceAcc>,
+    allowances: Vec<ModelAllowance>,
+    over_allowance: bool,
+}
+
+fn rollup_allowance(
+    rows: Vec<AllowanceBucketRow>,
+    billing: &UsageConfig,
+    window: &Window,
+    now: chrono::DateTime<Utc>,
+    month_from: &str,
+) -> AllowanceRollup {
+    let week_from = bucket_start(now - chrono::Duration::days(7));
+    let five_from = bucket_start(now - chrono::Duration::hours(5));
+    let now_bucket = bucket_start(now);
+    let to_exclusive = next_day(&window.to);
+
+    let mut by_model: HashMap<(String, String), AllowanceModelAcc> = HashMap::new();
+    let mut by_agent: HashMap<String, AgentAllowanceAcc> = HashMap::new();
+    let mut order: Vec<(String, String)> = Vec::new();
+
+    for row in rows {
+        let Some(cfg) = billing.provider_for(row.provider.as_deref()) else {
+            continue;
+        };
+        if cfg.mode != BillingMode::Allowance {
+            continue;
+        }
+        let provider = row.provider.clone().unwrap_or_default();
+        let key = (provider.to_ascii_lowercase(), row.model.clone());
+        if !by_model.contains_key(&key) {
+            order.push(key.clone());
+        }
+        let tokens = row.split();
+        let charge = allowance_charge(cfg, &row.model, &row.day, tokens);
+        let in_range = bucket_in_range(&row.day, window.from.as_deref(), &to_exclusive);
+
+        let acc = by_model.entry(key).or_insert_with(|| AllowanceModelAcc {
+            provider,
+            model: row.model.clone(),
+            ..AllowanceModelAcc::default()
+        });
+        acc.range_tokens += tokens.total();
+        if in_range {
+            acc.range_usd += charge.usd;
+            acc.range_unrated += charge.unrated_tokens;
+        }
+        if row.day >= five_from {
+            acc.five_usd += charge.usd;
+        }
+        if row.day >= week_from {
+            acc.week_usd += charge.usd;
+        }
+        acc.month_usd += charge.usd;
+
+        if in_range {
+            let agent = by_agent.entry(row.agent_name.clone()).or_default();
+            agent.usd += charge.usd;
+            agent.unrated_tokens += charge.unrated_tokens;
+        }
+    }
+
+    let mut allowances = Vec::with_capacity(order.len());
+    let mut over_allowance = false;
+    for key in &order {
+        let acc = &by_model[key];
+        let cfg = billing.provider_for(Some(&acc.provider));
+        let allowance = cfg
+            .and_then(|c| c.model_for(&acc.model))
+            .map(|m| m.allowance_usd)
+            .unwrap_or(0.0);
+        let plan_price = cfg.map(|c| c.plan_price_usd).unwrap_or(0.0);
+        // Leverage of the allowance over the plan price, not a price multiplier.
+        let multiplier = if plan_price > 0.0 {
+            (allowance / plan_price * 100.0).round() / 100.0
+        } else {
+            0.0
+        };
+        let windows = vec![
+            allowance_window("5h", acc.five_usd, allowance, 0.20, &five_from, &now_bucket),
+            allowance_window(
+                "weekly",
+                acc.week_usd,
+                allowance,
+                0.50,
+                &week_from,
+                &now_bucket,
+            ),
+            allowance_window(
+                "monthly",
+                acc.month_usd,
+                allowance,
+                1.0,
+                month_from,
+                &now_bucket,
+            ),
+        ];
+        over_allowance |= windows.iter().any(|w| w.over_limit);
+        allowances.push(ModelAllowance {
+            provider: acc.provider.clone(),
+            model: acc.model.clone(),
+            allowance_usd: round_cost(allowance),
+            plan_price_usd: round_cost(plan_price),
+            multiplier,
+            used_usd: round_cost(acc.range_usd),
+            unrated_tokens: acc.range_unrated,
+            windows,
+        });
+    }
+    allowances.sort_by(|a, b| {
+        b.used_usd
+            .partial_cmp(&a.used_usd)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.model.cmp(&b.model))
+    });
+
+    let range_usd = by_model.values().map(|acc| acc.range_usd).sum();
+    let range_unrated = by_model.values().map(|acc| acc.range_unrated).sum();
+    AllowanceRollup {
+        range_usd: round_cost(range_usd),
+        range_unrated,
+        by_model,
+        by_agent,
+        allowances,
+        over_allowance,
+    }
+}
+
+fn allowance_window(
+    label: &str,
+    used: f64,
+    allowance: f64,
+    fraction: f64,
+    from: &str,
+    to: &str,
+) -> AllowanceWindow {
+    let limit = allowance * fraction;
+    AllowanceWindow {
+        label: label.to_string(),
+        used_usd: round_cost(used),
+        limit_usd: round_cost(limit),
+        over_limit: limit > 0.0 && used > limit,
+        from: from.to_string(),
+        to: to.to_string(),
+    }
+}
+
+/// Cost of one bucket at that provider's rates. A model with no allowance entry
+/// cannot be priced; its tokens are reported as unrated rather than guessed.
+fn allowance_charge(
+    provider: &ProviderBillingConfig,
+    model: &str,
+    bucket: &str,
+    tokens: TokenSplit,
+) -> AllowanceCharge {
+    let Some(model_cfg) = provider.model_for(model) else {
+        return AllowanceCharge {
+            usd: 0.0,
+            unrated_tokens: tokens.total(),
+        };
+    };
+    let rates = effective_rates(provider, &model_cfg.rates, bucket);
+    let usd = (tokens.input as f64 * rates.input
+        + (tokens.output + tokens.reasoning) as f64 * rates.output
+        + tokens.cache_read as f64 * rates.cache_read
+        + tokens.cache_write as f64 * rates.cache_write)
+        / 1_000_000.0;
+    AllowanceCharge {
+        usd,
+        unrated_tokens: 0,
+    }
+}
+
+/// Peak rates unless the bucket falls inside the provider's off-peak window and
+/// that provider has an off-peak table. Buckets without a time of day (rows
+/// imported before 30-minute buckets existed) are charged at peak rates, the
+/// conservative choice.
+fn effective_rates<'a>(
+    provider: &ProviderBillingConfig,
+    peak: &'a TokenRates,
+    bucket: &str,
+) -> &'a TokenRates {
+    let Some(at) = bucket_minutes(bucket) else {
+        return peak;
+    };
+    let (Some(start), Some(end)) = (
+        parse_hhmm(provider.off_peak_start_utc.as_deref()),
+        parse_hhmm(provider.off_peak_end_utc.as_deref()),
+    ) else {
+        return peak;
+    };
+    if in_window(at, start, end) {
+        peak.off_peak.as_deref().unwrap_or(peak)
+    } else {
+        peak
+    }
+}
+
+fn bucket_minutes(bucket: &str) -> Option<u32> {
+    let (_, time) = bucket.split_once('T')?;
+    let (hour, minute) = time.split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.get(..2)?.parse().ok()?;
+    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+}
+
+fn parse_hhmm(value: Option<&str>) -> Option<u32> {
+    let (hour, minute) = value?.trim().split_once(':')?;
+    let hour: u32 = hour.parse().ok()?;
+    let minute: u32 = minute.parse().ok()?;
+    (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+}
+
+fn in_window(at: u32, start: u32, end: u32) -> bool {
+    if start <= end {
+        at >= start && at < end
+    } else {
+        at >= start || at < end
+    }
+}
+
+/// 30-minute UTC bucket, matching how the importer stores `usage_sessions.day`.
+fn bucket_start(at: chrono::DateTime<Utc>) -> String {
+    let minute = if at.minute() < 30 { 0 } else { 30 };
+    format!(
+        "{}T{:02}:{:02}",
+        at.date_naive().format("%Y-%m-%d"),
+        at.hour(),
+        minute
+    )
+}
+
+fn next_day(day: &str) -> String {
+    NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map(|d| {
+            (d + chrono::Duration::days(1))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .unwrap_or_else(|_| day.to_string())
+}
+
+fn bucket_in_range(bucket: &str, from: Option<&str>, to_exclusive: &str) -> bool {
+    from.map_or(true, |from| bucket >= from) && bucket < to_exclusive
 }
 
 async fn session_rows(
@@ -933,16 +1612,21 @@ async fn session_rows(
     agent: Option<&str>,
     issue_key: Option<&str>,
     window: &Window,
+    billing: &UsageConfig,
 ) -> AppResult<Vec<SessionUsage>> {
-    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+    let rows: Vec<SessionBucketRow> = sqlx::query_as(&format!(
         "SELECT u.session_id,
                 MIN({RESOLVED_AGENT_SQL}) AS agent_name,
+                u.provider,
+                u.model,
+                u.day,
+                CAST(COALESCE(SUM(u.input_tokens), 0) AS INTEGER) AS input_tokens,
+                CAST(COALESCE(SUM(u.output_tokens), 0) AS INTEGER) AS output_tokens,
+                CAST(COALESCE(SUM(u.reasoning_tokens), 0) AS INTEGER) AS reasoning_tokens,
+                CAST(COALESCE(SUM(u.cache_read_tokens), 0) AS INTEGER) AS cache_read_tokens,
+                CAST(COALESCE(SUM(u.cache_write_tokens), 0) AS INTEGER) AS cache_write_tokens,
                 CAST(COALESCE(SUM(u.cost), 0.0) AS REAL) AS cost,
-                CAST(COALESCE(SUM({UNPRICED_TOKENS_SQL}), 0) AS INTEGER) AS unpriced_tokens,
-                CAST(COALESCE(SUM({TOTAL_TOKENS_SQL}), 0) AS INTEGER) AS total_tokens,
-                MIN(u.day) AS first_day,
-                MAX(u.day) AS last_day,
-                GROUP_CONCAT(DISTINCT u.model) AS models
+                CAST(COALESCE(SUM({ZERO_COST_TOKENS_SQL}), 0) AS INTEGER) AS zero_cost_tokens
          FROM usage_sessions u
          WHERE (?1 IS NULL OR lower({RESOLVED_AGENT_SQL}) = lower(?1))
            AND (?2 IS NULL OR u.session_id IN (
@@ -950,10 +1634,8 @@ async fn session_rows(
                 JOIN issues i ON i.id = l.issue_id
                 WHERE i.key = ?2))
            AND (?3 IS NULL OR u.day >= ?3)
-           AND u.day <= ?4
-         GROUP BY u.session_id
-         ORDER BY MAX(u.day) DESC, total_tokens DESC
-         LIMIT 50"
+           AND u.day < date(?4, '+1 day')
+         GROUP BY u.session_id, u.provider, u.model, u.day"
     ))
     .bind(agent)
     .bind(issue_key)
@@ -961,50 +1643,292 @@ async fn session_rows(
     .bind(&window.to)
     .fetch_all(db)
     .await?;
-    Ok(rows
+
+    let mut order: Vec<String> = Vec::new();
+    let mut merged: HashMap<String, SessionAcc> = HashMap::new();
+    for row in rows {
+        if !merged.contains_key(&row.session_id) {
+            order.push(row.session_id.clone());
+        }
+        let acc = merged
+            .entry(row.session_id.clone())
+            .or_insert_with(|| SessionAcc {
+                session_id: row.session_id.clone(),
+                ..SessionAcc::default()
+            });
+        acc.add(&row, billing);
+    }
+    let mut out: Vec<SessionUsage> = order
         .into_iter()
-        .map(|row| SessionUsage {
-            session_id: row.session_id,
-            agent_name: row.agent_name,
-            cost: round_cost(row.cost),
-            unpriced_tokens: row.unpriced_tokens,
-            total_tokens: row.total_tokens,
-            first_day: row.first_day,
-            last_day: row.last_day,
-            models: row
-                .models
-                .unwrap_or_default()
-                .split(',')
-                .filter(|m| !m.is_empty())
-                .map(str::to_string)
-                .collect(),
+        .filter_map(|session_id| merged.remove(&session_id))
+        .map(|acc| SessionUsage {
+            session_id: acc.session_id,
+            agent_name: acc.agent_name,
+            cost: round_cost(acc.cost),
+            allowance_usd: round_cost(acc.allowance_usd),
+            unpriced_tokens: acc.unpriced_tokens,
+            unrated_tokens: acc.unrated_tokens,
+            total_tokens: acc.total_tokens,
+            first_day: acc.first_day,
+            last_day: acc.last_day,
+            models: acc.models.into_iter().collect(),
         })
-        .collect())
+        .collect();
+    out.sort_by(|a, b| {
+        b.last_day
+            .cmp(&a.last_day)
+            .then(b.total_tokens.cmp(&a.total_tokens))
+            .then(a.session_id.cmp(&b.session_id))
+    });
+    out.truncate(50);
+    Ok(out)
 }
 
-fn model_shares(rows: Vec<ModelRow>, total_cost: f64, total_tokens: i64) -> Vec<ModelShare> {
-    rows.into_iter()
-        .map(|row| {
-            let share = share(row.cost, row.total_tokens, total_cost, total_tokens);
+#[derive(Debug, Default)]
+struct SessionAcc {
+    session_id: String,
+    agent_name: Option<String>,
+    cost: f64,
+    allowance_usd: f64,
+    unpriced_tokens: i64,
+    unrated_tokens: i64,
+    total_tokens: i64,
+    first_day: String,
+    last_day: String,
+    models: std::collections::BTreeSet<String>,
+}
+
+impl SessionAcc {
+    fn add(&mut self, row: &SessionBucketRow, billing: &UsageConfig) {
+        if self.agent_name.is_none() {
+            self.agent_name.clone_from(&row.agent_name);
+        }
+        let day = row.day.get(..10).unwrap_or(&row.day);
+        if self.first_day.is_empty() || day < self.first_day.as_str() {
+            self.first_day = day.to_string();
+        }
+        if day > self.last_day.as_str() {
+            self.last_day = day.to_string();
+        }
+        let tokens = row.split();
+        match billing.billing_for(row.provider.as_deref()) {
+            BillingMode::Metered => {
+                self.cost += row.cost;
+                self.unpriced_tokens += row.zero_cost_tokens;
+            }
+            BillingMode::Allowance => match billing.provider_for(row.provider.as_deref()) {
+                Some(cfg) => {
+                    let charge = allowance_charge(cfg, &row.model, &row.day, tokens);
+                    self.allowance_usd += charge.usd;
+                    self.unrated_tokens += charge.unrated_tokens;
+                }
+                None => self.unrated_tokens += tokens.total(),
+            },
+        }
+        self.total_tokens += tokens.total();
+        self.models.insert(row.model.clone());
+    }
+}
+
+fn model_shares(
+    rows: Vec<ModelRow>,
+    allowance: &AllowanceRollup,
+    billing: &UsageConfig,
+    basis: ShareBasis,
+    total_dollars: f64,
+    total_tokens: i64,
+) -> Vec<ModelShare> {
+    let mut order: Vec<(String, String)> = Vec::new();
+    let mut merged: HashMap<(String, String), ModelShare> = HashMap::new();
+
+    for row in rows {
+        let mode = billing.billing_for(row.provider.as_deref());
+        let tokens = row.split().total();
+        let (cost, unpriced_tokens) = if mode == BillingMode::Metered {
+            (row.cost, row.zero_cost_tokens)
+        } else {
+            (0.0, 0)
+        };
+        let key = (
+            row.provider
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase(),
+            row.model.clone(),
+        );
+        if !merged.contains_key(&key) {
+            order.push(key.clone());
+        }
+        merged.insert(
+            key,
             ModelShare {
                 model: row.model,
                 provider: row.provider,
-                cost: round_cost(row.cost),
-                unpriced_tokens: row.unpriced_tokens,
-                total_tokens: row.total_tokens,
-                share,
-            }
+                billing: mode,
+                cost: round_cost(cost),
+                allowance_usd: 0.0,
+                unpriced_tokens,
+                unrated_tokens: 0,
+                total_tokens: tokens,
+                share: 0.0,
+            },
+        );
+    }
+
+    for (key, acc) in &allowance.by_model {
+        if let Some(share) = merged.get_mut(key) {
+            share.billing = BillingMode::Allowance;
+            share.allowance_usd = round_cost(acc.range_usd);
+            share.unrated_tokens = acc.range_unrated;
+            share.total_tokens = acc.range_tokens;
+            continue;
+        }
+        order.push(key.clone());
+        merged.insert(
+            key.clone(),
+            ModelShare {
+                model: acc.model.clone(),
+                provider: Some(acc.provider.clone()),
+                billing: BillingMode::Allowance,
+                cost: 0.0,
+                allowance_usd: round_cost(acc.range_usd),
+                unpriced_tokens: 0,
+                unrated_tokens: acc.range_unrated,
+                total_tokens: acc.range_tokens,
+                share: 0.0,
+            },
+        );
+    }
+
+    let mut out: Vec<ModelShare> = order
+        .into_iter()
+        .filter_map(|key| merged.remove(&key))
+        .map(|mut row| {
+            row.share = share(
+                row.cost + row.allowance_usd,
+                row.total_tokens,
+                basis,
+                total_dollars,
+                total_tokens,
+            );
+            row
         })
-        .collect()
+        .collect();
+    out.sort_by(|a, b| {
+        b.share
+            .partial_cmp(&a.share)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.total_tokens.cmp(&a.total_tokens))
+            .then(a.model.cmp(&b.model))
+    });
+    out
 }
 
-fn share(cost: f64, tokens: i64, total_cost: f64, total_tokens: i64) -> f64 {
-    let value = if total_cost > 0.0 {
-        cost / total_cost
-    } else if total_tokens > 0 {
-        tokens as f64 / total_tokens as f64
-    } else {
-        0.0
+fn agent_shares(
+    rows: Vec<AgentRow>,
+    allowance: &AllowanceRollup,
+    billing: &UsageConfig,
+    basis: ShareBasis,
+    total_dollars: f64,
+    total_tokens: i64,
+) -> Vec<AgentShare> {
+    let mut order: Vec<String> = Vec::new();
+    struct Acc {
+        cost: f64,
+        allowance_usd: f64,
+        unpriced_tokens: i64,
+        unrated_tokens: i64,
+        total_tokens: i64,
+    }
+    let mut merged: HashMap<String, Acc> = HashMap::new();
+    for row in rows {
+        let agent_name = row.agent_name.clone();
+        let tokens = row.split().total();
+        if !merged.contains_key(&agent_name) {
+            order.push(agent_name.clone());
+        }
+        let acc = merged.entry(agent_name).or_insert(Acc {
+            cost: 0.0,
+            allowance_usd: 0.0,
+            unpriced_tokens: 0,
+            unrated_tokens: 0,
+            total_tokens: 0,
+        });
+        if billing.billing_for(row.provider.as_deref()) == BillingMode::Metered {
+            acc.cost += row.cost;
+            acc.unpriced_tokens += row.zero_cost_tokens;
+        }
+        acc.total_tokens += tokens;
+    }
+    for (agent_name, allowance_acc) in &allowance.by_agent {
+        if !merged.contains_key(agent_name) {
+            order.push(agent_name.clone());
+        }
+        let acc = merged.entry(agent_name.clone()).or_insert(Acc {
+            cost: 0.0,
+            allowance_usd: 0.0,
+            unpriced_tokens: 0,
+            unrated_tokens: 0,
+            total_tokens: 0,
+        });
+        acc.allowance_usd += allowance_acc.usd;
+        acc.unrated_tokens += allowance_acc.unrated_tokens;
+    }
+    let mut out: Vec<AgentShare> = order
+        .into_iter()
+        .filter_map(|agent_name| {
+            merged.remove(&agent_name).map(|acc| AgentShare {
+                agent_name,
+                cost: round_cost(acc.cost),
+                allowance_usd: round_cost(acc.allowance_usd),
+                unpriced_tokens: acc.unpriced_tokens,
+                unrated_tokens: acc.unrated_tokens,
+                total_tokens: acc.total_tokens,
+                share: share(
+                    acc.cost + acc.allowance_usd,
+                    acc.total_tokens,
+                    basis,
+                    total_dollars,
+                    total_tokens,
+                ),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.share
+            .partial_cmp(&a.share)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(b.total_tokens.cmp(&a.total_tokens))
+            .then(a.agent_name.cmp(&b.agent_name))
+    });
+    out
+}
+
+/// Cost share is only meaningful while every dollar in the subject is metered
+/// reported cost. Allowance consumption is a different dollar basis, so a mix
+/// is labelled explicitly rather than pretending the two are the same number.
+fn share_basis(total_cost: f64, total_allowance: f64) -> ShareBasis {
+    match (total_cost > 0.0, total_allowance > 0.0) {
+        (true, true) => ShareBasis::Dollars,
+        (false, true) => ShareBasis::Allowance,
+        (true, false) => ShareBasis::Cost,
+        (false, false) => ShareBasis::Tokens,
+    }
+}
+
+fn share(
+    dollars: f64,
+    tokens: i64,
+    basis: ShareBasis,
+    total_dollars: f64,
+    total_tokens: i64,
+) -> f64 {
+    let value = match basis {
+        ShareBasis::Cost | ShareBasis::Allowance | ShareBasis::Dollars if total_dollars > 0.0 => {
+            dollars / total_dollars
+        }
+        _ if total_tokens > 0 => tokens as f64 / total_tokens as f64,
+        _ => 0.0,
     };
     (value * 10_000.0).round() / 10_000.0
 }
