@@ -578,10 +578,14 @@ MCP tools: `list_artifacts` and `attach_artifact` (base64).
 Every agent-produced commit can be tied back to the issue, the agent, the
 session and the model that produced it. After committing, an agent calls the MCP
 tool `record_commit` with the repository (`owner/name`), the full commit SHA and
-the issue key. The server resolves the agent and session from the caller (or
-from this issue's claim), records the orchestrator from the agent's parent
-session, and resolves the model from `usage_sessions` rows keyed by that exact
-session id.
+the issue key. The server records the agent and session of that exact call.
+The caller's session id comes from the MCP request metadata, so one MCP process
+can serve several OpenCode conversations without sharing an identity. When a
+client cannot supply a per-call id, the MCP omits it and the server resolves
+the session from the agent's registered name; it never borrows a stale session
+left on the name by an earlier process. The orchestrator comes from the agent's
+parent session, and the model is resolved from `usage_sessions` rows keyed by
+that exact session id.
 
 The model is never inferred from whichever agent was last active.
 `model_source` is explicit:

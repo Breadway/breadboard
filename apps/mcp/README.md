@@ -14,6 +14,18 @@ Auth: it reads `~/.config/breadboard/cli.toml` (`server`, `token`), the same
 file `breadboard auth login` writes, or `BREADBOARD_SERVER` / `BREADBOARD_TOKEN`
 env vars. Without a token, only unauthenticated calls work.
 
+## Identity
+
+One local MCP server can serve several OpenCode sessions, so identity belongs
+to the conversation, not the process. OpenCode sends the caller's session id
+with every tool request as `_meta["ai.opencode/sessionID"]`; that id drives
+registration, claims, chat and `record_commit`. A client that cannot supply
+one omits the session id and the server resolves the session from the agent
+name. `BREADBOARD_SESSION_ID` is still honoured for a dedicated client that
+owns a whole process. `OPENCODE_SESSION_ID` is not read: OpenCode sets it for
+shell commands, and a value captured at spawn time is stale for any other
+session the process serves.
+
 ## Register with Claude Code
 
 ```sh
@@ -46,7 +58,7 @@ or in `.mcp.json`:
 | `get_epic` `create_epic` `update_epic` `delete_epic` | read and manage epics by key or id; `get_epic` includes child issues, progress, and counts; deleting an epic keeps and unlinks its child issues |
 | `create_project` `update_project` `create_cycle` `update_cycle_projects` `start_cycle` `end_cycle` `add_repo` `remove_repo` `reconcile` | admin (cycle creation accepts project ids for new-issue defaults; `update_cycle_projects` replaces them without moving existing issues) |
 | `suggest_agent_names` | fun, memorable names to pick from (names are characters, not hosts) |
-| `name_agent` | name this MCP process before claiming: sets the name later calls use, registers the profile in the Agents view, and starts chat polling |
+| `name_agent` | name this conversation before claiming: sets the name later calls use, registers the profile in the Agents view, and starts chat polling. Another OpenCode session sharing the MCP process keeps its own name |
 | `resume_claims` | after a restart, heartbeat every claim you own under this agent name, re-arm keepalives, and return each issue's latest handoff note as context |
 | `set_agent_message` | set or clear the one-line message shown under your name in the Agents view |
 | `chat_rooms` `chat_read` `chat_send` `chat_create_room` | the global lobby, custom rooms and agent DMs; `chat_rooms` shows unread counts, read with `room` or `with`, post with `room` or `to` |
@@ -57,7 +69,7 @@ or in `.mcp.json`:
 | `list_agents` `agent_status` | live claims + the `bb-status`-style server roll-up (`BB x/y done, …`) |
 | `import_markdown` | outline → epics + issues; set `repair: true` to retry existing unlinked cards and `dry_run: true` to list the local keys that would be created remotely. Normal import mirrors only newly created local cards. |
 | `inbox` `mark_notification_read` `mark_all_notifications_read` `get_notification_prefs` `set_notification_prefs` | notifications |
-| `record_commit` | after committing, record the repo, full SHA, issue and (when this session used more than one model) the model. Pass `workdir` to fill `tree_sha` and `patch_id` from git so a rebase or squash can be matched later. The server records your agent and session and resolves the model for that exact session; it never guesses from the last active agent |
+| `record_commit` | after committing, record the repo, full SHA, issue and (when this session used more than one model) the model. Pass `workdir` to fill `tree_sha` and `patch_id` from git so a rebase or squash can be matched later. The server records your agent and session and resolves the model for that exact session; it never guesses from the last active agent. Each MCP call carries the calling OpenCode conversation's session id in `_meta`, so a shared process attributes a commit to the right session |
 
 `update_issue`'s `add_links`/`remove_links` take `{ kind, target }` pairs
 (`kind` one of `blocks`/`blocked-by`/`relates-to`, `target` an issue key or
