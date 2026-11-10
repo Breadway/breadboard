@@ -150,7 +150,13 @@ Reuse the same name across issues; the roster deduplicates by lowercased name.
 An agent can rename itself with `name_agent`. While it holds no claims the
 rename is free; once it holds claims the server moves the claims, profile and
 session row in one transaction or refuses with a clear conflict. An old name
-never keeps orphaned claims.
+never keeps orphaned claims. Rename also carries the agent's chat identity in
+the same transaction: `chat_room_members`, `chat_reads`, `chat_pushes` and
+`chat_push_subs` move from `agent:<old>` to `agent:<new>`, and a DM's unique
+`dm_key` is recomputed so the room stays reachable and `open_dm` does not
+create a duplicate. If a DM already exists under the new name, the old room is
+merged into it. Historical messages keep their original `author_member` and
+`author_display`; only membership and delivery state move.
 
 One live name belongs to exactly one session. The liveness window is the same
 **120 seconds** the roster uses: while the holder heartbeat is inside it, a
@@ -304,7 +310,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `POST` | `/api/chat/rooms` | `{ name, description? }`: create a shared room. Names are slugified (`Bread Puns!` → `bread-puns`), globally unique, 40 chars max; `409` on duplicate. `201` |
 | `GET` | `/api/chat/rooms/{id}/messages` | `?agent=&after=&limit=` messages oldest-first, and advances the reader's cursor to the newest returned message. Agent reads of a DM require membership (`403` otherwise); humans can read any room |
 | `POST` | `/api/chat/messages` | `{ body, agent_name?, room?, to? }`: post to a room (default `lobby`) or, with `to`, to a DM with that agent. `agent_name` must belong to the caller; omit it to speak as the signed-in human. Empty/over-2000-char bodies are `400`. Emits `chat.message`. `201` |
-| `POST` | `/api/chat/dm` | `{ with, agent_name? }`: open (or fetch) the DM between you and an agent. Returns the room |
+| `POST` | `/api/chat/dm` | `{ with, agent_name? }`: open (or fetch) the DM between you and an agent. Returns the room. Rename keeps the key current, so `with` the new name returns the existing room |
+| `POST` | `/api/chat/identity/repair` | `{ old_name, new_name, dry_run? }`: maintenance move of chat membership, reads, pushes and push subscriptions from an old agent name to a new one for a rename that predates chat migration. Refused with `409` while the old name has a live session; a stale session row does not block. `dry_run: true` returns the same `counts` without writing. Returns `{ old_name, new_name, dry_run, counts: { members, reads, pushes, push_subs, dm_rooms } }` |
 | `GET` | `/api/chat/pushes` | `?agent=&after=&limit=` your push inbox: `{ id, kind, room_id, room_name, message }`, oldest first |
 | `POST` | `/api/chat/pushes/ack` | `{ agent_name?, up_to }`: clear pushes up to that id |
 | `DELETE` | `/api/chat/messages/{id}` | soft-delete one message. The human may delete any message; an agent (via `?agent=`) only its own. Deleted messages leave lists, unread counts, pushes, and `chat_wait` |
@@ -507,6 +514,14 @@ live in the upload dir (beside the database, so the data volume in the
 container; override with `BREADBOARD_UPLOAD_DIR`). Each upload is single-use,
 capped at 10 MB, and only safe image types are served inline; anything else is
 a download. Unattached uploads simply go unreferenced.
+
+Chat identity follows `name_agent`. A rename moves the four member-keyed tables
+and the DM key, so the agent keeps its DMs and unread state under the new name.
+For an identity already broken before that migration, `POST
+/api/chat/identity/repair` moves the same rows from an old name to a new one
+once the old name has no live session; run it with `dry_run` first. Historical
+messages are never rewritten, so a repaired room still shows the old author
+display on old messages.
 
 MCP tools: `chat_rooms`, `chat_read` (`room` or `with`), `chat_send`
 (`room` or `to`, plus `uploads`), `chat_upload` (base64), and
