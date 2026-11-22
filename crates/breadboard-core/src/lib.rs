@@ -676,7 +676,8 @@ impl ClaimMode {
 /// or re-claims). Additional `intent` claims may coexist: they reserve
 /// interest in queued work without changing the card or blocking another
 /// agent. `last_heartbeat` drives the live/stale signal on the Agents page;
-/// claims never auto-expire server-side.
+/// roster maintenance reaps a claim only when its own heartbeat is past
+/// `agents.claim_reap_after_hours` and its agent has no live or paused session.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentClaim {
     pub id: i64,

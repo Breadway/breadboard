@@ -43,18 +43,36 @@ every device sees the same state. The header shows how many agents are shown
 and how many are hidden, including how many hidden agents still hold claims.
 The "Show hidden" toggle reveals them, each with an Unhide control.
 
-A daily maintenance pass removes rows nobody is using, so finished subagents
-do not leave dead names behind. A row is abandoned only when it has no
-exclusive or intent claim, no chat room membership or DM, no open review
-request as the reviewer, is not paused by hand, and has not heartbeated for
-`agents.prune_after_hours` (default 24, `0` disables). The rule applies
-equally to sessionless rows and rows whose OpenCode session no longer exists.
-Each removal writes one `agent_removals` audit row holding the name and the
-reason, and the name is free for a fresh registration. The Agents header shows
-an abandoned count; the default view hides those rows, and "Show abandoned"
-reveals what the next pass would remove without touching live agents. Pruning
-also detaches the removed agent's children's name and session edges inside the
-same transaction, so a later agent that reuses the name inherits no subagents.
+Stale agents are hidden by default too. A card is stale when its session
+heartbeat is older than the 120-second live window (or it has no session at
+all), and it stays on the roster so its claims and history are inspectable.
+The header counts live, stale, abandoned and hidden names; "Show stale (N)"
+reveals the stale cards, and live cards always sort first. Stale is separate
+from abandoned: abandoned means the next maintenance pass would remove the
+row, while stale only means it is not heartbeating right now.
+
+A daily maintenance pass releases stale claims and then removes rows nobody is
+using, so finished subagents and crashed MCP processes do not leave dead names
+behind. The claim reaper runs first: it releases a claim only when the claim's
+own `last_heartbeat` is older than `agents.claim_reap_after_hours` (default 72,
+`0` disables), its agent has no live session heartbeat, and its agent is not
+paused by hand. A live session always keeps its claim even if the claim row was
+not refreshed. Each release writes a `handoff_notes` row (claim history,
+previous owner, mode and state), a `released` agent event, and an `agent_reap`
+`sync_log` audit entry naming the previous owner. Reaping runs before the
+prune, so a released agent can be removed in the same pass.
+
+A row is abandoned only when it has no exclusive or intent claim, no chat room
+membership or DM, no open review request as the reviewer, is not paused by
+hand, and has not heartbeated for `agents.prune_after_hours` (default 24, `0`
+disables). The rule applies equally to sessionless rows and rows whose
+OpenCode session no longer exists. Each removal writes one `agent_removals`
+audit row holding the name and the reason, and the name is free for a fresh
+registration. The Agents header shows an abandoned count; the default view
+hides those rows, and "Show abandoned" reveals what the next pass would remove
+without touching live agents. Pruning also detaches the removed agent's
+children's name and session edges inside the same transaction, so a later agent
+that reuses the name inherits no subagents.
 
 An agent can carry an explicit `parent_agent_name`; a registered session can
 also carry its OpenCode `parent_session_id`. The roster resolves the parent name
@@ -224,15 +242,23 @@ without unpausing. Resume clears the flag and allows new claims; the existing
 claims were never released. Unknown names return 404 for both actions.
 
 Roster maintenance is lifecycle hygiene, not pause or kill. Once a day, at
-startup and every 24 hours after, it deletes `agent_sessions` rows that have no
-claims, no chat membership or DM, no open review request, are not paused, and
-have been idle longer than `agents.prune_after_hours`. Sessionless rows and
-rows whose OpenCode session id no longer exists are covered by the same rule.
-Every removal writes an `agent_removals` row with the name and the reason;
-the row also loses its profile, hidden flag and chat notification state, so a
-later registration starts clean. `0` disables the pass. The window lives in
-`breadboard.toml` (`[agents] prune_after_hours`, env
-`BREADBOARD_AGENTS_PRUNE_AFTER_HOURS`) so it can be tuned without a migration.
+startup and every 24 hours after, it first reaps claims and then deletes
+`agent_sessions` rows that have no claims, no chat membership or DM, no open
+review request, are not paused, and have been idle longer than
+`agents.prune_after_hours`. A claim is reaped when its own heartbeat is older
+than `agents.claim_reap_after_hours`, its agent has no live session heartbeat,
+and its agent is not paused; the release keeps a `handoff_notes` row, a
+`released` agent event and an `agent_reap` audit entry naming the previous
+owner. Reaping before pruning lets a dead process's claim and row disappear in
+the same run. Sessionless rows and rows whose OpenCode session id no longer
+exists are covered by the same prune rule. Every removal writes an
+`agent_removals` row with the name and the reason; the row also loses its
+profile, hidden flag and chat notification state, so a later registration
+starts clean. `0` disables either pass. Both windows live in `breadboard.toml`
+(`[agents] claim_reap_after_hours` and `prune_after_hours`, env
+`BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS` and
+`BREADBOARD_AGENTS_PRUNE_AFTER_HOURS`) so they can be tuned without a
+migration.
 
 Unknown names still auto-register on their first ordinary write, because every
 session should be listed rather than refused; only kill, pause and resume

@@ -1,8 +1,12 @@
-//! Daily roster hygiene: remove agent rows nobody is using.
+//! Daily roster hygiene: release stale claims, then remove agent rows nobody
+//! is using.
 //!
 //! A finished subagent leaves an `agent_sessions` row behind, and nothing used
-//! to remove it after its OpenCode session disappeared. This pass deletes a
-//! row only when every signal says it is abandoned:
+//! to remove it after its OpenCode session disappeared. The same is true of a
+//! crashed MCP process, whose claim used to pin the row forever. This pass
+//! first reaps claims past `agents.claim_reap_after_hours` (see
+//! [`crate::claim_reap`]), then deletes a row only when every signal says it is
+//! abandoned:
 //!
 //! - no exclusive or intent claim,
 //! - no chat room membership or DM,
@@ -276,14 +280,46 @@ async fn read_opencode_session_ids(path: &Path) -> Option<HashSet<String>> {
 /// writes when nothing qualifies.
 pub fn spawn_pruner(state: AppState) {
     tokio::spawn(async move {
-        prune_once(&state, "startup").await;
+        run_maintenance(&state, "startup").await;
         let mut tick = tokio::time::interval(StdDuration::from_secs(24 * 60 * 60));
         tick.tick().await; // the first tick is immediate; startup already ran
         loop {
             tick.tick().await;
-            prune_once(&state, "daily").await;
+            run_maintenance(&state, "daily").await;
         }
     });
+}
+
+/// One maintenance pass: reap stale claims, then prune the agents they were
+/// pinning. Reaping first is what lets a dead agent disappear in the same run
+/// instead of waiting a day for the next prune.
+pub async fn run_maintenance(state: &AppState, reason: &str) {
+    let reap_window = state.config.agents.claim_reap_after_hours;
+    if reap_window == 0 {
+        tracing::info!(reason, "stale claim reaping disabled");
+    } else {
+        match crate::claim_reap::reap_stale_claims(
+            &state.db,
+            reap_window,
+            crate::store::AGENT_LIVE_SECS,
+        )
+        .await
+        {
+            Ok(reaped) if reaped.is_empty() => {}
+            Ok(reaped) => {
+                tracing::info!(
+                    count = reaped.len(),
+                    window_hours = reap_window,
+                    reason,
+                    "reaped stale agent claims"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, reason, "reaping stale agent claims failed");
+            }
+        }
+    }
+    prune_once(state, reason).await;
 }
 
 async fn prune_once(state: &AppState, reason: &str) {
