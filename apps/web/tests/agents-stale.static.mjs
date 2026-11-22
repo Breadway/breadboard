@@ -22,11 +22,15 @@ assert.match(
   "stale cards are hidden by default",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !showStale && g.name !== focus) continue;'),
-  "the default view filters stale roster presence unless the toggle is on",
+  agents.includes('if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) continue;'),
+  "the abandoned toggle stays independent, and Show stale can reveal abandoned too",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !showStale && g.name !== focus) return false;'),
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) continue;'),
+  "the default view filters non-abandoned stale roster presence unless the toggle is on",
+);
+assert.ok(
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) return false;'),
   "stale cards cannot render while hidden by default",
 );
 assert.ok(
@@ -60,4 +64,4 @@ assert.ok(
   "the empty state explains that stale cards are hidden by default",
 );
 
-console.log("agents-stale static checks passed: 10 assertions over Agents.svelte");
+console.log("agents-stale static checks passed: 11 assertions over Agents.svelte");

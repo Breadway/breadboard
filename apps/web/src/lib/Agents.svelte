@@ -349,8 +349,11 @@
     const ids = new Set<string>();
     for (const g of allGroups) {
       if (g.hidden && !showHidden && g.name !== focus) continue;
-      if (g.abandoned && !showAbandoned && g.name !== focus) continue;
-      if (g.presence === "stale" && !showStale && g.name !== focus) continue;
+      // Abandoned is the narrower label for a stale, claimless card. Keep it on
+      // its own toggle, but let "Show stale" reveal it too so neither toggle
+      // is dead when every abandoned row is also stale.
+      if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) continue;
+      if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) continue;
       if (focus && !focusTreeIds.has(g.id)) continue;
       if (staleOnly && g.stale === 0 && g.name !== focus) continue;
       ids.add(g.id);
@@ -377,7 +380,8 @@
   function canRenderCard(g: Group): boolean {
     if (!keptIds.has(g.id)) return false;
     if (g.hidden && !showHidden && g.name !== focus) return false;
-    if (g.presence === "stale" && !showStale && g.name !== focus) return false;
+    if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) return false;
+    if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) return false;
     return true;
   }
 
