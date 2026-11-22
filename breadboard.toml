@@ -96,7 +96,9 @@ max_exclusive_per_orchestrator = 100  # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCH
 prune_after_hours = 24         # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS
 
 # Stale claim reaping, run before each prune pass. A claim is released when its
-# own heartbeat is this many hours old, its agent has no live session heartbeat
-# and is not paused by hand. Each release keeps a handoff row, an agent event
-# and an audit entry naming the previous owner. 0 disables reaping.
+# own heartbeat is this many hours old, its session id is null or is not a live
+# session for that agent name, and the agent is not paused by hand. A live
+# session keeps only the claims that carry its own session id. Each release
+# keeps a handoff row, an agent event and an audit entry naming the previous
+# owner. 0 disables reaping.
 claim_reap_after_hours = 72    # BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS

@@ -677,7 +677,8 @@ impl ClaimMode {
 /// interest in queued work without changing the card or blocking another
 /// agent. `last_heartbeat` drives the live/stale signal on the Agents page;
 /// roster maintenance reaps a claim only when its own heartbeat is past
-/// `agents.claim_reap_after_hours` and its agent has no live or paused session.
+/// `agents.claim_reap_after_hours` and its `session_id` is null or is not a
+/// live session for that agent name, while a hand-paused agent is left alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentClaim {
     pub id: i64,
