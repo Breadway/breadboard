@@ -3,13 +3,11 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Static regression check for BB-230: the Agents page hides stale cards by
-// default, exposes a counted "Show stale" toggle, keeps live cards visible and
-// first, and reports live/stale/abandoned/hidden in the header.
-//
-// The web UI has no unit runner (only live-server playwright checks), and a
-// stale fixture would need a 120-second-old heartbeat that the REST API cannot
-// fabricate, so this asserts the source-level contract instead.
+// Static companion to agents-stale-filter.browser.mjs for BB-230: the Agents
+// page hides stale cards by default, exposes a counted "Show stale" toggle,
+// keeps live cards visible and first, and reports live/stale/abandoned/hidden
+// in the header. The browser test proves the Stale claims segment still shows
+// a stale claim; this asserts the wiring that makes that true.
 //
 // Run: node apps/web/tests/agents-stale.static.mjs (from apps/web)
 
@@ -22,15 +20,19 @@ assert.match(
   "stale cards are hidden by default",
 );
 assert.ok(
-  agents.includes('if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) continue;'),
+  agents.includes("const staleVisible = $derived(showStale || staleOnly);"),
+  "the Stale claims segment implies Show stale instead of fighting the default",
+);
+assert.ok(
+  agents.includes('if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) continue;'),
   "the abandoned toggle stays independent, and Show stale can reveal abandoned too",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) continue;'),
-  "the default view filters non-abandoned stale roster presence unless the toggle is on",
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) continue;'),
+  "the default view filters non-abandoned stale roster presence unless stale is visible",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) return false;'),
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) return false;'),
   "stale cards cannot render while hidden by default",
 );
 assert.ok(
@@ -44,6 +46,10 @@ assert.ok(
 assert.ok(
   agents.includes("aria-pressed={showStale}"),
   "the stale toggle exposes its pressed state",
+);
+assert.ok(
+  agents.includes("Stale claims <span"),
+  "the segment is labelled Stale claims to distinguish it from Show stale",
 );
 assert.ok(
   agents.includes('<span>stale</span>') && agents.includes("<b>{staleAgentCount}</b>"),
@@ -60,8 +66,12 @@ assert.ok(
   "live cards sort before stale cards, with paused last",
 );
 assert.ok(
+  agents.includes("No stale claims: every claim has a heartbeat inside the last 5 minutes."),
+  "the stale empty state talks about claim heartbeats, not agent freshness",
+);
+assert.ok(
   agents.includes("stale and hidden from the default view"),
-  "the empty state explains that stale cards are hidden by default",
+  "the default empty state explains that stale cards are hidden by default",
 );
 
-console.log("agents-stale static checks passed: 11 assertions over Agents.svelte");
+console.log("agents-stale static checks passed: 14 assertions over Agents.svelte");

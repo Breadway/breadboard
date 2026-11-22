@@ -236,6 +236,10 @@
   // heartbeat at all, while a live claim can still sit on a stale name.
   const staleGroups = $derived(allGroups.filter((g) => g.presence === "stale"));
   const staleAgentCount = $derived(staleGroups.length);
+  // Choosing the Stale segment is an explicit request to see stale cards, so
+  // it implies the Show stale toggle. Without this the hide-stale default
+  // filters the very cards the segment exists to show.
+  const staleVisible = $derived(showStale || staleOnly);
 
   interface AgentNode {
     group: Group;
@@ -352,8 +356,8 @@
       // Abandoned is the narrower label for a stale, claimless card. Keep it on
       // its own toggle, but let "Show stale" reveal it too so neither toggle
       // is dead when every abandoned row is also stale.
-      if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) continue;
-      if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) continue;
+      if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) continue;
+      if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) continue;
       if (focus && !focusTreeIds.has(g.id)) continue;
       if (staleOnly && g.stale === 0 && g.name !== focus) continue;
       ids.add(g.id);
@@ -380,8 +384,8 @@
   function canRenderCard(g: Group): boolean {
     if (!keptIds.has(g.id)) return false;
     if (g.hidden && !showHidden && g.name !== focus) return false;
-    if (g.abandoned && !showAbandoned && !showStale && g.name !== focus) return false;
-    if (g.presence === "stale" && !g.abandoned && !showStale && g.name !== focus) return false;
+    if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) return false;
+    if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) return false;
     return true;
   }
 
@@ -1113,7 +1117,7 @@
         All <span>{shownCount} shown</span>
       </button>
       <button class:on={staleOnly} onclick={() => (staleOnly = true)}>
-        Stale <span class:bad={staleCount > 0}>{staleCount}</span>
+        Stale claims <span class:bad={staleCount > 0}>{staleCount}</span>
       </button>
     </div>
     <button
@@ -1202,10 +1206,10 @@
       <p>
         {focus
           ? `No agents are linked to ${focus}.`
-          : staleOnly
-            ? "No stale claims. Every agent heartbeated in the last 5 minutes."
-            : hiddenCount > 0 && !showHidden
-              ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
+          : hiddenCount > 0 && !showHidden
+            ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
+            : staleOnly
+              ? "No stale claims: every claim has a heartbeat inside the last 5 minutes."
               : staleAgentCount > 0 && !showStale
                 ? `All ${staleAgentCount} agent${staleAgentCount === 1 ? " is" : "s are"} stale and hidden from the default view. Use Show stale to inspect them.`
                 : abandonedCount > 0 && !showAbandoned
