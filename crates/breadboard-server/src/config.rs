@@ -46,9 +46,11 @@ pub struct AgentRosterConfig {
     /// agent row is considered abandoned. `0` disables pruning. Default 24.
     pub prune_after_hours: u64,
     /// Hours without a claim heartbeat before roster maintenance releases it,
-    /// so a dead MCP process cannot pin its agent row forever. Claims whose
-    /// agent still has a live session heartbeat, and claims held by a paused
-    /// agent, are never reaped. `0` disables the pass. Default 72.
+    /// so a dead MCP process cannot pin its agent row forever. A claim survives
+    /// only when its own `session_id` matches a live session for that agent
+    /// name; a live session never protects claims from other sessions that
+    /// reused the name. Claims held by a paused agent are never reaped. `0`
+    /// disables the pass. Default 72.
     pub claim_reap_after_hours: u64,
 }
 

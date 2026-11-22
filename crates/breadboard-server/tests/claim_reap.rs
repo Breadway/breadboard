@@ -233,8 +233,8 @@ async fn live_session_keeps_its_stale_claim() {
         .unwrap();
     let project = insert_project(&app.db, "LIVE").await;
     let issue = insert_issue(&app.db, project, "LIVE-1", user_id).await;
-    // The claim row was not refreshed for 80h, but the session is still
-    // heartbeating right now. A live session always keeps its claim.
+    // The claim row was not refreshed for 80h, but its session id matches the
+    // live session, so the live session owns it and it survives.
     insert_session(&app.db, "live-owner", Some("ses_live"), now, false).await;
     insert_claim(
         &app.db,
@@ -252,6 +252,178 @@ async fn live_session_keeps_its_stale_claim() {
         .unwrap();
     assert!(reaped.is_empty());
     assert_eq!(claim_count(&app.db, "live-owner").await, 1);
+}
+
+#[tokio::test]
+async fn live_session_keeps_its_own_fresh_claim() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let project = insert_project(&app.db, "LIVEFRESH").await;
+    let issue = insert_issue(&app.db, project, "LIVEFRESH-1", user_id).await;
+    insert_session(&app.db, "live-fresh", Some("ses_live_fresh"), now, false).await;
+    insert_claim(
+        &app.db,
+        issue,
+        user_id,
+        "live-fresh",
+        "exclusive",
+        Some("ses_live_fresh"),
+        now - Duration::hours(1),
+    )
+    .await;
+
+    let reaped = breadboard_server::claim_reap::reap_stale_claims(&app.db, 72, 120)
+        .await
+        .unwrap();
+    assert!(reaped.is_empty());
+    assert_eq!(claim_count(&app.db, "live-fresh").await, 1);
+}
+
+#[tokio::test]
+async fn live_session_does_not_pin_null_session_stale_claims() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let project = insert_project(&app.db, "OLDNAMES").await;
+    let issue = insert_issue(&app.db, project, "OLDNAMES-1", user_id).await;
+    // The production shape: a current session reused the name, while dead
+    // subagents left sessionless claims 13 days ago. The live session must not
+    // pin those claims.
+    insert_session(
+        &app.db,
+        "crustodian",
+        Some("ses_current_crustodian"),
+        now,
+        false,
+    )
+    .await;
+    let stale = now - Duration::days(13);
+    insert_claim(
+        &app.db,
+        issue,
+        user_id,
+        "crustodian",
+        "exclusive",
+        None,
+        stale,
+    )
+    .await;
+
+    let reaped = breadboard_server::claim_reap::reap_stale_claims(&app.db, 72, 120)
+        .await
+        .unwrap();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].agent_name, "crustodian");
+    assert_eq!(reaped[0].issue_key, "OLDNAMES-1");
+    assert!(
+        reaped[0].idle_hours >= 311,
+        "13 days is past the window: {}",
+        reaped[0].idle_hours
+    );
+    assert_eq!(claim_count(&app.db, "crustodian").await, 0);
+
+    let (agent, mode, state, note): (String, String, String, String) = sqlx::query_as(
+        "SELECT agent_name, mode, state, note FROM handoff_notes WHERE issue_id = ?1",
+    )
+    .bind(issue)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(agent, "crustodian");
+    assert_eq!(mode, "exclusive");
+    assert_eq!(state, "implementing");
+    assert!(note.contains("crustodian"), "note names the owner: {note}");
+    assert!(
+        note.contains("no heartbeat"),
+        "note records the reap: {note}"
+    );
+
+    let (old_value, new_value): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT old_value, new_value FROM sync_log
+          WHERE issue_id = ?1 AND field = 'agent_reap'",
+    )
+    .bind(issue)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(old_value.as_deref(), Some("crustodian (exclusive)"));
+    assert!(new_value.unwrap().contains("no heartbeat"));
+
+    let released: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM agent_events
+          WHERE agent_name = 'crustodian' AND kind = 'released'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(released, 1, "the release appears on the agent timeline");
+}
+
+#[tokio::test]
+async fn live_session_does_not_pin_a_different_sessions_claim() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let project = insert_project(&app.db, "OTHERSES").await;
+    let issue = insert_issue(&app.db, project, "OTHERSES-1", user_id).await;
+    // Same agent name, different session: the live session does not own this
+    // stale claim, so the claim is dead.
+    insert_session(&app.db, "reused-name", Some("ses_new"), now, false).await;
+    insert_claim(
+        &app.db,
+        issue,
+        user_id,
+        "reused-name",
+        "exclusive",
+        Some("ses_old_dead"),
+        now - Duration::hours(80),
+    )
+    .await;
+
+    let reaped = breadboard_server::claim_reap::reap_stale_claims(&app.db, 72, 120)
+        .await
+        .unwrap();
+    assert_eq!(reaped.len(), 1);
+    assert_eq!(reaped[0].agent_name, "reused-name");
+    assert_eq!(claim_count(&app.db, "reused-name").await, 0);
+}
+
+#[tokio::test]
+async fn zero_window_disables_reaping() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let project = insert_project(&app.db, "NOREAP").await;
+    let issue = insert_issue(&app.db, project, "NOREAP-1", user_id).await;
+    insert_claim(
+        &app.db,
+        issue,
+        user_id,
+        "zero-window",
+        "exclusive",
+        None,
+        now - Duration::days(13),
+    )
+    .await;
+
+    let reaped = breadboard_server::claim_reap::reap_stale_claims(&app.db, 0, 120)
+        .await
+        .unwrap();
+    assert!(reaped.is_empty());
+    assert_eq!(claim_count(&app.db, "zero-window").await, 1);
 }
 
 #[tokio::test]
@@ -289,6 +461,75 @@ async fn paused_agent_keeps_its_stale_claim() {
         .unwrap();
     assert!(reaped.is_empty());
     assert_eq!(claim_count(&app.db, "paused-owner").await, 1);
+}
+
+#[tokio::test]
+async fn maintenance_releases_old_claims_without_touching_the_live_session() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let project = insert_project(&app.db, "CRUST").await;
+    let first = insert_issue(&app.db, project, "CRUST-1", user_id).await;
+    let second = insert_issue(&app.db, project, "CRUST-2", user_id).await;
+    // The production case: one live current session under a name that also
+    // carries 13-day-old sessionless claims from dead subagents. Maintenance
+    // releases the dead claims and leaves the live session row alone.
+    let live_seen = now;
+    insert_session(
+        &app.db,
+        "crustodian",
+        Some("ses_live_current"),
+        live_seen,
+        false,
+    )
+    .await;
+    let stale = now - Duration::days(13);
+    insert_claim(
+        &app.db,
+        first,
+        user_id,
+        "crustodian",
+        "exclusive",
+        None,
+        stale,
+    )
+    .await;
+    insert_claim(
+        &app.db,
+        second,
+        user_id,
+        "crustodian",
+        "intent",
+        None,
+        stale,
+    )
+    .await;
+
+    breadboard_server::agent_prune::run_maintenance(&app.state, "test").await;
+
+    assert_eq!(claim_count(&app.db, "crustodian").await, 0);
+    let sessions: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT last_seen, paused FROM agent_sessions WHERE agent_name = 'crustodian'",
+    )
+    .fetch_all(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(sessions.len(), 1, "the live session row survives the reap");
+    assert_eq!(sessions[0].1, 0, "the live session was not paused");
+    assert_eq!(
+        sessions[0].0,
+        live_seen.to_rfc3339(),
+        "the live session row is not modified by reaping its name's old claims"
+    );
+    let removals: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM agent_removals WHERE agent_name = 'crustodian'")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(removals, 0, "a live session is never pruned");
 }
 
 #[tokio::test]

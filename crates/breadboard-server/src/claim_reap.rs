@@ -9,13 +9,17 @@
 //!
 //! - the claim's own `last_heartbeat` is older than
 //!   `agents.claim_reap_after_hours` (default 72, `0` disables),
-//! - no `agent_sessions` row for that name has a live heartbeat, and
-//! - no `agent_sessions` row for that name is paused by hand.
+//! - no `agent_sessions` row for that name is paused by hand, and
+//! - the claim's own `session_id` is null or does not match the live session
+//!   id for that name.
 //!
-//! A live session heartbeat always wins: a session that is still working keeps
-//! its claim even when the claim row itself was not refreshed. A sessionless
-//! name (the common dead-MCP case) has no heartbeat to protect it and is
-//! reaped on the claim cutoff alone.
+//! The live-session guard is claim-aware (BB-232). A live session protects
+//! only the claims that carry its own `session_id`; it does not pin claims
+//! left behind by older sessions that reused the same name. A claim whose
+//! `session_id` matches a live session survives even when the claim row itself
+//! was not refreshed, because the live session owns it. A sessionless claim
+//! (the common dead-MCP case) has no heartbeat to protect it and is reaped on
+//! the claim cutoff alone.
 //!
 //! Each release keeps the claim history rather than erasing it:
 //!
@@ -66,8 +70,8 @@ fn parse_ts(value: &str) -> Option<DateTime<Utc>> {
 }
 
 /// Release every stale claim and return what was reaped. `live_secs` is the
-/// same 120-second window the roster uses for "live"; a session heartbeat
-/// inside it protects the claim.
+/// same 120-second window the roster uses for "live"; a live session protects
+/// a claim only when the claim's `session_id` is that session's id.
 pub async fn reap_stale_claims(
     db: &SqlitePool,
     reap_after_hours: u64,
@@ -94,6 +98,9 @@ pub async fn reap_stale_claims(
             AND NOT EXISTS (
                 SELECT 1 FROM agent_sessions s
                  WHERE lower(s.agent_name) = lower(c.agent_name)
+                   AND s.session_id IS NOT NULL
+                   AND c.session_id IS NOT NULL
+                   AND s.session_id = c.session_id
                    AND julianday(s.last_seen) >= julianday(?2)
             )
           ORDER BY c.last_heartbeat, c.id",
@@ -116,8 +123,8 @@ pub async fn reap_stale_claims(
 
         let mut tx = crate::db::begin_write(db).await?;
         // Re-check every exclusion in the write transaction. A heartbeat, a
-        // pause or a live session that landed after the select makes this a
-        // no-op instead of a wrong release.
+        // pause, or a matching live session that landed after the select makes
+        // this a no-op instead of a wrong release.
         let deleted = sqlx::query(
             "DELETE FROM agent_claims
               WHERE id = ?1
@@ -130,6 +137,9 @@ pub async fn reap_stale_claims(
                 AND NOT EXISTS (
                     SELECT 1 FROM agent_sessions s
                      WHERE lower(s.agent_name) = lower(agent_claims.agent_name)
+                       AND s.session_id IS NOT NULL
+                       AND agent_claims.session_id IS NOT NULL
+                       AND s.session_id = agent_claims.session_id
                        AND julianday(s.last_seen) >= julianday(?3)
                 )",
         )

@@ -55,9 +55,12 @@ A daily maintenance pass releases stale claims and then removes rows nobody is
 using, so finished subagents and crashed MCP processes do not leave dead names
 behind. The claim reaper runs first: it releases a claim only when the claim's
 own `last_heartbeat` is older than `agents.claim_reap_after_hours` (default 72,
-`0` disables), its agent has no live session heartbeat, and its agent is not
-paused by hand. A live session always keeps its claim even if the claim row was
-not refreshed. Each release writes a `handoff_notes` row (claim history,
+`0` disables), the claim's `session_id` is null or is not the id of a live
+session for that agent name, and its agent is not paused by hand. The live
+session guard is per claim, not per name: a live session keeps only the claims
+that carry its own `session_id`, even if the claim row was not refreshed, and a
+fresh session that reused an old name does not pin the dead claims left by
+earlier sessions. Each release writes a `handoff_notes` row (claim history,
 previous owner, mode and state), a `released` agent event, and an `agent_reap`
 `sync_log` audit entry naming the previous owner. Reaping runs before the
 prune, so a released agent can be removed in the same pass.
@@ -246,10 +249,10 @@ startup and every 24 hours after, it first reaps claims and then deletes
 `agent_sessions` rows that have no claims, no chat membership or DM, no open
 review request, are not paused, and have been idle longer than
 `agents.prune_after_hours`. A claim is reaped when its own heartbeat is older
-than `agents.claim_reap_after_hours`, its agent has no live session heartbeat,
-and its agent is not paused; the release keeps a `handoff_notes` row, a
-`released` agent event and an `agent_reap` audit entry naming the previous
-owner. Reaping before pruning lets a dead process's claim and row disappear in
+than `agents.claim_reap_after_hours`, its `session_id` is null or does not
+match a live session for that agent name, and its agent is not paused; the
+release keeps a `handoff_notes` row, a `released` agent event and an
+`agent_reap` audit entry naming the previous owner. Reaping before pruning lets a dead process's claim and row disappear in
 the same run. Sessionless rows and rows whose OpenCode session id no longer
 exists are covered by the same prune rule. Every removal writes an
 `agent_removals` row with the name and the reason; the row also loses its
