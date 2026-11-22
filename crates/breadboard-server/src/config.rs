@@ -37,13 +37,19 @@ pub struct Config {
 }
 
 /// Agent roster lifecycle. Rows nobody is using are pruned by a daily
-/// maintenance pass; the window is the only tunable.
+/// maintenance pass, after a stale-claim pass has released claims that would
+/// otherwise pin them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct AgentRosterConfig {
     /// Hours without a heartbeat before a claimless, chatless, review-free
     /// agent row is considered abandoned. `0` disables pruning. Default 24.
     pub prune_after_hours: u64,
+    /// Hours without a claim heartbeat before roster maintenance releases it,
+    /// so a dead MCP process cannot pin its agent row forever. Claims whose
+    /// agent still has a live session heartbeat, and claims held by a paused
+    /// agent, are never reaped. `0` disables the pass. Default 72.
+    pub claim_reap_after_hours: u64,
 }
 
 /// Live exclusive claim budgets. Kept in config, not the database, so the
@@ -348,6 +354,7 @@ impl Default for AgentRosterConfig {
     fn default() -> Self {
         Self {
             prune_after_hours: 24,
+            claim_reap_after_hours: 72,
         }
     }
 }
@@ -464,6 +471,11 @@ impl Config {
         if let Ok(v) = std::env::var("BREADBOARD_AGENTS_PRUNE_AFTER_HOURS") {
             if let Ok(n) = v.parse::<u64>() {
                 self.agents.prune_after_hours = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.agents.claim_reap_after_hours = n;
             }
         }
         Ok(())

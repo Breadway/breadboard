@@ -7,6 +7,7 @@ pub mod api;
 pub mod artifacts;
 pub mod auth;
 pub mod bus;
+pub mod claim_reap;
 pub mod commits;
 pub mod config;
 pub mod db;

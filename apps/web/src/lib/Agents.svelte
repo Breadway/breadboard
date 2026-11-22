@@ -20,6 +20,7 @@
   let staleOnly = $state(false);
   let showHidden = $state(false);
   let showAbandoned = $state(false);
+  let showStale = $state(false);
   let focus = $state<string | null>(null);
   let openAgentId = $state<string | null>(null);
   let copied = $state<string | null>(null);
@@ -211,9 +212,10 @@
         return byStatus !== 0 ? byStatus : a.key.localeCompare(b.key, undefined, { numeric: true });
       });
     }
-    // Sort only on claim counts and name, never on live/stale: a heartbeat
-    // flips presence every few seconds and must not reorder the masonry.
-    const rank = (g: Group) => (g.paused ? 1 : 0);
+    // Live agents sort first because the default view hides stale cards.
+    // Within a group the order stays stable on claim counts and name, but a
+    // live name keeps its place even when its claims change.
+    const rank = (g: Group) => (g.paused ? 2 : g.presence === "live" ? 0 : 1);
     return [...map.values()].sort(
       (a, b) =>
         rank(a) - rank(b) ||
@@ -230,6 +232,10 @@
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
   const abandonedCount = $derived(allGroups.filter((g) => g.abandoned).length);
+  // Roster presence, not claim heartbeat: a stale card has no live session
+  // heartbeat at all, while a live claim can still sit on a stale name.
+  const staleGroups = $derived(allGroups.filter((g) => g.presence === "stale"));
+  const staleAgentCount = $derived(staleGroups.length);
 
   interface AgentNode {
     group: Group;
@@ -344,6 +350,7 @@
     for (const g of allGroups) {
       if (g.hidden && !showHidden && g.name !== focus) continue;
       if (g.abandoned && !showAbandoned && g.name !== focus) continue;
+      if (g.presence === "stale" && !showStale && g.name !== focus) continue;
       if (focus && !focusTreeIds.has(g.id)) continue;
       if (staleOnly && g.stale === 0 && g.name !== focus) continue;
       ids.add(g.id);
@@ -370,6 +377,7 @@
   function canRenderCard(g: Group): boolean {
     if (!keptIds.has(g.id)) return false;
     if (g.hidden && !showHidden && g.name !== focus) return false;
+    if (g.presence === "stale" && !showStale && g.name !== focus) return false;
     return true;
   }
 
@@ -1020,14 +1028,16 @@
 
 {#snippet hiddenGroup(g: Group)}
   {@const kids = childrenById.get(g.id) ?? []}
-  <div class="hidden-group" data-hidden-group={g.id}>
+  <div class="hidden-group" data-hidden-group={g.id} data-reason={g.hidden ? "hidden" : "stale"}>
     <span class="role-badge orch">orchestrator</span>
     <b class="group-name">{g.name}</b>
-    <span class="hidden-badge">hidden</span>
+    <span class="hidden-badge">{g.hidden ? "hidden" : "stale"}</span>
     <span class="group-meta">{kids.length} subagent{kids.length === 1 ? "" : "s"} still shown</span>
     <span class="grow"></span>
     <button class="btn ghost sm" onclick={() => focusOn(g.name)}>Focus</button>
-    <button class="btn ghost sm" onclick={() => void unhideGroup(g)}>Unhide</button>
+    {#if g.hidden}
+      <button class="btn ghost sm" onclick={() => void unhideGroup(g)}>Unhide</button>
+    {/if}
   </div>
 {/snippet}
 
@@ -1075,9 +1085,10 @@
 
     <div class="stats">
       <div class="stat"><b>{shownCount}</b><span>shown</span></div>
-      <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
+      <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live</span></div>
+      <div class="stat" class:warn={staleAgentCount > 0}><b>{staleAgentCount}</b><span>stale</span></div>
       <div class="stat" class:warn={abandonedCount > 0}><b>{abandonedCount}</b><span>abandoned</span></div>
-      <div class="stat" class:live={liveSessions > 0}><b>{liveSessions}</b><span>live sessions</span></div>
+      <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
       <div class="stat"><b>{orchestratorCount}</b><span>orchestrators</span></div>
       <div class="stat"><b>{subagentCount}</b><span>subagents</span></div>
       <div class="stat" class:warn={unlinkedCount > 0}><b>{unlinkedCount}</b><span>unlinked</span></div>
@@ -1113,6 +1124,17 @@
       {showHidden ? "Showing hidden" : "Show hidden"} <span>{hiddenCount}</span>
     </button>
     <button
+      class="hidden-toggle stale-toggle"
+      class:on={showStale}
+      aria-pressed={showStale}
+      title={staleAgentCount
+        ? `${staleAgentCount} stale agent${staleAgentCount === 1 ? "" : "s"}: no session heartbeat inside the live window. Hidden by default; roster maintenance reaps their old claims.`
+        : "No stale agents"}
+      onclick={() => (showStale = !showStale)}
+    >
+      {showStale ? "Showing stale" : "Show stale"} <span>{staleAgentCount}</span>
+    </button>
+    <button
       class="hidden-toggle abandoned-toggle"
       class:on={showAbandoned}
       aria-pressed={showAbandoned}
@@ -1140,8 +1162,8 @@
     </span>
     <span class="grow"></span>
     <span class="live-note">
-      {shownCount} shown · {hiddenCount} hidden{#if hiddenWithClaims} ({hiddenWithClaims} still hold{hiddenWithClaims === 1 ? "s" : ""} claims){/if}
-      · {liveSessions} live sessions · {liveCount} claims heartbeating · {idleSessions} idle
+      {shownCount} shown · {staleAgentCount} stale · {hiddenCount} hidden{#if hiddenWithClaims} ({hiddenWithClaims} still hold{hiddenWithClaims === 1 ? "s" : ""} claims){/if}
+      · {liveSessions} live · {liveCount} claims heartbeating · {idleSessions} idle
     </span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
@@ -1180,9 +1202,11 @@
             ? "No stale claims. Every agent heartbeated in the last 5 minutes."
             : hiddenCount > 0 && !showHidden
               ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
-              : abandonedCount > 0 && !showAbandoned
-                ? `All ${abandonedCount} agent${abandonedCount === 1 ? " is" : "s are"} abandoned and hidden from the default view. Use Show abandoned to inspect them.`
-                : "No agent is working an issue right now."}
+              : staleAgentCount > 0 && !showStale
+                ? `All ${staleAgentCount} agent${staleAgentCount === 1 ? " is" : "s are"} stale and hidden from the default view. Use Show stale to inspect them.`
+                : abandonedCount > 0 && !showAbandoned
+                  ? `All ${abandonedCount} agent${abandonedCount === 1 ? " is" : "s are"} abandoned and hidden from the default view. Use Show abandoned to inspect them.`
+                  : "No agent is working an issue right now."}
       </p>
       <p class="hint">
         Agents claim with <code>breadboard claim KEY --agent NAME</code> or the <code>claim_issue</code> MCP tool.
@@ -1205,7 +1229,7 @@
               {@const root = section.root}
               <span class="role-badge orch">orchestrator</span>
               <b class="group-name" title={root.name}>{root.name}</b>
-              {#if !section.rootRendered}<span class="hidden-badge">hidden</span>{/if}
+              {#if !section.rootRendered}<span class="hidden-badge">{root.hidden ? "hidden" : "stale"}</span>{/if}
               {#if root.paused}<span class="paused-badge" title="Claims kept; new claims blocked until resumed">paused</span>{/if}
               <span class="group-meta">
                 {section.directTotal} subagent{section.directTotal === 1 ? "" : "s"} · {section.directLive} live
@@ -1219,7 +1243,7 @@
                 >tree {root.treeExclusive}/{root.treeLimit}</span>
               {/if}
               <span class="grow"></span>
-              {#if !section.rootRendered}
+              {#if !section.rootRendered && root.hidden}
                 <button class="btn ghost sm" onclick={() => void unhideGroup(root)}>Unhide</button>
               {/if}
               <button class="btn ghost sm" onclick={() => focusOn(root.name)}>Focus</button>
@@ -1637,6 +1661,10 @@
   .abandoned-toggle.on {
     background: color-mix(in srgb, var(--danger) 12%, var(--raise));
     border-color: color-mix(in srgb, var(--danger) 40%, var(--line));
+  }
+  .stale-toggle.on {
+    background: color-mix(in srgb, var(--status-review) 12%, var(--raise));
+    border-color: color-mix(in srgb, var(--status-review) 40%, var(--line));
   }
   .hidden-toggle span {
     font: 500 10px/1 var(--font-mono);

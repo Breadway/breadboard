@@ -4498,11 +4498,19 @@ pub async fn agent_roster_with_window(
         }
     }
 
-    // Heartbeats flip live/stale constantly. Keep the server order stable by
-    // sorting only on claim counts and name, with paused names last, so the
-    // masonry layout does not reshuffle every 15 seconds.
+    // Heartbeats flip live/stale constantly. Live names sort first because the
+    // default view hides stale cards; within a group the order stays stable on
+    // claim counts and name, with paused names last.
     roster.sort_by(|a, b| {
-        let rank = |e: &AgentRosterEntry| i64::from(e.paused);
+        let rank = |e: &AgentRosterEntry| {
+            if e.paused {
+                2
+            } else if e.live {
+                0
+            } else {
+                1
+            }
+        };
         rank(a)
             .cmp(&rank(b))
             .then_with(|| b.exclusive_count.cmp(&a.exclusive_count))
@@ -4525,14 +4533,20 @@ pub async fn roster_entry(
 
 /// Append a claim lifecycle row to the issue's activity timeline. Heartbeats
 /// that change nothing are not logged, so this stays readable.
-pub async fn log_claim_event(
-    db: &SqlitePool,
+///
+/// Generic over the executor so a release inside a write transaction can log
+/// in that same transaction instead of after the commit.
+pub async fn log_claim_event<'e, E>(
+    db: E,
     issue_id: i64,
     field: &str,
     old_value: Option<&str>,
     new_value: Option<&str>,
     actor_id: Option<i64>,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
     sqlx::query(
         "INSERT INTO sync_log (issue_id, field, old_value, new_value, source, actor_id, at)
          VALUES (?1, ?2, ?3, ?4, 'breadboard', ?5, ?6)",

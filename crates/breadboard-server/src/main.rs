@@ -85,7 +85,8 @@ async fn main() -> anyhow::Result<()> {
     agent_prune::spawn_pruner(state.clone());
     tracing::info!(
         prune_after_hours = state.config.agents.prune_after_hours,
-        "abandoned agent prune loop started"
+        claim_reap_after_hours = state.config.agents.claim_reap_after_hours,
+        "agent roster maintenance loop started (reap stale claims, then prune)"
     );
 
     if state.config.notifications.daily_digest {
