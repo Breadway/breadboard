@@ -602,9 +602,10 @@ pub struct AgentRosterEntry {
     /// `live`, `stale` or `paused`.
     pub status: String,
     /// True when the next maintenance pass would remove this row: no claims,
-    /// no chat membership or DM, no open review request, not paused, and a
-    /// heartbeat older than the row's configured window (the short ephemeral
-    /// window when it has no session id, the long prune window otherwise).
+    /// no chat membership or DM, no open review request, not paused, not
+    /// pinned, and a heartbeat older than the row's configured window (the
+    /// short ephemeral window when it has no session id, the long prune window
+    /// otherwise).
     pub abandoned: bool,
     /// Human-readable explanation when `abandoned` is true.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -634,6 +635,15 @@ pub struct AgentRosterEntry {
     pub paused_by_login: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paused_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Pinned rows are never removed by automatic roster maintenance. Claims,
+    /// chat, heartbeats and rename still work; kill is still explicit.
+    pub pinned: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_by: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_by_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Hidden from the default Agents view. Claims and chat identity remain.
     pub hidden: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

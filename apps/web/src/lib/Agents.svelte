@@ -87,6 +87,10 @@
     paused: boolean;
     pausedBy: string | null;
     pausedAt: string | null;
+    /** Automatic roster maintenance skips this row while it is pinned. */
+    pinned: boolean;
+    pinnedBy: string | null;
+    pinnedAt: string | null;
     note: string | null;
     state: AgentState | null;
     lastSeen: string | null;
@@ -136,6 +140,9 @@
           paused: false,
           pausedBy: null,
           pausedAt: null,
+          pinned: false,
+          pinnedBy: null,
+          pinnedAt: null,
           note: null,
           state: null,
           lastSeen: null,
@@ -188,6 +195,9 @@
       g.paused = r.paused;
       g.pausedBy = r.paused_by_login ?? null;
       g.pausedAt = r.paused_at ?? null;
+      g.pinned = r.pinned;
+      g.pinnedBy = r.pinned_by_login ?? null;
+      g.pinnedAt = r.pinned_at ?? null;
       g.note = g.note ?? r.note ?? null;
       g.state = g.state ?? r.state ?? null;
       g.lastSeen = r.last_seen ?? g.lastSeen;
@@ -212,10 +222,11 @@
         return byStatus !== 0 ? byStatus : a.key.localeCompare(b.key, undefined, { numeric: true });
       });
     }
-    // Live agents sort first because the default view hides stale cards.
-    // Within a group the order stays stable on claim counts and name, but a
-    // live name keeps its place even when its claims change.
-    const rank = (g: Group) => (g.paused ? 2 : g.presence === "live" ? 0 : 1);
+    // Pinned cards sort above unpinned ones, because pinning is a deliberate
+    // "keep this on the roster" choice. Within each half live sorts before
+    // stale and paused stays last, matching the default hide rules.
+    const rank = (g: Group) =>
+      (g.pinned ? 0 : 3) + (g.paused ? 2 : g.presence === "live" ? 0 : 1);
     return [...map.values()].sort(
       (a, b) =>
         rank(a) - rank(b) ||
@@ -228,6 +239,8 @@
   const claimHolders = $derived(allGroups.filter((g) => g.work.length > 0).length);
   const idleSessions = $derived(allGroups.filter((g) => g.work.length === 0).length);
   const pausedCount = $derived(allGroups.filter((g) => g.paused).length);
+  const pinnedGroups = $derived(allGroups.filter((g) => g.pinned));
+  const pinnedCount = $derived(pinnedGroups.length);
   const hiddenGroups = $derived(allGroups.filter((g) => g.hidden));
   const hiddenCount = $derived(hiddenGroups.length);
   const hiddenWithClaims = $derived(hiddenGroups.filter((g) => g.work.length > 0).length);
@@ -236,6 +249,13 @@
   // heartbeat at all, while a live claim can still sit on a stale name.
   const staleGroups = $derived(allGroups.filter((g) => g.presence === "stale"));
   const staleAgentCount = $derived(staleGroups.length);
+  // Pinned cards always render, so the toggles count only the rows they can
+  // still reveal. Otherwise "Show stale (N)" would advertise cards already on
+  // screen and never change the count.
+  const staleToggleCount = $derived(staleGroups.filter((g) => !g.pinned).length);
+  const abandonedToggleCount = $derived(
+    allGroups.filter((g) => g.abandoned && !g.pinned).length,
+  );
   // Choosing the Stale segment is an explicit request to see stale cards, so
   // it implies the Show stale toggle. Without this the hide-stale default
   // filters the very cards the segment exists to show.
@@ -355,9 +375,10 @@
       if (g.hidden && !showHidden && g.name !== focus) continue;
       // Abandoned is the narrower label for a stale, claimless card. Keep it on
       // its own toggle, but let "Show stale" reveal it too so neither toggle
-      // is dead when every abandoned row is also stale.
-      if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) continue;
-      if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) continue;
+      // is dead when every abandoned row is also stale. Pin overrides both
+      // hide rules: a pinned row must stay on the roster and stay visible.
+      if (g.abandoned && !showAbandoned && !staleVisible && !g.pinned && g.name !== focus) continue;
+      if (g.presence === "stale" && !g.abandoned && !staleVisible && !g.pinned && g.name !== focus) continue;
       if (focus && !focusTreeIds.has(g.id)) continue;
       if (staleOnly && g.stale === 0 && g.name !== focus) continue;
       ids.add(g.id);
@@ -384,8 +405,8 @@
   function canRenderCard(g: Group): boolean {
     if (!keptIds.has(g.id)) return false;
     if (g.hidden && !showHidden && g.name !== focus) return false;
-    if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) return false;
-    if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) return false;
+    if (g.abandoned && !showAbandoned && !staleVisible && !g.pinned && g.name !== focus) return false;
+    if (g.presence === "stale" && !g.abandoned && !staleVisible && !g.pinned && g.name !== focus) return false;
     return true;
   }
 
@@ -596,6 +617,14 @@
 
   async function resumeGroup(g: Group) {
     await store.resumeAgent(g.name);
+  }
+
+  async function pinGroup(g: Group) {
+    await store.pinAgent(g.name);
+  }
+
+  async function unpinGroup(g: Group) {
+    await store.unpinAgent(g.name);
   }
 
   async function hideGroup(g: Group) {
@@ -832,6 +861,7 @@
     class="agent-card"
     class:stale={g.stale > 0}
     class:paused={g.paused}
+    class:pinned={g.pinned}
     class:hidden={g.hidden}
     class:orchestrator={isOrchestrator}
     class:subagent-card={!!parent || !!unlinkedParent}
@@ -841,6 +871,7 @@
     data-agent={g.id}
     data-claims={g.work.length}
     data-hidden={g.hidden}
+    data-pinned={g.pinned}
     data-role={isOrchestrator ? "orchestrator" : parent ? "subagent" : unlinkedParent ? "unlinked" : "solo"}
     data-parent={parent?.name ?? ""}
     data-direct-subagents={direct.length}
@@ -862,7 +893,7 @@
         openAgent(g);
       }
     }}
-    aria-label="Open {g.name}, {isOrchestrator ? 'orchestrator, ' : parent ? 'subagent, ' : ''}{g.work.length} issues, {g.presence}{parent ? `, under ${parent.name}` : ''}{g.hidden ? ', hidden' : ''}"
+    aria-label="Open {g.name}, {isOrchestrator ? 'orchestrator, ' : parent ? 'subagent, ' : ''}{g.work.length} issues, {g.presence}{parent ? `, under ${parent.name}` : ''}{g.hidden ? ', hidden' : ''}{g.pinned ? `, pinned${g.pinnedBy ? ` by ${g.pinnedBy}` : ''}` : ''}"
   >
     <header class="acheck">
       <span class="avatar" aria-hidden="true">
@@ -894,6 +925,12 @@
         {/if}
         {#if g.hidden}
           <span class="hidden-badge" title="Hidden from the default view; claims and chat identity remain">hidden</span>
+        {/if}
+        {#if g.pinned}
+          <span
+            class="pinned-badge"
+            title="Pinned{g.pinnedBy ? ` by ${g.pinnedBy}` : ''}; automatic roster cleanup never removes this row. Kill still does."
+          >pinned</span>
         {/if}
         {#if g.abandoned}
           <span class="idle-badge" title={g.abandonedReason ?? "No claims, chat or reviews and idle past the prune window"}>abandoned</span>
@@ -987,6 +1024,18 @@
           onkeydown={(e) => e.stopPropagation()}
         >Unhide</button>
       {/if}
+      <button
+        class="btn sm pin-card"
+        class:on={g.pinned}
+        title={g.pinned
+          ? `Pinned${g.pinnedBy ? ` by ${g.pinnedBy}` : ''}: roster cleanup skips this row. Unpin to let it age out.`
+          : "Pin so roster cleanup never removes this row. Kill is still explicit."}
+        onclick={(e) => {
+          e.stopPropagation();
+          void (g.pinned ? unpinGroup(g) : pinGroup(g));
+        }}
+        onkeydown={(e) => e.stopPropagation()}
+      >{g.pinned ? "Unpin" : "Pin"}</button>
       <span class="card-menu-wrap">
         <button
           class="btn ghost sm card-menu-btn"
@@ -1097,6 +1146,7 @@
       <div class="stat" class:warn={staleAgentCount > 0}><b>{staleAgentCount}</b><span>stale</span></div>
       <div class="stat" class:warn={abandonedCount > 0}><b>{abandonedCount}</b><span>abandoned</span></div>
       <div class="stat" class:warn={hiddenCount > 0}><b>{hiddenCount}</b><span>hidden</span></div>
+      <div class="stat" class:live={pinnedCount > 0}><b>{pinnedCount}</b><span>pinned</span></div>
       <div class="stat"><b>{orchestratorCount}</b><span>orchestrators</span></div>
       <div class="stat"><b>{subagentCount}</b><span>subagents</span></div>
       <div class="stat" class:warn={unlinkedCount > 0}><b>{unlinkedCount}</b><span>unlinked</span></div>
@@ -1136,22 +1186,22 @@
       class:on={showStale}
       aria-pressed={showStale}
       title={staleAgentCount
-        ? `${staleAgentCount} stale agent${staleAgentCount === 1 ? "" : "s"}: no session heartbeat inside the live window. Hidden by default; roster maintenance reaps their old claims.`
+        ? `${staleAgentCount} stale agent${staleAgentCount === 1 ? "" : "s"}: no session heartbeat inside the live window. Pinned stale cards stay visible; the rest are hidden by default and roster maintenance reaps their old claims.`
         : "No stale agents"}
       onclick={() => (showStale = !showStale)}
     >
-      {showStale ? "Showing stale" : "Show stale"} <span>{staleAgentCount}</span>
+      {showStale ? "Showing stale" : "Show stale"} <span>{staleToggleCount}</span>
     </button>
     <button
       class="hidden-toggle abandoned-toggle"
       class:on={showAbandoned}
       aria-pressed={showAbandoned}
       title={abandonedCount
-        ? `${abandonedCount} abandoned agent${abandonedCount === 1 ? "" : "s"}: no claims, chat or reviews, idle past the prune window. Roster maintenance removes these on its next pass.`
+        ? `${abandonedCount} abandoned agent${abandonedCount === 1 ? "" : "s"}: no claims, chat or reviews, idle past the prune window. Pinned rows are never removed; unpinned rows go on the next maintenance pass.`
         : "No abandoned agents"}
       onclick={() => (showAbandoned = !showAbandoned)}
     >
-      {showAbandoned ? "Showing abandoned" : "Show abandoned"} <span>{abandonedCount}</span>
+      {showAbandoned ? "Showing abandoned" : "Show abandoned"} <span>{abandonedToggleCount}</span>
     </button>
     {#if focus}
       <span class="focus-banner">
@@ -1171,7 +1221,7 @@
     <span class="grow"></span>
     <span class="live-note">
       {shownCount} shown · {staleAgentCount} stale · {hiddenCount} hidden{#if hiddenWithClaims} ({hiddenWithClaims} still hold{hiddenWithClaims === 1 ? "s" : ""} claims){/if}
-      · {liveSessions} live · {liveCount} claims heartbeating · {idleSessions} idle
+      · {pinnedCount} pinned · {liveSessions} live · {liveCount} claims heartbeating · {idleSessions} idle
     </span>
     <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Refresh</button>
   </div>
@@ -1210,10 +1260,10 @@
             ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
             : staleOnly
               ? "No stale claims: every claim has a heartbeat inside the last 5 minutes."
-              : staleAgentCount > 0 && !showStale
-                ? `All ${staleAgentCount} agent${staleAgentCount === 1 ? " is" : "s are"} stale and hidden from the default view. Use Show stale to inspect them.`
-                : abandonedCount > 0 && !showAbandoned
-                  ? `All ${abandonedCount} agent${abandonedCount === 1 ? " is" : "s are"} abandoned and hidden from the default view. Use Show abandoned to inspect them.`
+              : staleToggleCount > 0 && !showStale
+                ? `All ${staleToggleCount} agent${staleToggleCount === 1 ? " is" : "s are"} stale and hidden from the default view. Pinned stale cards stay visible. Use Show stale to inspect the rest.`
+                : abandonedToggleCount > 0 && !showAbandoned
+                  ? `All ${abandonedToggleCount} agent${abandonedToggleCount === 1 ? " is" : "s are"} abandoned and hidden from the default view. Pinned rows are never removed. Use Show abandoned to inspect them.`
                   : "No agent is working an issue right now."}
       </p>
       <p class="hint">
@@ -1316,6 +1366,7 @@
             {selected.name}
             {#if selected.login != null && selected.login !== store.me?.login}<span class="alogin">{selected.login}</span>{/if}
             {#if selected.hidden}<span class="hidden-badge">hidden</span>{/if}
+            {#if selected.pinned}<span class="pinned-badge">pinned</span>{/if}
             {#if selected.paused}<span class="paused-badge">paused</span>{/if}
           </div>
           {#if selected.message}<p class="mmessage">{selected.message}</p>{/if}
@@ -1352,6 +1403,11 @@
             <button class="btn sm" onclick={() => void resumeGroup(selected)}>Resume</button>
           {:else}
             <button class="btn sm" onclick={() => void pauseGroup(selected)}>Pause</button>
+          {/if}
+          {#if selected.pinned}
+            <button class="btn sm" onclick={() => void unpinGroup(selected)}>Unpin</button>
+          {:else}
+            <button class="btn sm" onclick={() => void pinGroup(selected)}>Pin</button>
           {/if}
           <button class="btn sm danger" onclick={() => void killGroup(selected)}>Kill</button>
         </div>
@@ -1442,6 +1498,12 @@
           <div class="paused-note">
             Paused{selected.pausedBy ? ` by ${selected.pausedBy}` : ""}{selected.pausedAt ? ` ${ago(selected.pausedAt, now)}` : ""}.
             Claims are kept; new claims are blocked until resumed.
+          </div>
+        {/if}
+        {#if selected.pinned}
+          <div class="pinned-note">
+            Pinned{selected.pinnedBy ? ` by ${selected.pinnedBy}` : ""}{selected.pinnedAt ? ` ${ago(selected.pinnedAt, now)}` : ""}.
+            Automatic roster cleanup never removes this row. Unpin to let it age out; Kill still removes it now.
           </div>
         {/if}
       </div>
@@ -1909,6 +1971,14 @@
     border-color: color-mix(in srgb, var(--status-doing) 55%, var(--line));
     background: color-mix(in srgb, var(--status-doing) 5%, var(--surface));
   }
+  .agent-card.pinned {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  }
+  .pin-card.on {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+    background: var(--accent-soft);
+  }
   .agent-card.hidden {
     border-style: dashed;
     border-color: color-mix(in srgb, var(--status-review) 45%, var(--line));
@@ -2042,6 +2112,7 @@
   .stale-badge,
   .hidden-badge,
   .paused-badge,
+  .pinned-badge,
   .idle-badge,
   .queued-badge {
     display: inline-flex;
@@ -2067,6 +2138,11 @@
     color: var(--status-review);
     background: color-mix(in srgb, var(--status-review) 12%, transparent);
     border: 1px solid color-mix(in srgb, var(--status-review) 35%, transparent);
+  }
+  .pinned-badge {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   }
   .subagent-badge {
     display: inline-flex;
@@ -2371,6 +2447,10 @@
   }
   .hidden-note {
     color: var(--status-review);
+    font-size: 11px;
+  }
+  .pinned-note {
+    color: var(--accent);
     font-size: 11px;
   }
   .no-claims {

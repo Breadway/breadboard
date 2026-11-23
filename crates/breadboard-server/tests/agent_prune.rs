@@ -353,6 +353,102 @@ async fn a_reused_pruned_name_inherits_no_children() {
     assert!(child["orchestrator"].is_null());
 }
 
+/// A pin excludes the row from both prune windows in the candidate select and
+/// in the write re-check, even when every other abandonment condition is true.
+/// The unpinned control rows beside each pinned row are removed in the same
+/// pass: the sessionless one by the short ephemeral window and the
+/// session-bound one by the long window.
+#[tokio::test]
+async fn a_pinned_row_survives_both_prune_modes_past_its_window() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    // Well past both windows: the long session-bound window (24h) and the
+    // short sessionless window (2h).
+    let long_stale = now - Duration::hours(30);
+    let short_stale = now - Duration::hours(6);
+
+    insert_session(&app.db, "pinned-ghost", None, short_stale, false).await;
+    insert_session(&app.db, "unpinned-ghost", None, short_stale, false).await;
+    insert_session(
+        &app.db,
+        "pinned-session",
+        Some("ses_pinned_old"),
+        long_stale,
+        false,
+    )
+    .await;
+    insert_session(
+        &app.db,
+        "unpinned-session",
+        Some("ses_unpinned_old"),
+        long_stale,
+        false,
+    )
+    .await;
+    sqlx::query(
+        "UPDATE agent_sessions SET pinned = 1
+          WHERE agent_name IN ('pinned-ghost', 'pinned-session')",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // The roster preview must agree before the pass runs: a pin is not
+    // abandoned, so it never advertises itself for removal.
+    let roster: Value = reqwest::Client::new()
+        .get(format!("http://{}/api/agents/roster", app.addr))
+        .header("authorization", format!("Bearer {}", app.token))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = |name: &str| {
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["agent_name"] == name)
+            .unwrap_or_else(|| panic!("roster row {name} missing: {roster}"))
+    };
+    assert_eq!(row("pinned-ghost")["pinned"], true);
+    assert_eq!(row("pinned-ghost")["abandoned"], false);
+    assert_eq!(row("pinned-session")["pinned"], true);
+    assert_eq!(row("pinned-session")["abandoned"], false);
+    assert_eq!(row("unpinned-ghost")["abandoned"], true);
+    assert_eq!(row("unpinned-session")["abandoned"], true);
+
+    let pruned =
+        agent_prune::prune_abandoned_agents(&app.db, 24, 2, Some(&HashSet::new()))
+            .await
+            .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["unpinned-ghost", "unpinned-session"]);
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions ORDER BY agent_name")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec!["pinned-ghost", "pinned-session"]);
+
+    // Unpinning is the documented way to let a row age out; the next pass
+    // removes both with the same windows.
+    sqlx::query(
+        "UPDATE agent_sessions SET pinned = 0
+          WHERE agent_name IN ('pinned-ghost', 'pinned-session')",
+    )
+    .execute(&app.db)
+    .await
+    .unwrap();
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["pinned-ghost", "pinned-session"]);
+}
+
 #[tokio::test]
 async fn a_shorter_window_prunes_a_row_a_longer_one_keeps() {
     let app = tu::spawn().await;

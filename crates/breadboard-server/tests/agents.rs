@@ -1361,6 +1361,218 @@ async fn pause_and_resume_unknown_are_404() {
     assert_eq!(roster.as_array().unwrap().len(), 0);
 }
 
+/// Pin is a roster-maintenance guard, not a lifecycle freeze: it is recorded
+/// with its actor, survives re-registration, a session-id change and a rename,
+/// does not block new work, and kill still removes the row. Unpin is
+/// idempotent and lets the row age out.
+#[tokio::test]
+async fn pin_survives_registration_and_rename_but_kill_removes_it() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    ensure_project(&c, &base, &auth).await;
+    c.post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "keeper", "session_id": "ses_keeper" }))
+        .send()
+        .await
+        .unwrap();
+
+    let pinned: Value = c
+        .post(format!("{base}/api/agents/keeper/pin"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pinned["pinned"], true);
+    assert_eq!(pinned["pinned_by_login"], "tester");
+    assert!(
+        pinned["pinned_at"].is_string(),
+        "pin records when it happened"
+    );
+
+    // Repeated pin is a no-op: one state_change event, summary "Pinned".
+    let again: Value = c
+        .post(format!("{base}/api/agents/keeper/pin"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(again["pinned"], true);
+    let events: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+        "SELECT kind, summary, actor_id FROM agent_events
+          WHERE agent_name = 'keeper' AND kind = 'state_change'
+          ORDER BY id",
+    )
+    .fetch_all(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(events.len(), 1, "a repeated pin writes no duplicate event");
+    assert_eq!(events[0].0, "state_change");
+    assert_eq!(events[0].1, "Pinned");
+    assert!(events[0].2.is_some(), "the event records the actor");
+
+    // Re-registration with a changed session id refreshes the row and keeps
+    // the pin: the upsert never lists pinned. Age the row past the live window
+    // first, because a live name intentionally refuses a different session id.
+    let stale_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'keeper'")
+        .bind(&stale_at)
+        .execute(&app.db)
+        .await
+        .unwrap();
+    let reg: Value = c
+        .post(format!("{base}/api/agents/register"))
+        .header("authorization", &auth)
+        .json(&json!({
+            "agent_name": "keeper",
+            "session_id": "ses_keeper_new",
+            "session_title": "keeper session"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reg["session_id"], "ses_keeper_new");
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(roster_row(&roster, "keeper")["pinned"], true);
+
+    // A pin does not freeze work: a pinned agent can still claim.
+    let issue = create_issue(&c, &base, &auth, "pinned work").await;
+    let key = issue["key"].as_str().unwrap();
+    let claimed = c
+        .post(format!("{base}/api/issues/{key}/claim"))
+        .header("authorization", &auth)
+        .json(&json!({ "agent_name": "keeper", "session_id": "ses_keeper_new" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(claimed.status(), 201, "pin never blocks a claim");
+
+    // Rename keeps the pin on the same row and the old name disappears.
+    let renamed: Value = c
+        .post(format!("{base}/api/agents/keeper/rename"))
+        .header("authorization", &auth)
+        .json(&json!({ "new_name": "keeper-renamed" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(renamed["agent_name"], "keeper-renamed");
+    assert_eq!(renamed["pinned"], true, "rename keeps the pin");
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(roster_row(&roster, "keeper-renamed")["pinned"], true);
+    assert!(
+        roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| row["agent_name"] != "keeper"),
+        "the old name is gone"
+    );
+
+    // Unpin clears the metadata and is idempotent.
+    for _ in 0..2 {
+        let unpinned: Value = c
+            .post(format!("{base}/api/agents/keeper-renamed/unpin"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(unpinned["pinned"], false);
+        assert!(unpinned["pinned_by_login"].is_null());
+        assert!(unpinned["pinned_at"].is_null());
+    }
+
+    // Kill is explicit and still removes a pinned row, even with claims.
+    c.post(format!("{base}/api/agents/keeper-renamed/pin"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    let killed = c
+        .post(format!("{base}/api/agents/keeper-renamed/kill"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(killed.status(), 200);
+    let remaining: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_sessions WHERE agent_name = 'keeper-renamed'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(remaining, 0, "kill removes a pinned row");
+}
+
+/// Pin and unpin use the same bearer auth as pause/resume and never create a
+/// phantom row for an unknown name.
+#[tokio::test]
+async fn pin_and_unpin_require_auth_and_404_unknown() {
+    let app = tu::spawn().await;
+    let c = reqwest::Client::new();
+    let base = format!("http://{}", app.addr);
+    let auth = format!("Bearer {}", app.token);
+
+    for action in ["pin", "unpin"] {
+        let unauthenticated = c
+            .post(format!("{base}/api/agents/whoever/{action}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), 401, "unauthenticated {action}");
+        let unknown = c
+            .post(format!("{base}/api/agents/no-such-agent-zz/{action}"))
+            .header("authorization", &auth)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), 404, "unknown {action}");
+    }
+    let roster: Value = c
+        .get(format!("{base}/api/agents/roster"))
+        .header("authorization", &auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(roster.as_array().unwrap().len(), 0, "no phantom row");
+}
+
 /// A rename before claims is free; after claims it moves the claims, profile
 /// and session row in one transaction and never leaves the old name behind.
 #[tokio::test]

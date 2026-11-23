@@ -712,6 +712,11 @@ export interface AgentRosterEntry {
   paused_by?: number | null;
   paused_by_login?: string | null;
   paused_at?: string | null;
+  /** Pin keeps automatic roster maintenance from removing this row. */
+  pinned: boolean;
+  pinned_by?: number | null;
+  pinned_by_login?: string | null;
+  pinned_at?: string | null;
   /** Hidden from the default Agents view. Claims and chat identity remain. */
   hidden: boolean;
   hidden_by?: number | null;
@@ -1058,6 +1063,10 @@ export class BreadboardClient {
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/pause`);
   resumeAgent = (name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/resume`);
+  pinAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/pin`);
+  unpinAgent = (name: string) =>
+    this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/unpin`);
   hideAgent = (name: string) =>
     this.req<AgentRosterEntry>("POST", `/api/agents/${encodeURIComponent(name)}/hide`);
   unhideAgent = (name: string) =>

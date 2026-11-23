@@ -24,23 +24,23 @@ assert.ok(
   "the Stale claims segment implies Show stale instead of fighting the default",
 );
 assert.ok(
-  agents.includes('if (g.abandoned && !showAbandoned && !staleVisible && g.name !== focus) continue;'),
+  agents.includes('if (g.abandoned && !showAbandoned && !staleVisible && !g.pinned && g.name !== focus) continue;'),
   "the abandoned toggle stays independent, and Show stale can reveal abandoned too",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) continue;'),
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && !g.pinned && g.name !== focus) continue;'),
   "the default view filters non-abandoned stale roster presence unless stale is visible",
 );
 assert.ok(
-  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && g.name !== focus) return false;'),
+  agents.includes('if (g.presence === "stale" && !g.abandoned && !staleVisible && !g.pinned && g.name !== focus) return false;'),
   "stale cards cannot render while hidden by default",
 );
 assert.ok(
   agents.includes('const staleGroups = $derived(allGroups.filter((g) => g.presence === "stale"));'),
-  "the toggle count derives from roster presence, not claim heartbeat",
+  "the toggle count derives from roster presence and excludes always-visible pinned cards",
 );
 assert.ok(
-  agents.includes('{showStale ? "Showing stale" : "Show stale"} <span>{staleAgentCount}</span>'),
+  agents.includes('{showStale ? "Showing stale" : "Show stale"} <span>{staleToggleCount}</span>'),
   "the toggle is labelled Show stale with its count",
 );
 assert.ok(
@@ -62,7 +62,7 @@ assert.ok(
   "the header reports live, abandoned and hidden beside stale",
 );
 assert.ok(
-  agents.includes('g.paused ? 2 : g.presence === "live" ? 0 : 1'),
+  agents.includes('(g.pinned ? 0 : 3) + (g.paused ? 2 : g.presence === "live" ? 0 : 1)'),
   "live cards sort before stale cards, with paused last",
 );
 assert.ok(
@@ -74,4 +74,4 @@ assert.ok(
   "the default empty state explains that stale cards are hidden by default",
 );
 
-console.log("agents-stale static checks passed: 14 assertions over Agents.svelte");
+console.log("agents-stale static checks passed: 16 assertions over Agents.svelte");

@@ -724,6 +724,31 @@ class Store {
     }
   }
 
+  /** Pin keeps the row out of automatic roster maintenance; kill still works. */
+  async pinAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.pinAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.info(`Pinned ${entry.agent_name}; roster cleanup skips it until unpinned`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't pin ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
+  async unpinAgent(name: string): Promise<boolean> {
+    try {
+      const entry = await api.unpinAgent(name);
+      this.roster = [...this.roster.filter((r) => r.agent_name !== entry.agent_name), entry];
+      this.info(`Unpinned ${entry.agent_name}; it can age out after the idle window`);
+      return true;
+    } catch (e) {
+      this.flash(`Couldn't unpin ${name}: ${errMsg(e)}`);
+      return false;
+    }
+  }
+
   /** Hide an agent from the default Agents view; claims and chat stay. */
   async hideAgent(name: string): Promise<boolean> {
     try {

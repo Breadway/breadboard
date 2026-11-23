@@ -92,6 +92,8 @@ pub fn router(state: AppState) -> Router {
         .route("/agents/{name}/kill", post(api::kill_agent))
         .route("/agents/{name}/pause", post(api::pause_agent))
         .route("/agents/{name}/resume", post(api::resume_agent))
+        .route("/agents/{name}/pin", post(api::pin_agent))
+        .route("/agents/{name}/unpin", post(api::unpin_agent))
         .route("/agents/{name}/hide", post(api::hide_agent))
         .route("/agents/{name}/unhide", post(api::unhide_agent))
         .route("/agents/{name}/rename", post(api::rename_agent))

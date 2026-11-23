@@ -95,14 +95,17 @@ max_exclusive_per_orchestrator = 100  # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCH
 maintenance_interval_mins = 60              # BREADBOARD_AGENTS_MAINTENANCE_INTERVAL_MINS
 
 # A row with an OpenCode session id is removed only when it has no claims, no
-# chat membership or DM, no open review request, is not paused, and has not
-# heartbeated for this many hours. Subagent history and parent links survive a
-# day. 0 disables pruning of session-bound rows.
+# chat membership or DM, no open review request, is not paused, is not pinned,
+# and has not heartbeated for this many hours. Subagent history and parent
+# links survive a day. A pin only guards this automatic pass: kill still
+# removes the row, and unpinning restarts the idle window. 0 disables pruning
+# of session-bound rows.
 prune_after_hours = 24                      # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS
 
-# A sessionless row is a one-shot identity. Under the same protections it is
-# removed after this many hours, which clears ghosts from MCP clients that
-# cannot report a session id. 0 disables removal of sessionless rows.
+# A sessionless row is a one-shot identity. Under the same protections (claims,
+# chat, reviews, pause and pin) it is removed after this many hours, which
+# clears ghosts from MCP clients that cannot report a session id. 0 disables
+# removal of sessionless rows.
 ephemeral_prune_after_hours = 2             # BREADBOARD_AGENTS_EPHEMERAL_PRUNE_AFTER_HOURS
 
 # Stale claim reaping, run before each prune pass. A claim is released when its
