@@ -1,4 +1,4 @@
-# breadboard: bread event integration
+# board: bread event integration
 
 breadboard is a self-hosted issue tracker: it works exactly the same with or
 without `breadd` running. When breadd *is* present and the
