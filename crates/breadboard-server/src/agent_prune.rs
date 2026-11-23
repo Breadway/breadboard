@@ -14,6 +14,7 @@
 //! - no chat room membership or DM,
 //! - no open review request as the reviewer,
 //! - not paused by hand,
+//! - not pinned by hand,
 //! - no heartbeat inside the row's idle window.
 //!
 //! The idle window depends on whether the row has an OpenCode session id. A
@@ -88,10 +89,11 @@ pub fn prune_window_hours(
 /// True when this row would be pruned under the protections above. The SQL
 /// candidate query applies the same rule; this helper exists for the roster
 /// flag and for tests.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)] // one explicit argument per protection
 pub fn is_abandoned(
     claim_count: i64,
     paused: bool,
+    pinned: bool,
     has_chat: bool,
     has_open_review: bool,
     sessionless: bool,
@@ -100,7 +102,7 @@ pub fn is_abandoned(
     ephemeral_prune_after_hours: u64,
     now: DateTime<Utc>,
 ) -> bool {
-    if paused || claim_count > 0 || has_chat || has_open_review {
+    if paused || pinned || claim_count > 0 || has_chat || has_open_review {
         return false;
     }
     let Some(window_hours) =
@@ -142,6 +144,7 @@ pub async fn prune_abandoned_agents(
         "SELECT s.agent_name, s.session_id, s.last_seen
            FROM agent_sessions s
           WHERE s.paused = 0
+            AND s.pinned = 0
             AND julianday(s.last_seen) < CASE
                   WHEN s.session_id IS NULL THEN julianday(?1)
                   ELSE julianday(?2)
@@ -195,6 +198,7 @@ pub async fn prune_abandoned_agents(
             "DELETE FROM agent_sessions
               WHERE agent_name = ?1
                 AND paused = 0
+                AND pinned = 0
                 AND julianday(last_seen) < CASE
                       WHEN session_id IS NULL THEN julianday(?2)
                       ELSE julianday(?3)
@@ -453,6 +457,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             idle(now, 2, 0),
             24,
@@ -464,6 +469,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             Some(now - TimeDelta::hours(2) + TimeDelta::seconds(1)),
             24,
@@ -472,6 +478,7 @@ mod tests {
         ));
         assert!(!is_abandoned(
             0,
+            false,
             false,
             false,
             false,
@@ -492,6 +499,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             idle(now, 2, 0),
             24,
             2,
@@ -499,6 +507,7 @@ mod tests {
         ));
         assert!(is_abandoned(
             0,
+            false,
             false,
             false,
             false,
@@ -521,7 +530,26 @@ mod tests {
             (0, false, false, true),
         ] {
             assert!(!is_abandoned(
-                claim, paused, chat, review, true, very_old, 24, 2, now
+                claim, paused, false, chat, review, true, very_old, 24, 2, now
+            ));
+        }
+    }
+
+    #[test]
+    fn a_pin_protects_both_windows_at_any_idle_time() {
+        let now = Utc::now();
+        for sessionless in [true, false] {
+            assert!(!is_abandoned(
+                0,
+                false,
+                true,
+                false,
+                false,
+                sessionless,
+                very_old(),
+                24,
+                2,
+                now
             ));
         }
     }
@@ -535,6 +563,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             idle(now, 5, 0),
             24,
@@ -543,6 +572,7 @@ mod tests {
         ));
         assert!(!is_abandoned(
             0,
+            false,
             false,
             false,
             false,
@@ -559,6 +589,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             very_old(),
             0,
             2,
@@ -567,6 +598,7 @@ mod tests {
         // both 0 removes nothing.
         assert!(!is_abandoned(
             0,
+            false,
             false,
             false,
             false,

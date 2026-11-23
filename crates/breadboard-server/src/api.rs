@@ -1487,6 +1487,29 @@ pub async fn resume_agent(
     Ok(Json(entry))
 }
 
+/// Pin a known agent so automatic roster maintenance never removes its row.
+/// Claims, chat and heartbeats keep working; kill is still explicit.
+pub async fn pin_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, _changed) =
+        store::pin_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
+    Ok(Json(entry))
+}
+
+/// Unpin an agent so the next maintenance pass may remove it once it is idle.
+pub async fn unpin_agent(
+    State(app): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> AppResult<Json<breadboard_core::dto::AgentRosterEntry>> {
+    let (entry, _changed) =
+        store::unpin_agent(&app.db, user.0.id, &name, &app.config.claim_limits()).await?;
+    Ok(Json(entry))
+}
+
 /// Hide an agent from the default Agents view. Claims and chat identity stay.
 pub async fn hide_agent(
     State(app): State<AppState>,

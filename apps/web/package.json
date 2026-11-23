@@ -17,6 +17,8 @@
     "test:agents-ux": "node tests/agents-ux.browser.mjs",
     "test:agents-stale": "node tests/agents-stale.static.mjs",
     "test:agents-stale-filter": "node tests/agents-stale-filter.browser.mjs",
+    "test:agents-pinned": "node tests/agents-pinned.static.mjs",
+    "test:agents-pinned-ui": "node tests/agents-pinned.browser.mjs",
     "test:chat-dm": "node tests/chat-dm.browser.mjs",
     "test:chat-followups": "node tests/chat-followups.browser.mjs",
     "test:web-a11y": "node tests/web-a11y.browser.mjs",

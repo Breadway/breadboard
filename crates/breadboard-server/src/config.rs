@@ -48,13 +48,14 @@ pub struct AgentRosterConfig {
     pub maintenance_interval_mins: u64,
     /// Hours without a heartbeat before a session-bound agent row is
     /// considered abandoned. Rows that carry a `session_id` use this window so
-    /// subagent history and parent links survive a day. `0` disables pruning
-    /// of session-bound rows. Default 24.
+    /// subagent history and parent links survive a day. The row must also be
+    /// unpaused and unpinned; a pin only guards this automatic pass, so kill
+    /// still removes it. `0` disables pruning of session-bound rows. Default 24.
     pub prune_after_hours: u64,
     /// Hours without a heartbeat before a sessionless agent row is removed.
     /// A sessionless row is a one-shot identity with no history: it applies
     /// only when the row also has no claims, no chat membership or DM, no open
-    /// review as reviewer, and is not paused by hand. `0` disables removal of
+    /// review as reviewer, and is not paused or pinned. `0` disables removal of
     /// sessionless rows. Default 2.
     pub ephemeral_prune_after_hours: u64,
     /// Hours without a claim heartbeat before roster maintenance releases it,

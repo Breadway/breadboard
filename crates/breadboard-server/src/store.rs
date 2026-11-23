@@ -3112,6 +3112,10 @@ struct AgentSessionRow {
     paused_by: Option<i64>,
     paused_by_login: Option<String>,
     paused_at: Option<String>,
+    pinned: i64,
+    pinned_by: Option<i64>,
+    pinned_by_login: Option<String>,
+    pinned_at: Option<String>,
 }
 
 #[derive(FromRow)]
@@ -3133,13 +3137,15 @@ struct AgentHiddenRow {
 const AGENT_SESSION_COLS: &str =
     "s.agent_name, s.session_id, s.session_title, s.parent_session_id, s.parent_agent_name, \
     s.host, s.pid, s.note, s.user_id, u.login AS login, s.first_seen, s.last_seen, s.paused, \
-    s.paused_by, p.login AS paused_by_login, s.paused_at";
+    s.paused_by, p.login AS paused_by_login, s.paused_at, s.pinned, s.pinned_by, \
+    pb.login AS pinned_by_login, s.pinned_at";
 
 fn agent_session_join() -> String {
     format!(
         "SELECT {AGENT_SESSION_COLS} FROM agent_sessions s \
          LEFT JOIN users u ON u.id = s.user_id \
-         LEFT JOIN users p ON p.id = s.paused_by"
+         LEFT JOIN users p ON p.id = s.paused_by \
+         LEFT JOIN users pb ON pb.id = s.pinned_by"
     )
 }
 
@@ -3171,6 +3177,10 @@ fn empty_roster_entry(name: &str) -> AgentRosterEntry {
         paused_by: None,
         paused_by_login: None,
         paused_at: None,
+        pinned: false,
+        pinned_by: None,
+        pinned_by_login: None,
+        pinned_at: None,
         hidden: false,
         hidden_by: None,
         hidden_by_login: None,
@@ -3825,6 +3835,111 @@ pub async fn resume_agent(
     Ok((entry, changed))
 }
 
+/// Pin a known name so automatic roster maintenance never removes the row.
+/// Claims, chat, heartbeats and rename keep working; kill is still explicit.
+/// A claim-only or profile-only name gets a session row so the pin has
+/// somewhere to live, exactly like pause. Idempotent; returns whether the call
+/// changed anything.
+pub async fn pin_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<(AgentRosterEntry, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
+
+    let ts = now_rfc3339();
+    upsert_agent_session(
+        db, user_id, &name, None, None, None, None, None, None, None, &ts,
+    )
+    .await?;
+    let was_pinned: Option<i64> =
+        sqlx::query_scalar("SELECT pinned FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let changed = was_pinned != Some(1);
+    if changed {
+        sqlx::query(
+            "UPDATE agent_sessions
+                SET pinned = 1, pinned_by = ?2, pinned_at = ?3
+              WHERE agent_name = ?1",
+        )
+        .bind(&name)
+        .bind(user_id)
+        .bind(&ts)
+        .execute(db)
+        .await?;
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary("Pinned")
+            .actor(Some(user_id)),
+        )
+        .await;
+    }
+
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((entry, changed))
+}
+
+/// Clear a pin so the row can age out through the next maintenance pass.
+/// Idempotent; unknown names are a 404.
+pub async fn unpin_agent(
+    db: &SqlitePool,
+    user_id: i64,
+    raw_name: &str,
+    limits: &ClaimLimits,
+) -> AppResult<(AgentRosterEntry, bool)> {
+    let name = names::normalize(raw_name);
+    validate_agent_name(&name)?;
+    let known = known_agent_names(db).await?;
+    if !known.contains(&name) {
+        return Err(AppError::NotFound);
+    }
+
+    let was_pinned: Option<i64> =
+        sqlx::query_scalar("SELECT pinned FROM agent_sessions WHERE agent_name = ?1")
+            .bind(&name)
+            .fetch_optional(db)
+            .await?;
+    let changed = was_pinned == Some(1);
+    if changed {
+        sqlx::query(
+            "UPDATE agent_sessions
+                SET pinned = 0, pinned_by = NULL, pinned_at = NULL
+              WHERE agent_name = ?1",
+        )
+        .bind(&name)
+        .execute(db)
+        .await?;
+        crate::agent_events::record_best_effort(
+            db,
+            crate::agent_events::AgentEventInsert::new(
+                &name,
+                breadboard_core::AgentEventKind::StateChange,
+            )
+            .summary("Unpinned")
+            .actor(Some(user_id)),
+        )
+        .await;
+    }
+    let entry = roster_entry(db, &name, limits)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok((entry, changed))
+}
+
 /// Hide a known agent name from the default Agents view. Idempotent; claims
 /// and chat identity are deliberately untouched.
 pub async fn hide_agent(
@@ -4401,6 +4516,10 @@ pub async fn agent_roster_with_window(
         entry.paused_by = session.paused_by;
         entry.paused_by_login = session.paused_by_login.clone();
         entry.paused_at = session.paused_at.as_deref().map(parse_ts);
+        entry.pinned = session.pinned != 0;
+        entry.pinned_by = session.pinned_by;
+        entry.pinned_by_login = session.pinned_by_login.clone();
+        entry.pinned_at = session.pinned_at.as_deref().map(parse_ts);
         if entry.user_id.is_none() {
             entry.user_id = session.user_id;
             entry.login = session.login.clone();
@@ -4439,6 +4558,7 @@ pub async fn agent_roster_with_window(
             entry.abandoned = crate::agent_prune::is_abandoned(
                 entry.claim_count,
                 entry.paused,
+                entry.pinned,
                 has_chat,
                 has_review,
                 entry.session_id.is_none(),
