@@ -1147,7 +1147,7 @@
       class:on={showAbandoned}
       aria-pressed={showAbandoned}
       title={abandonedCount
-        ? `${abandonedCount} abandoned agent${abandonedCount === 1 ? "" : "s"}: no claims, chat or reviews, idle past the prune window. Roster maintenance removes these daily.`
+        ? `${abandonedCount} abandoned agent${abandonedCount === 1 ? "" : "s"}: no claims, chat or reviews, idle past the prune window. Roster maintenance removes these on its next pass.`
         : "No abandoned agents"}
       onclick={() => (showAbandoned = !showAbandoned)}
     >
