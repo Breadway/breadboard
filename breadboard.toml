@@ -89,11 +89,21 @@ max_exclusive_per_agent        = 10   # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGEN
 max_exclusive_per_orchestrator = 100  # BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_ORCHESTRATOR
 
 [agents]
-# Daily roster hygiene. A row is removed only when it has no claims, no chat
-# membership or DM, no open review request, is not paused, and has not
-# heartbeated for this many hours. Sessionless rows and rows whose OpenCode
-# session disappeared use the same rule. 0 disables pruning.
-prune_after_hours = 24         # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS
+# Periodic roster hygiene. Each pass first reaps stale claims, then removes
+# rows nobody is using. Runs once at startup and then this many minutes apart.
+# 0 disables the periodic passes but keeps the startup pass.
+maintenance_interval_mins = 60              # BREADBOARD_AGENTS_MAINTENANCE_INTERVAL_MINS
+
+# A row with an OpenCode session id is removed only when it has no claims, no
+# chat membership or DM, no open review request, is not paused, and has not
+# heartbeated for this many hours. Subagent history and parent links survive a
+# day. 0 disables pruning of session-bound rows.
+prune_after_hours = 24                      # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS
+
+# A sessionless row is a one-shot identity. Under the same protections it is
+# removed after this many hours, which clears ghosts from MCP clients that
+# cannot report a session id. 0 disables removal of sessionless rows.
+ephemeral_prune_after_hours = 2             # BREADBOARD_AGENTS_EPHEMERAL_PRUNE_AFTER_HOURS
 
 # Stale claim reaping, run before each prune pass. A claim is released when its
 # own heartbeat is this many hours old, its session id is null or is not a live
@@ -101,4 +111,4 @@ prune_after_hours = 24         # BREADBOARD_AGENTS_PRUNE_AFTER_HOURS
 # session keeps only the claims that carry its own session id. Each release
 # keeps a handoff row, an agent event and an audit entry naming the previous
 # owner. 0 disables reaping.
-claim_reap_after_hours = 72    # BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS
+claim_reap_after_hours = 72                 # BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS

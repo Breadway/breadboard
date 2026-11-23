@@ -1424,6 +1424,7 @@ pub async fn agent_roster(
             &app.db,
             &app.config.claim_limits(),
             app.config.agents.prune_after_hours,
+            app.config.agents.ephemeral_prune_after_hours,
         )
         .await?,
     ))

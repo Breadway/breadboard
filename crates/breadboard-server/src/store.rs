@@ -4264,22 +4264,35 @@ pub async fn set_agent_orchestrator(
 /// configured window.
 pub const AGENT_ABANDONED_AFTER_HOURS: u64 = 24;
 
+/// Default short window for sessionless rows, mirroring
+/// `agents.ephemeral_prune_after_hours`.
+pub const AGENT_EPHEMERAL_AFTER_HOURS: u64 = 2;
+
 /// The union of sessions, profiles and claims, deduplicated by lowercased
 /// agent name. This is what the Agents page renders.
 pub async fn agent_roster(
     db: &SqlitePool,
     limits: &ClaimLimits,
 ) -> AppResult<Vec<AgentRosterEntry>> {
-    agent_roster_with_window(db, limits, AGENT_ABANDONED_AFTER_HOURS).await
+    agent_roster_with_window(
+        db,
+        limits,
+        AGENT_ABANDONED_AFTER_HOURS,
+        AGENT_EPHEMERAL_AFTER_HOURS,
+    )
+    .await
 }
 
-/// Roster with the abandoned flag computed against the configured window.
+/// Roster with the abandoned flag computed against the configured windows.
 /// The same predicate as the maintenance pass: no claims, no chat membership
-/// or DM, no open review request, not paused, and a stale heartbeat.
+/// or DM, no open review request, not paused, and a stale heartbeat. Rows with
+/// no OpenCode session use the short ephemeral window; session-bound rows use
+/// the long one.
 pub async fn agent_roster_with_window(
     db: &SqlitePool,
     limits: &ClaimLimits,
     prune_after_hours: u64,
+    ephemeral_prune_after_hours: u64,
 ) -> AppResult<Vec<AgentRosterEntry>> {
     let claims = list_claims(db).await?;
     let usage = claim_usage(db).await?;
@@ -4428,8 +4441,10 @@ pub async fn agent_roster_with_window(
                 entry.paused,
                 has_chat,
                 has_review,
+                entry.session_id.is_none(),
                 entry.last_seen,
                 prune_after_hours,
+                ephemeral_prune_after_hours,
                 now,
             );
             if entry.abandoned {
@@ -4437,13 +4452,17 @@ pub async fn agent_roster_with_window(
                     .last_seen
                     .map(|at| (now - at).num_hours().max(0))
                     .unwrap_or(0);
-                entry.abandoned_reason = Some(format!(
-                    "no claims, chat or reviews; idle {idle_hours}h{}",
-                    if entry.session_id.is_none() {
-                        " (sessionless)"
+                let sessionless_note = if entry.session_id.is_none() {
+                    if ephemeral_prune_after_hours > 0 {
+                        " (ephemeral sessionless)"
                     } else {
-                        ""
+                        " (sessionless)"
                     }
+                } else {
+                    ""
+                };
+                entry.abandoned_reason = Some(format!(
+                    "no claims, chat or reviews; idle {idle_hours}h{sessionless_note}"
                 ));
             }
             // Budget visibility: per-agent usage is `exclusive_count`, and the

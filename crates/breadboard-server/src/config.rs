@@ -36,15 +36,27 @@ pub struct Config {
     pub agents: AgentRosterConfig,
 }
 
-/// Agent roster lifecycle. Rows nobody is using are pruned by a daily
+/// Agent roster lifecycle. Rows nobody is using are pruned by a periodic
 /// maintenance pass, after a stale-claim pass has released claims that would
 /// otherwise pin them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct AgentRosterConfig {
-    /// Hours without a heartbeat before a claimless, chatless, review-free
-    /// agent row is considered abandoned. `0` disables pruning. Default 24.
+    /// Minutes between periodic maintenance passes, each of which reaps stale
+    /// claims and then prunes abandoned rows. `0` disables the periodic pass
+    /// but keeps the pass that runs once at startup. Default 60.
+    pub maintenance_interval_mins: u64,
+    /// Hours without a heartbeat before a session-bound agent row is
+    /// considered abandoned. Rows that carry a `session_id` use this window so
+    /// subagent history and parent links survive a day. `0` disables pruning
+    /// of session-bound rows. Default 24.
     pub prune_after_hours: u64,
+    /// Hours without a heartbeat before a sessionless agent row is removed.
+    /// A sessionless row is a one-shot identity with no history: it applies
+    /// only when the row also has no claims, no chat membership or DM, no open
+    /// review as reviewer, and is not paused by hand. `0` disables removal of
+    /// sessionless rows. Default 2.
+    pub ephemeral_prune_after_hours: u64,
     /// Hours without a claim heartbeat before roster maintenance releases it,
     /// so a dead MCP process cannot pin its agent row forever. A claim survives
     /// only when its own `session_id` matches a live session for that agent
@@ -355,7 +367,9 @@ impl Default for ClaimBudgetConfig {
 impl Default for AgentRosterConfig {
     fn default() -> Self {
         Self {
+            maintenance_interval_mins: 60,
             prune_after_hours: 24,
+            ephemeral_prune_after_hours: 2,
             claim_reap_after_hours: 72,
         }
     }
@@ -470,9 +484,19 @@ impl Config {
                 self.claims.max_exclusive_per_orchestrator = n.max(1);
             }
         }
+        if let Ok(v) = std::env::var("BREADBOARD_AGENTS_MAINTENANCE_INTERVAL_MINS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.agents.maintenance_interval_mins = n;
+            }
+        }
         if let Ok(v) = std::env::var("BREADBOARD_AGENTS_PRUNE_AFTER_HOURS") {
             if let Ok(n) = v.parse::<u64>() {
                 self.agents.prune_after_hours = n;
+            }
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_AGENTS_EPHEMERAL_PRUNE_AFTER_HOURS") {
+            if let Ok(n) = v.parse::<u64>() {
+                self.agents.ephemeral_prune_after_hours = n;
             }
         }
         if let Ok(v) = std::env::var("BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS") {

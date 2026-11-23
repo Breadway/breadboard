@@ -105,10 +105,38 @@ async fn insert_open_review(db: &SqlitePool, issue_id: i64, name: &str) {
 #[test]
 fn prune_window_defaults_and_is_configurable() {
     let default = Config::default();
+    assert_eq!(default.agents.maintenance_interval_mins, 60);
     assert_eq!(default.agents.prune_after_hours, 24);
+    assert_eq!(default.agents.ephemeral_prune_after_hours, 2);
 
-    let configured: Config = toml::from_str("[agents]\nprune_after_hours = 48\n").unwrap();
+    let configured: Config = toml::from_str(
+        "[agents]\nmaintenance_interval_mins = 15\nprune_after_hours = 48\nephemeral_prune_after_hours = 4\n",
+    )
+    .unwrap();
+    assert_eq!(configured.agents.maintenance_interval_mins, 15);
     assert_eq!(configured.agents.prune_after_hours, 48);
+    assert_eq!(configured.agents.ephemeral_prune_after_hours, 4);
+
+    let disabled: Config = toml::from_str(
+        "[agents]\nmaintenance_interval_mins = 0\nprune_after_hours = 0\nephemeral_prune_after_hours = 0\n",
+    )
+    .unwrap();
+    assert_eq!(disabled.agents.maintenance_interval_mins, 0);
+    assert_eq!(disabled.agents.prune_after_hours, 0);
+    assert_eq!(disabled.agents.ephemeral_prune_after_hours, 0);
+}
+
+#[test]
+fn zero_interval_disables_only_the_periodic_pass() {
+    assert_eq!(
+        agent_prune::maintenance_interval(60),
+        Some(std::time::Duration::from_secs(3600))
+    );
+    assert_eq!(
+        agent_prune::maintenance_interval(5),
+        Some(std::time::Duration::from_secs(300))
+    );
+    assert_eq!(agent_prune::maintenance_interval(0), None);
 }
 
 #[tokio::test]
@@ -181,7 +209,7 @@ async fn prunes_only_abandoned_rows_and_audits_each_removal() {
 
     // Empty set means every named session is gone from OpenCode.
     let opencode = HashSet::new();
-    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, Some(&opencode))
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, Some(&opencode))
         .await
         .unwrap();
     let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
@@ -259,7 +287,7 @@ async fn a_reused_pruned_name_inherits_no_children() {
     .await
     .unwrap();
 
-    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, None)
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 0, None)
         .await
         .unwrap();
     let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
@@ -332,20 +360,266 @@ async fn a_shorter_window_prunes_a_row_a_longer_one_keeps() {
     insert_session(
         &app.db,
         "six-hour-idle",
-        None,
+        Some("ses_six_hour"),
         now - Duration::hours(6),
         false,
     )
     .await;
 
-    let kept = agent_prune::prune_abandoned_agents(&app.db, 24, None)
+    let kept = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
         .await
         .unwrap();
     assert!(kept.is_empty());
 
-    let pruned = agent_prune::prune_abandoned_agents(&app.db, 2, None)
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 2, 2, None)
         .await
         .unwrap();
     assert_eq!(pruned.len(), 1);
     assert_eq!(pruned[0].agent_name, "six-hour-idle");
+}
+
+#[tokio::test]
+async fn sessionless_rows_use_the_ephemeral_window() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+
+    // Safely past the 2h window, and safely inside it.
+    insert_session(
+        &app.db,
+        "two-hour-ghost",
+        None,
+        now - Duration::hours(2) - Duration::seconds(5),
+        false,
+    )
+    .await;
+    insert_session(
+        &app.db,
+        "one-hour-ghost",
+        None,
+        now - Duration::hours(1),
+        false,
+    )
+    .await;
+
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["two-hour-ghost"]);
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions ORDER BY agent_name")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec!["one-hour-ghost"]);
+}
+
+#[tokio::test]
+async fn session_bound_rows_survive_ephemeral_and_use_the_long_window() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    insert_session(
+        &app.db,
+        "bound-agent",
+        Some("ses_bound"),
+        now - Duration::hours(6),
+        false,
+    )
+    .await;
+
+    // The short window never touches a row with a session id.
+    let kept = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    assert!(kept.is_empty());
+
+    // Once past the long window it is removed like any abandoned row.
+    sqlx::query("UPDATE agent_sessions SET last_seen = ?1 WHERE agent_name = 'bound-agent'")
+        .bind((now - Duration::hours(25)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    assert_eq!(pruned.len(), 1);
+    assert_eq!(pruned[0].agent_name, "bound-agent");
+    assert!(pruned[0].reason.contains("idle 25h"));
+}
+
+#[tokio::test]
+async fn ephemeral_protections_keep_rows_that_are_still_in_use() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    let stale = now - Duration::hours(5);
+
+    let user_id: i64 = sqlx::query_scalar("SELECT id FROM users LIMIT 1")
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let issue_id = insert_issue(&app.db, user_id).await;
+
+    insert_session(&app.db, "ephemeral-plain", None, stale, false).await;
+    insert_session(&app.db, "ephemeral-claim", None, stale, false).await;
+    insert_claim(&app.db, issue_id, user_id, "ephemeral-claim").await;
+    insert_session(&app.db, "ephemeral-chat", None, stale, false).await;
+    insert_dm(&app.db, "ephemeral-chat").await;
+    insert_session(&app.db, "ephemeral-review", None, stale, false).await;
+    insert_open_review(&app.db, issue_id, "ephemeral-review").await;
+    insert_session(&app.db, "ephemeral-paused", None, stale, true).await;
+
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["ephemeral-plain"]);
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions ORDER BY agent_name")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        remaining,
+        vec![
+            "ephemeral-chat",
+            "ephemeral-claim",
+            "ephemeral-paused",
+            "ephemeral-review"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn zero_windows_disable_their_pass() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    insert_session(
+        &app.db,
+        "ghost-three-hours",
+        None,
+        now - Duration::hours(3),
+        false,
+    )
+    .await;
+    insert_session(
+        &app.db,
+        "bound-thirty-hours",
+        Some("ses_old"),
+        now - Duration::hours(30),
+        false,
+    )
+    .await;
+    insert_session(
+        &app.db,
+        "ghost-thirty-hours",
+        None,
+        now - Duration::hours(30),
+        false,
+    )
+    .await;
+
+    // Both 0 disables pruning entirely, even for the long-idle session row.
+    let kept = agent_prune::prune_abandoned_agents(&app.db, 0, 0, None)
+        .await
+        .unwrap();
+    assert!(kept.is_empty());
+
+    // Ephemeral 0 disables removal of sessionless rows at any age, so both
+    // ghosts stay. The 30h session-bound row is past the long window and is
+    // still removed.
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 0, None)
+        .await
+        .unwrap();
+    let names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    assert_eq!(names, vec!["bound-thirty-hours"]);
+
+    // Prune 0 stops the long-window pass; ephemeral still removes sessionless
+    // ghosts and never touches a session-bound row, however old.
+    insert_session(
+        &app.db,
+        "bound-forty-hours",
+        Some("ses_older"),
+        now - Duration::hours(40),
+        false,
+    )
+    .await;
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 0, 2, None)
+        .await
+        .unwrap();
+    let mut names: Vec<&str> = pruned.iter().map(|p| p.agent_name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["ghost-thirty-hours", "ghost-three-hours"]);
+
+    let remaining: Vec<String> =
+        sqlx::query_scalar("SELECT agent_name FROM agent_sessions ORDER BY agent_name")
+            .fetch_all(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(remaining, vec!["bound-forty-hours"]);
+}
+
+#[tokio::test]
+async fn ephemeral_audit_row_names_the_rule_and_idle_hours() {
+    let app = tu::spawn().await;
+    let now = Utc::now();
+    insert_session(
+        &app.db,
+        "ephemeral-audit",
+        None,
+        now - Duration::hours(3) - Duration::minutes(10),
+        false,
+    )
+    .await;
+
+    let pruned = agent_prune::prune_abandoned_agents(&app.db, 24, 2, None)
+        .await
+        .unwrap();
+    assert_eq!(pruned.len(), 1);
+
+    let (name, reason): (String, String) =
+        sqlx::query_as("SELECT agent_name, reason FROM agent_removals")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(name, "ephemeral-audit");
+    assert!(reason.starts_with("prune: ephemeral sessionless removal"));
+    assert!(reason.contains("no claims, chat or reviews"));
+    assert!(reason.contains("idle 3h"));
+    assert_eq!(pruned[0].reason, reason);
+}
+
+#[tokio::test]
+async fn startup_pass_runs_the_same_reap_and_prune_rules() {
+    let app = tu::spawn().await;
+    insert_session(
+        &app.db,
+        "startup-ghost",
+        None,
+        Utc::now() - Duration::hours(3),
+        false,
+    )
+    .await;
+
+    // The startup call is exactly what spawn_pruner runs before it looks at
+    // the periodic interval, so an interval of 0 still cleans the roster here.
+    agent_prune::run_maintenance(&app.state, "startup").await;
+
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_sessions WHERE agent_name = 'startup-ghost'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(rows, 0);
+
+    let audit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_removals WHERE agent_name = 'startup-ghost'",
+    )
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert_eq!(audit, 1);
 }
