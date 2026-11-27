@@ -1179,8 +1179,8 @@
     <div class="progress">
       <div class="ptop">
         <span class="plabel">{tallies.done} of {work.length} done</span>
-        <span class="plive" class:off={!store.connected}>
-          <i></i>{store.connected ? "live" : "reconnecting"}
+        <span class="plive" class:off={!store.connected || !!store.agentsError}>
+          <i></i>{store.agentsError ? "roster offline" : store.connected ? "live" : "reconnecting"}
         </span>
       </div>
       <div class="track" role="progressbar" aria-valuenow={tallies.done} aria-valuemin={0} aria-valuemax={work.length}>
@@ -1211,6 +1211,15 @@
       <p class="drag-reason" role="status" aria-live="polite">{dragReason}</p>
     {/if}
   </header>
+
+  {#if store.agentsError}
+    <div class="roster-error" role="alert" data-roster-error>
+      <span>
+        Couldn't load the agent roster: {store.agentsError}{sections.length ? " · showing the last known roster" : ""}
+      </span>
+      <button class="btn ghost sm" onclick={() => void store.loadAgents()}>Retry</button>
+    </div>
+  {/if}
 
   <div class="bar">
     <div class="seg">
@@ -1305,7 +1314,9 @@
         <path d="M12 3v4M8.5 12.5h.01M15.5 12.5h.01M9.5 16h5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
       </svg>
       <p>
-        {focus
+        {store.agentsError
+          ? "The agent roster couldn't be loaded, so this is not a real empty fleet. Retry above."
+          : focus
           ? `No agents are linked to ${focus}.`
           : hiddenCount > 0 && !showHidden
             ? `All ${hiddenCount} agent${hiddenCount === 1 ? " is" : "s are"} hidden. Use Show hidden to reveal them.`
@@ -1650,6 +1661,23 @@
   .plive.off i {
     animation: none;
     box-shadow: none;
+  }
+  /* BB-246: a failed roster must not look like a healthy empty fleet. */
+  .roster-error {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 0 0 10px;
+    padding: 9px 12px;
+    border: 1px solid color-mix(in oklab, var(--bad, #c0392b) 45%, transparent);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--bad, #c0392b) 10%, transparent);
+    color: var(--ink);
+    font-size: 12.5px;
+  }
+  .roster-error span {
+    flex: 1;
+    min-width: 0;
   }
   @keyframes pulse {
     50% { box-shadow: 0 0 0 5px transparent; }

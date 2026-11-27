@@ -186,6 +186,10 @@ class Store {
    *  with no claims still render, as idle sessions. */
   roster = $state<AgentRosterEntry[]>([]);
   agentLine = $state<string>("");
+  /** Why the last roster fetch failed, or null. Kept separately from the data
+   *  so the Agents page can show an error without discarding the last known
+   *  roster. BB-246. */
+  agentsError = $state<string | null>(null);
 
   // Bumped whenever a live event touches an issue, so the open issue panel
   // knows to refetch its comments and activity.
@@ -584,8 +588,10 @@ class Store {
       this.agents = claims;
       this.agentLine = status.line;
       this.roster = roster;
-    } catch {
-      /* ignore */
+      this.agentsError = null;
+    } catch (e) {
+      // Keep the last known roster; the page renders the failure and Retry.
+      this.agentsError = errMsg(e);
     }
   }
 
