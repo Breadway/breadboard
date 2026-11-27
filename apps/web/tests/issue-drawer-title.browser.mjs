@@ -81,6 +81,7 @@ try {
     await page.setViewportSize({ width, height });
     // A cold load measures the title at the width it is actually rendered at.
     await page.goto(`${base}/#${fixture.key}`);
+    await page.reload();
     await page.waitForSelector(".drawer textarea.title");
     await page.waitForFunction(() => {
       const el = document.querySelector(".drawer textarea.title");

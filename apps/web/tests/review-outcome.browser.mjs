@@ -77,6 +77,8 @@ try {
     })();
 
     await page.goto(`${base}/#${fixture.issue.key}`);
+    // A full load re-fetches the issues the requester just created.
+    await page.reload();
     await page.waitForSelector(".reviews .req");
     await page.waitForFunction(() => document.querySelectorAll(".reviews .req").length >= 2);
 

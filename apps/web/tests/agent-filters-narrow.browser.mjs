@@ -49,7 +49,7 @@ try {
     if (!response.ok) throw new Error(`register: ${response.status} ${await response.text()}`);
   }, { agent });
 
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("button", { name: "Agents" }).click();
   await page.locator(`.agent-card[data-agent="${agent}"]`).waitFor({ state: "visible" });
   await page.locator(`.agent-card[data-agent="${agent}"]`).click();
   await page.waitForSelector(".modal .kinds .chip");

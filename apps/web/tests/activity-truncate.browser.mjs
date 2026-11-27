@@ -75,6 +75,7 @@ try {
   );
 
   await page.goto(`${base}/#${fixture.key}`);
+  await page.reload();
   await page.waitForSelector(".drawer .tl");
   await page.waitForFunction(() => document.querySelectorAll(".drawer .tl .ev").length >= 1);
 

@@ -48,7 +48,7 @@ try {
     if (!response.ok) throw new Error(`register: ${response.status} ${await response.text()}`);
   }, { agent });
 
-  await page.getByRole("button", { name: "Agents", exact: true }).click();
+  await page.getByRole("button", { name: "Agents" }).click();
   const card = page.locator(`.agent-card[data-agent="${agent}"]`);
   await card.waitFor({ state: "visible" });
 
