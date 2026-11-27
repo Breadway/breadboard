@@ -15,7 +15,7 @@
   let deletingRoom = $state<number | null>(null);
   let mentions = $state<ChatMention[]>([]);
   let mentionsLoading = $state(false);
-  let inputEl: HTMLInputElement | undefined = $state();
+  let inputEl: HTMLTextAreaElement | undefined = $state();
   let mentionState = $state<{ start: number; query: string } | null>(null);
   let mentionIndex = $state(0);
   let pending = $state<ChatUpload[]>([]);
@@ -206,21 +206,46 @@
   }
 
   function onComposerKey(event: KeyboardEvent) {
-    if (!mentionState || !mentionItems.length) return;
-    if (event.key === "ArrowDown") {
+    if (mentionState && mentionItems.length) {
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        mentionIndex = (mentionIndex + 1) % mentionItems.length;
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        mentionIndex = (mentionIndex - 1 + mentionItems.length) % mentionItems.length;
+      } else if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const item = mentionItems[Math.min(mentionIndex, mentionItems.length - 1)];
+        if (item) chooseMention(item);
+      } else if (event.key === "Escape") {
+        mentionState = null;
+      }
+      return;
+    }
+    // BB-243: Enter inserts a newline so a code fence or any multi-line
+    // message can be authored. Ctrl/Cmd+Enter sends; the Send button also
+    // works for anyone who never learned the shortcut.
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
-      mentionIndex = (mentionIndex + 1) % mentionItems.length;
-    } else if (event.key === "ArrowUp") {
-      event.preventDefault();
-      mentionIndex = (mentionIndex - 1 + mentionItems.length) % mentionItems.length;
-    } else if (event.key === "Enter" || event.key === "Tab") {
-      event.preventDefault();
-      const item = mentionItems[Math.min(mentionIndex, mentionItems.length - 1)];
-      if (item) chooseMention(item);
-    } else if (event.key === "Escape") {
-      mentionState = null;
+      void send();
     }
   }
+
+  // Grow the composer with its content up to the CSS max-height, then scroll.
+  function fitComposer() {
+    if (!inputEl) return;
+    inputEl.style.height = "auto";
+    const scroll = inputEl.scrollHeight;
+    if (!scroll) return;
+    const border = inputEl.offsetHeight - inputEl.clientHeight;
+    inputEl.style.height = scroll + border + "px";
+  }
+  $effect(() => {
+    void draft;
+    void inputEl;
+    const id = requestAnimationFrame(fitComposer);
+    return () => cancelAnimationFrame(id);
+  });
 
   async function deleteRoom() {
     if (!selected || deletingRoom != null) return;
@@ -394,8 +419,10 @@
   }
 
   async function send() {
-    const body = draft.trim();
-    if ((!body && !pending.length) || selectedId == null || sending) return;
+    // Keep interior newlines and indentation verbatim so a pasted code block
+    // survives; only trailing whitespace is dropped.
+    const body = draft.replace(/\s+$/, "");
+    if ((!body.trim() && !pending.length) || selectedId == null || sending) return;
     sending = true;
     try {
       const last = messages[messages.length - 1]?.id;
@@ -736,8 +763,9 @@
           onclick={() => fileEl?.click()}
         >+</button>
         <div class="fieldwrap">
-          <input
+          <textarea
             class="field"
+            rows="1"
             placeholder={selected.kind === "room" ? `Message #${selected.name}` : "Message the DM"}
             bind:value={draft}
             bind:this={inputEl}
@@ -746,7 +774,7 @@
             onblur={() => setTimeout(() => (mentionState = null), 150)}
             aria-label="Message"
             autocomplete="off"
-          />
+          ></textarea>
           {#if mentionState && mentionItems.length}
             <div class="mentions" role="listbox" aria-label="Mention suggestions">
               {#each mentionItems as item, i}
@@ -762,7 +790,12 @@
             </div>
           {/if}
         </div>
-        <button class="btn primary" type="submit" disabled={sending || (!draft.trim() && !pending.length)}>Send</button>
+        <button
+          class="btn primary"
+          type="submit"
+          title="Send (Ctrl+Enter); Enter adds a newline"
+          disabled={sending || (!draft.trim() && !pending.length)}
+        >Send</button>
       </form>
     {:else}
       <p class="empty">Pick a room.</p>
@@ -1169,11 +1202,20 @@
   .composer {
     display: flex;
     gap: 8px;
+    align-items: flex-end;
     padding: 10px 16px 14px;
     border-top: 1px solid var(--line);
   }
   .composer .field {
     flex: 1;
+    min-height: 30px;
+    max-height: 40vh;
+    padding: 5px 9px;
+    resize: none;
+    overflow-y: auto;
+    font: inherit;
+    font-size: 13px;
+    line-height: 1.45;
   }
   .btn.sm {
     height: 26px;

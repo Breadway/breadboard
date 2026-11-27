@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { fly } from "svelte/transition";
   import {
     PRIORITIES,
@@ -122,13 +123,25 @@
   function fitTitle() {
     if (!titleEl) return;
     titleEl.style.height = "auto";
-    if (titleEl.scrollHeight) titleEl.style.height = titleEl.scrollHeight + "px";
+    const scroll = titleEl.scrollHeight;
+    if (!scroll) return;
+    // The field is border-box, so the border has to be added back: setting
+    // height to scrollHeight alone left the last line clipped by 2px.
+    const border = titleEl.offsetHeight - titleEl.clientHeight;
+    titleEl.style.height = scroll + border + "px";
   }
   $effect(() => {
     void titleDraft;
     void titleEl;
     const id = requestAnimationFrame(fitTitle);
     return () => cancelAnimationFrame(id);
+  });
+
+  // A width change re-wraps the title, so the fitted height changes too.
+  onMount(() => {
+    const onResize = () => fitTitle();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   });
 
   async function save(patch: IssuePatch) {
@@ -343,6 +356,14 @@
   }
   function who(a: ActivityEntry) {
     return a.actor ?? (a.source === "breadboard" ? "Someone" : "Forgejo");
+  }
+  // BB-248: the timeline is a summary, not a dump. Long field values keep the
+  // full text in a tooltip and show a bounded prefix inline.
+  const VALUE_LIMIT = 140;
+  function shortVal(field: string, v: string | null): string {
+    const full = val(field, v);
+    if (full.length <= VALUE_LIMIT) return full;
+    return full.slice(0, VALUE_LIMIT).trimEnd() + "…";
   }
   function author(c: Comment) {
     if (c.author_id != null && c.author_id === store.me?.id) return store.me.login;
@@ -667,12 +688,22 @@
                     <b>{who(e.a)}</b> created this issue
                   {:else if e.a.field === "commit"}
                     <b>{who(e.a)}</b> recorded commit <em>{val(e.a.field, e.a.new_value)}</em>
+                  {:else if e.a.field === "body"}
+                    <b>{who(e.a)}</b> updated the description
                   {:else}
                     <b>{who(e.a)}</b> changed {FIELD[e.a.field] ?? e.a.field}
-                    {#if e.a.old_value}from <em>{val(e.a.field, e.a.old_value)}</em>{/if}
-                    to <em>{val(e.a.field, e.a.new_value)}</em>
+                    {#if e.a.old_value}from <em title={val(e.a.field, e.a.old_value)}>{shortVal(e.a.field, e.a.old_value)}</em>{/if}
+                    to <em title={val(e.a.field, e.a.new_value)}>{shortVal(e.a.field, e.a.new_value)}</em>
                   {/if}
                   <time title={new Date(e.at).toLocaleString()}>{when(e.at)}</time>
+                  {#if e.a.field === "body" && e.a.new_value}
+                    <!-- BB-248: a description edit is one compact entry; the
+                         body opens on demand instead of filling the feed. -->
+                    <details class="tl-more">
+                      <summary>Show new description</summary>
+                      <pre>{e.a.new_value}</pre>
+                    </details>
+                  {/if}
                 </div>
               {/if}
             {:else}
@@ -784,6 +815,9 @@
     gap: 22px;
   }
   .title {
+    /* BB-242: the .body flex column was shrinking the measured height back to
+       one row. The title owns its height; the body scrolls instead. */
+    flex: 0 0 auto;
     width: 100%;
     min-height: 38px;
     margin: 0 0 -6px -8px;
@@ -1191,6 +1225,28 @@
   .ev em {
     font-style: normal;
     color: var(--ink);
+  }
+  .tl-more {
+    margin-top: 4px;
+  }
+  .tl-more summary {
+    cursor: pointer;
+    font-size: 11.5px;
+    color: var(--accent);
+    width: fit-content;
+  }
+  .tl-more pre {
+    margin: 6px 0 0;
+    padding: 8px 10px;
+    max-height: 180px;
+    overflow: auto;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--bg);
+    color: var(--ink-dim);
+    font: 400 11.5px/1.45 var(--font-mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
   time {
     margin-left: 6px;

@@ -125,7 +125,7 @@ try {
   );
 
   // Sending from the human side works even though the agent has no claims.
-  await page.locator('input[aria-label="Message"]').fill(reply);
+  await page.locator('[aria-label="Message"]').fill(reply);
   await page.getByRole("button", { name: "Send" }).click();
   await page.locator(".messages .body", { hasText: reply }).first().waitFor({ state: "visible" });
 
@@ -178,7 +178,7 @@ try {
     "a new-DM deep link creates the room instead of falling back to the lobby",
   );
   await page.locator(".messages").getByText("Start the DM.").waitFor({ state: "visible" });
-  await page.locator('input[aria-label="Message"]').fill(`first note to ${freshAgent}`);
+  await page.locator('[aria-label="Message"]').fill(`first note to ${freshAgent}`);
   await page.getByRole("button", { name: "Send" }).click();
   await page.locator(".messages .body", { hasText: `first note to ${freshAgent}` }).first().waitFor({ state: "visible" });
   const rooms = await (await context.request.get(`${base}/api/chat/rooms`)).json();

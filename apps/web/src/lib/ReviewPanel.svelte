@@ -42,6 +42,19 @@
   );
   const outstanding = $derived(requests.filter((r) => r.state !== "approved"));
 
+  // Mirror of the server's outcome rule (reviews::update_state): a human
+  // reviewer is the signed-in user; an agent reviewer can only be acted on
+  // from that agent's own queue, which is the only mode that passes
+  // agent_name. Everyone else gets a read-only record instead of buttons that
+  // always 403. BB-247.
+  function sameAgent(a: string, b: string): boolean {
+    return a.trim().toLowerCase().replace(/ /g, "-") === b.trim().toLowerCase().replace(/ /g, "-");
+  }
+  function canRecordOutcome(r: ReviewRequest): boolean {
+    if (store.me && r.reviewer_id != null && r.reviewer_id === store.me.id) return true;
+    return !!reviewer && r.reviewer_kind === "agent" && sameAgent(reviewer, r.reviewer);
+  }
+
   async function load() {
     loading = true;
     try {
@@ -229,15 +242,19 @@
         </div>
       {:else}
         <div class="actions">
-          <input
-            class="field note-in"
-            placeholder="Outcome note (optional)"
-            bind:value={noteDrafts[r.id]}
-            aria-label="Review outcome note"
-          />
-          <button class="btn sm" disabled={busy === r.id} onclick={() => act(r.id, "accepted")}>Accept</button>
-          <button class="btn sm warn" disabled={busy === r.id} onclick={() => act(r.id, "changes_requested")}>Changes</button>
-          <button class="btn sm primary" disabled={busy === r.id} onclick={() => act(r.id, "approved")}>Approve</button>
+          {#if canRecordOutcome(r)}
+            <input
+              class="field note-in"
+              placeholder="Outcome note (optional)"
+              bind:value={noteDrafts[r.id]}
+              aria-label="Review outcome note"
+            />
+            <button class="btn sm" disabled={busy === r.id} onclick={() => act(r.id, "accepted")}>Accept</button>
+            <button class="btn sm warn" disabled={busy === r.id} onclick={() => act(r.id, "changes_requested")}>Changes</button>
+            <button class="btn sm primary" disabled={busy === r.id} onclick={() => act(r.id, "approved")}>Approve</button>
+          {:else}
+            <span class="dim small">Read-only: only {r.reviewer} can record the outcome.</span>
+          {/if}
         </div>
       {/if}
     </div>

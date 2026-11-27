@@ -24,7 +24,14 @@
     "test:web-a11y": "node tests/web-a11y.browser.mjs",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test:markdown": "node tests/markdown.static.mjs"
+    "test:markdown": "node tests/markdown.static.mjs",
+    "test:drawer-title": "node tests/issue-drawer-title.browser.mjs",
+    "test:chat-composer": "node tests/chat-composer.browser.mjs",
+    "test:agent-dialog-focus": "node tests/agent-dialog-focus.browser.mjs",
+    "test:agent-filters-narrow": "node tests/agent-filters-narrow.browser.mjs",
+    "test:agents-error": "node tests/agents-error.browser.mjs",
+    "test:review-outcome": "node tests/review-outcome.browser.mjs",
+    "test:activity-truncate": "node tests/activity-truncate.browser.mjs"
   },
   "license": "MIT",
   "dependencies": {
