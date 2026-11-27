@@ -210,6 +210,7 @@
     border-top: 1px solid var(--line);
     padding-top: 12px;
     margin-top: 14px;
+    min-width: 0;
   }
   .ahead {
     display: flex;
@@ -232,13 +233,16 @@
     flex-wrap: wrap;
     gap: 8px;
     align-items: center;
+    min-width: 0;
   }
+  /* BB-245: wrap the chips inside the dialog instead of widening the modal
+     body. The old single scroll row pushed everything past 390px. */
   .kinds {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
-    overflow-x: auto;
+    min-width: 0;
     max-width: 100%;
-    padding-bottom: 2px;
   }
   .chip,
   .rng {
