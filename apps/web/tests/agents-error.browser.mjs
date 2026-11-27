@@ -48,7 +48,15 @@ try {
     if (!response.ok) throw new Error(`register: ${response.status} ${await response.text()}`);
   }, { agent });
 
-  await page.getByRole("button", { name: "Agents" }).click();
+  const openAgents = async () => {
+    if (await page.locator(".agent-card").count()) return;
+    const side = page.locator("aside.side nav button.nav", { hasText: "Agents" });
+    if (await side.isVisible().catch(() => false)) await side.click();
+    else await page.locator(".tabbar button", { hasText: "Agents" }).click();
+    await page.waitForSelector(".agent-card, .empty");
+  };
+
+  await openAgents();
   const card = page.locator(`.agent-card[data-agent="${agent}"]`);
   await card.waitFor({ state: "visible" });
   assert.equal(await page.locator("[data-roster-error]").count(), 0, "a healthy load shows no error");
