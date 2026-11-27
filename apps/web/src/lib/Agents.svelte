@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, tick } from "svelte";
   import { fade, fly } from "svelte/transition";
   import {
     STATUSES,
@@ -783,6 +783,36 @@
     if (menuFor && !byId.has(menuFor)) menuFor = null;
   });
 
+  // Elements the Tab trap may move through. Queried live because the panel
+  // grows activity rows and swaps Pause/Resume style buttons while open.
+  const FOCUSABLE =
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  let returnFocus: HTMLElement | null = null;
+  let wasPanelOpen = false;
+
+  function panelFocusables(): HTMLElement[] {
+    if (!panelEl) return [];
+    return Array.from(panelEl.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+      (el) => el.getClientRects().length > 0,
+    );
+  }
+
+  // BB-244: the panel is aria-modal, so the keyboard must behave like it.
+  // Remember the card that opened it and give focus back when it closes;
+  // Escape, the close button and the scrim all take this path.
+  $effect(() => {
+    const open = !!selected;
+    if (open === wasPanelOpen) return;
+    wasPanelOpen = open;
+    if (open) {
+      returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      return;
+    }
+    const target = returnFocus?.isConnected ? returnFocus : null;
+    returnFocus = null;
+    void tick().then(() => target?.focus());
+  });
+
   $effect(() => {
     if (!selected) return;
     queueMicrotask(() => panelEl?.focus());
@@ -791,6 +821,27 @@
         e.preventDefault();
         e.stopPropagation();
         closeAgent();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = panelFocusables();
+      if (!items.length) {
+        e.preventDefault();
+        panelEl?.focus();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      const inside = active instanceof Node && panelEl?.contains(active);
+      if (e.shiftKey) {
+        if (!inside || active === first || active === panelEl) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        e.preventDefault();
+        first.focus();
       }
     };
     window.addEventListener("keydown", onKey, true);
