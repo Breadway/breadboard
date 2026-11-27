@@ -797,6 +797,14 @@
     );
   }
 
+  /** Another modal (the release handoff, for example) stacked above this one
+   *  owns the keyboard while it is visible. */
+  function stackedDialogOpen(): boolean {
+    return [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].some(
+      (dialog) => dialog !== panelEl && dialog.getClientRects().length > 0,
+    );
+  }
+
   // BB-244: the panel is aria-modal, so the keyboard must behave like it.
   // Remember the card that opened it and give focus back when it closes;
   // Escape, the close button and the scrim all take this path.
@@ -817,6 +825,7 @@
     if (!selected) return;
     queueMicrotask(() => panelEl?.focus());
     const onKey = (e: KeyboardEvent) => {
+      if (stackedDialogOpen()) return;
       if (e.key === "Escape") {
         e.preventDefault();
         e.stopPropagation();
