@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from "svelte";
   import { fly } from "svelte/transition";
   import {
     PRIORITIES,
@@ -122,13 +123,25 @@
   function fitTitle() {
     if (!titleEl) return;
     titleEl.style.height = "auto";
-    if (titleEl.scrollHeight) titleEl.style.height = titleEl.scrollHeight + "px";
+    const scroll = titleEl.scrollHeight;
+    if (!scroll) return;
+    // The field is border-box, so the border has to be added back: setting
+    // height to scrollHeight alone left the last line clipped by 2px.
+    const border = titleEl.offsetHeight - titleEl.clientHeight;
+    titleEl.style.height = scroll + border + "px";
   }
   $effect(() => {
     void titleDraft;
     void titleEl;
     const id = requestAnimationFrame(fitTitle);
     return () => cancelAnimationFrame(id);
+  });
+
+  // A width change re-wraps the title, so the fitted height changes too.
+  onMount(() => {
+    const onResize = () => fitTitle();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
   });
 
   async function save(patch: IssuePatch) {
@@ -784,6 +797,9 @@
     gap: 22px;
   }
   .title {
+    /* BB-242: the .body flex column was shrinking the measured height back to
+       one row. The title owns its height; the body scrolls instead. */
+    flex: 0 0 auto;
     width: 100%;
     min-height: 38px;
     margin: 0 0 -6px -8px;
