@@ -7,6 +7,7 @@
   import Board from "./lib/Board.svelte";
   import Backlog from "./lib/Backlog.svelte";
   import Roadmap from "./lib/Roadmap.svelte";
+  import Approvals from "./lib/Approvals.svelte";
   import Agents from "./lib/Agents.svelte";
   import Chat from "./lib/Chat.svelte";
   import Inbox from "./lib/Inbox.svelte";
@@ -96,6 +97,7 @@
     { v: "board", label: "Board" },
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
+    { v: "approvals", label: "Approvals" },
     { v: "agents", label: "Agents" },
     { v: "chat", label: "Chat" },
     { v: "inbox", label: "Inbox" },
@@ -151,6 +153,8 @@
           <Backlog />
         {:else if store.view === "roadmap"}
           <Roadmap />
+        {:else if store.view === "approvals"}
+          <Approvals />
         {:else if store.view === "agents"}
           <Agents />
         {:else if store.view === "chat"}
@@ -170,7 +174,7 @@
               if (t.v !== "chat") store.updateChatUrl(null);
             }}
           >
-            {t.label}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}{#if t.v === "agents" && store.activeAgents}<span class="pill">{store.activeAgents}</span>{/if}
+            {t.label}{#if t.v === "approvals" && store.approvalUnread}<span class="pill">{store.approvalUnread}</span>{/if}{#if t.v === "inbox" && store.unread}<span class="dot"></span>{/if}{#if t.v === "agents" && store.activeAgents}<span class="pill">{store.activeAgents}</span>{/if}
           </button>
         {/each}
       </nav>

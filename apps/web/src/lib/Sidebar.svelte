@@ -8,6 +8,7 @@
     { v: "board", label: "Board" },
     { v: "backlog", label: "Backlog" },
     { v: "roadmap", label: "Roadmap" },
+    { v: "approvals", label: "Approvals" },
     { v: "agents", label: "Agents" },
     { v: "chat", label: "Chat" },
     { v: "inbox", label: "Inbox" },
@@ -76,6 +77,8 @@
       <path d="M2 3.5h12M2 8h12M2 12.5h8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
     {:else if v === "roadmap"}
       <path d="M2 4h7M5 8h8M3 12h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" />
+    {:else if v === "approvals"}
+      <path d="M2 8.6 6 12.5 14 3.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" />
     {:else if v === "inbox"}
       <path d="M2 9.5 3.8 3h8.4L14 9.5V13H2zM2 9.5h3.5l1 1.7h3l1-1.7H14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" />
     {:else if v === "chat"}
@@ -114,6 +117,7 @@
         {#if v === "backlog"}<span class="n">{totalOpen}</span>{/if}
         {#if v === "agents" && store.activeAgents > 0}<span class="agent-count">{store.activeAgents}</span>{/if}
         {#if v === "chat" && store.chatUnread > 0}<span class="badge">{store.chatUnread > 99 ? "99+" : store.chatUnread}</span>{/if}
+        {#if v === "approvals" && store.approvalUnread > 0}<span class="badge">{store.approvalUnread > 99 ? "99+" : store.approvalUnread}</span>{/if}
         {#if v === "inbox" && store.unread > 0}<span class="badge">{store.unread > 99 ? "99+" : store.unread}</span>{/if}
       </button>
     {/each}

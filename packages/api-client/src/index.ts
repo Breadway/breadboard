@@ -1077,6 +1077,7 @@ export type BoardEvent =
   | { type: "agent.orchestrator"; agent: string; previous: string | null; orchestrator: string | null; changed_by: number | null }
   | { type: "chat.message"; room_id: number; id: number }
   | { type: "chat.room.deleted"; id: number }
+  | { type: "approval.updated"; id: number; status: string }
   | {
       type: "review.updated";
       id: number;
