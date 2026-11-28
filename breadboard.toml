@@ -122,3 +122,12 @@ claim_reap_after_hours = 72                 # BREADBOARD_AGENTS_CLAIM_REAP_AFTER
 # decision request that presents an agent identity is always refused.
 # operators = ["Breadway"]                  # BREADBOARD_APPROVALS_OPERATORS
 operators = []
+
+[approvals.notifications]
+# Gotify pings for high-urgency asks and incident approvals. Off unless
+# enabled; the token is the Gotify application token for this app, never the
+# infra notification token. Operators can opt out in Settings.
+enabled = false                             # BREADBOARD_APPROVALS_NOTIFICATIONS_ENABLED
+# url   = "http://127.0.0.1:7601"            # BREADBOARD_APPROVALS_NOTIFICATIONS_URL
+# token = ""                                # BREADBOARD_APPROVALS_NOTIFICATIONS_TOKEN
+app     = "breadboard"                      # BREADBOARD_APPROVALS_NOTIFICATIONS_APP

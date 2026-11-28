@@ -249,6 +249,12 @@
   }
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && selected) selected = null;
+  }}
+/>
+
 <section class="calendar-wrap">
   <div class="calendar-main">
     <div class="cal-bar">

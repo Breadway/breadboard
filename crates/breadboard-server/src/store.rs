@@ -2089,6 +2089,13 @@ pub struct NotificationPrefs {
     pub mention: bool,
     pub cycle: bool,
     pub digest: bool,
+    /// Receive Gotify pings for urgent and incident approval asks.
+    #[serde(default = "default_true")]
+    pub approvals: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for NotificationPrefs {
@@ -2098,23 +2105,26 @@ impl Default for NotificationPrefs {
             mention: true,
             cycle: true,
             digest: false,
+            approvals: true,
         }
     }
 }
 
 pub async fn get_prefs(db: &SqlitePool, user_id: i64) -> AppResult<NotificationPrefs> {
-    let row: Option<(i64, i64, i64, i64)> = sqlx::query_as(
-        "SELECT assigned, mention, cycle, digest FROM notification_prefs WHERE user_id = ?1",
+    let row: Option<(i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "SELECT assigned, mention, cycle, digest, approvals
+           FROM notification_prefs WHERE user_id = ?1",
     )
     .bind(user_id)
     .fetch_optional(db)
     .await?;
     Ok(match row {
-        Some((a, m, c, d)) => NotificationPrefs {
+        Some((a, m, c, d, ap)) => NotificationPrefs {
             assigned: a != 0,
             mention: m != 0,
             cycle: c != 0,
             digest: d != 0,
+            approvals: ap != 0,
         },
         None => NotificationPrefs::default(),
     })
@@ -2126,17 +2136,19 @@ pub async fn set_prefs(
     p: NotificationPrefs,
 ) -> AppResult<NotificationPrefs> {
     sqlx::query(
-        "INSERT INTO notification_prefs (user_id, assigned, mention, cycle, digest)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO notification_prefs (user_id, assigned, mention, cycle, digest, approvals)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(user_id) DO UPDATE SET
             assigned = excluded.assigned, mention = excluded.mention,
-            cycle = excluded.cycle, digest = excluded.digest",
+            cycle = excluded.cycle, digest = excluded.digest,
+            approvals = excluded.approvals",
     )
     .bind(user_id)
     .bind(p.assigned as i64)
     .bind(p.mention as i64)
     .bind(p.cycle as i64)
     .bind(p.digest as i64)
+    .bind(p.approvals as i64)
     .execute(db)
     .await?;
     Ok(p)

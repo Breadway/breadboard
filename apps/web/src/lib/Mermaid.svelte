@@ -81,6 +81,12 @@
   });
 </script>
 
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && open) open = false;
+  }}
+/>
+
 <div
   class="mermaid-card"
   role="button"

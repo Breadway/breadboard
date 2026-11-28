@@ -45,6 +45,40 @@ pub struct Config {
 #[serde(default)]
 pub struct ApprovalConfig {
     pub operators: Vec<String>,
+    pub notifications: ApprovalNotificationConfig,
+}
+
+/// Gotify delivery for approval asks. Off unless `enabled` is true and both a
+/// url and token are set. The token is the Gotify application token from this
+/// config block; the server never reads the infra notification token.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct ApprovalNotificationConfig {
+    pub enabled: bool,
+    /// Base Gotify URL, e.g. `http://127.0.0.1:7601`.
+    pub url: String,
+    /// Gotify application token used to post messages.
+    pub token: String,
+    /// App name shown in the message title. Defaults to `breadboard`.
+    pub app: String,
+}
+
+impl Default for ApprovalNotificationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: String::new(),
+            token: String::new(),
+            app: "breadboard".into(),
+        }
+    }
+}
+
+impl ApprovalNotificationConfig {
+    /// Whether this config can deliver a message at all.
+    pub fn usable(&self) -> bool {
+        self.enabled && !self.url.trim().is_empty() && !self.token.trim().is_empty()
+    }
 }
 
 /// Agent roster lifecycle. Rows nobody is using are pruned by a periodic
@@ -486,6 +520,20 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BREADBOARD_USAGE_PROVIDERS_TOML") {
             self.usage.merge_provider_toml(&v)?;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_NOTIFICATIONS_ENABLED") {
+            self.approvals.notifications.enabled = matches!(v.as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_NOTIFICATIONS_URL") {
+            self.approvals.notifications.url = v;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_NOTIFICATIONS_TOKEN") {
+            self.approvals.notifications.token = v;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_NOTIFICATIONS_APP") {
+            if !v.trim().is_empty() {
+                self.approvals.notifications.app = v;
+            }
         }
         if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_OPERATORS") {
             self.approvals.operators = v

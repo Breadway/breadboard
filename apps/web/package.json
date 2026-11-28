@@ -26,6 +26,7 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "test:markdown": "node tests/markdown.static.mjs",
     "test:approvals": "node tests/approvals.browser.mjs",
+    "test:title-wrap": "node tests/title-wrap.static.mjs",
     "test:drawer-title": "node tests/issue-drawer-title.browser.mjs",
     "test:chat-composer": "node tests/chat-composer.browser.mjs",
     "test:agent-dialog-focus": "node tests/agent-dialog-focus.browser.mjs",

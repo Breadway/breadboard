@@ -36,3 +36,18 @@ jobs:
           npm run build -w @breadboard/api-client
           npm run check -w breadboard-web
           npm run build
+
+      - name: mcp tests
+        run: cd src && npm test -w breadboard-mcp
+
+      # Cheap static regressions that previously only ran by hand. Live-server
+      # browser suites stay out of CI because they need a scratch server.
+      - name: web static tests
+        run: |
+          set -euo pipefail
+          cd src
+          npm run test:markdown -w breadboard-web
+          npm run test:artifacts -w breadboard-web
+          npm run test:agents-stale -w breadboard-web
+          npm run test:agents-pinned -w breadboard-web
+          npm run test:title-wrap -w breadboard-web

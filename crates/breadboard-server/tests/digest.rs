@@ -12,6 +12,7 @@ fn prefs(digest: bool) -> NotificationPrefs {
         mention: true,
         cycle: true,
         digest,
+        approvals: true,
     }
 }
 

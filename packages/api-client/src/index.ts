@@ -468,6 +468,8 @@ export interface NotificationPrefs {
   mention: boolean;
   cycle: boolean;
   digest: boolean;
+  /** Receive Gotify pings for urgent and incident approval asks. */
+  approvals: boolean;
 }
 
 export interface RepoView {
@@ -1290,6 +1292,9 @@ export class BreadboardClient {
   };
   createApproval = (ask: NewApprovalAsk) =>
     this.req<ApprovalAsk>("POST", "/api/approvals", ask);
+  /** Audit trail for one ask: every transition with actor, kind and time. */
+  approvalEvents = (id: number) =>
+    this.req<ApprovalEvent[]>("GET", `/api/approvals/${id}/events`);
   reviseApproval = (id: number, revision: ApprovalRevision) =>
     this.req<ApprovalAsk>("POST", `/api/approvals/${id}/revisions`, revision);
   commentOnApproval = (id: number, comment: ApprovalCommentInput) =>
