@@ -4,6 +4,7 @@
 pub mod agent_events;
 pub mod agent_prune;
 pub mod api;
+pub mod approvals;
 pub mod artifacts;
 pub mod auth;
 pub mod bus;

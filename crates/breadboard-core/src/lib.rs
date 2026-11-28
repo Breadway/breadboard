@@ -8,11 +8,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 pub mod agent_event;
+pub mod approval;
 pub mod commit;
 pub mod dto;
 pub mod event;
 
 pub use agent_event::{AgentEvent, AgentEventKind, AgentEventPage};
+pub use approval::{
+    ApprovalActorKind, ApprovalAsk, ApprovalAttachment, ApprovalCounts, ApprovalDecision,
+    ApprovalEvent, ApprovalEventKind, ApprovalKind, ApprovalStatus, ApprovalUrgency, FreezePeriod,
+    MaintenanceStatus, MaintenanceWindow,
+};
 pub use commit::{CommitAttribution, CommitLookup, CommitMatch, ModelSource};
 pub use event::BoardEvent;
 

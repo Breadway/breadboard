@@ -34,6 +34,17 @@ pub struct Config {
     pub usage: UsageConfig,
     pub claims: ClaimBudgetConfig,
     pub agents: AgentRosterConfig,
+    pub approvals: ApprovalConfig,
+}
+
+/// Approval decisions are the operator's. An empty `operators` list means any
+/// authenticated human may decide; listing logins pins the decision to those
+/// accounts and refuses every other human as well as any request that
+/// presents an agent identity.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ApprovalConfig {
+    pub operators: Vec<String>,
 }
 
 /// Agent roster lifecycle. Rows nobody is using are pruned by a periodic
@@ -305,6 +316,7 @@ impl Default for Config {
             usage: UsageConfig::default(),
             claims: ClaimBudgetConfig::default(),
             agents: AgentRosterConfig::default(),
+            approvals: ApprovalConfig::default(),
         }
     }
 }
@@ -474,6 +486,14 @@ impl Config {
         }
         if let Ok(v) = std::env::var("BREADBOARD_USAGE_PROVIDERS_TOML") {
             self.usage.merge_provider_toml(&v)?;
+        }
+        if let Ok(v) = std::env::var("BREADBOARD_APPROVALS_OPERATORS") {
+            self.approvals.operators = v
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
         }
         if let Ok(v) = std::env::var("BREADBOARD_CLAIMS_MAX_EXCLUSIVE_PER_AGENT") {
             if let Ok(n) = v.parse::<i64>() {

@@ -16,7 +16,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
-use crate::{api, artifacts, auth, device, reviews, usage, webhook, AppState};
+use crate::{api, approvals, artifacts, auth, device, reviews, usage, webhook, AppState};
 
 pub fn router(state: AppState) -> Router {
     let api_routes = Router::new()
@@ -64,6 +64,20 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/reviews/{id}",
             patch(reviews::update_review_request).delete(reviews::withdraw_review_request),
+        )
+        // --- approvals (BB-252/BB-253) -----------------------------------
+        .route("/approvals", get(approvals::list).post(approvals::create))
+        .route("/approvals/counts", get(approvals::counts_handler))
+        .route("/approvals/{id}", get(approvals::get))
+        .route("/approvals/{id}/revisions", post(approvals::revise))
+        .route("/approvals/{id}/comments", post(approvals::comment))
+        .route("/approvals/{id}/decision", post(approvals::decide_handler))
+        .route("/approvals/{id}/withdraw", post(approvals::withdraw_handler))
+        .route("/maintenance/windows", get(approvals::list_windows_handler))
+        .route("/maintenance/windows/{id}", patch(approvals::update_window_handler))
+        .route(
+            "/maintenance/freezes",
+            get(approvals::list_freezes_handler).post(approvals::create_freeze_handler),
         )
         // --- issue artifacts (BB-160) ------------------------------------
         .route(
