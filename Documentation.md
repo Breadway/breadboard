@@ -406,7 +406,7 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/approvals/counts` | `{ needs, unread, all, approval, maintenance, info, changes, answered }` for the navigation badge and filter chips |
 | `GET` | `/api/approvals/{id}` | one ask with thread, screenshots and window. An operator read advances the read cursor; `?agent=` reads as that agent without touching it |
 | `POST` | `/api/approvals` | create as an agent: `{ agent_name, session_id?, project?, issue?, kind?, urgency?, title, summary?, body_md?, environment?, checklist?, risk_md?, rollback_md?, expires_at?, deadline?, attachments?, window? }`. `kind` is `approval`, `info` or `maintenance`; maintenance requires `window`. Attachments are `{ artifact_id, caption? }` or `{ filename, data_base64, mime?, caption? }` and reuse the screenshot artifact pipeline. `201` |
-| `POST` | `/api/approvals/{id}/revisions` | the owning agent resubmits: revision increments, status returns to `pending`, and a `revised` event is appended. Allowed only while `pending` or `changes`; anything else is `409`. Optional fields are unchanged when omitted; attachments append |
+| `POST` | `/api/approvals/{id}/revisions` | the owning agent resubmits: revision increments, status returns to `pending`, and a `revised` event is appended. Allowed only while `pending` or `changes`; anything else is `409`. Optional fields are unchanged when omitted; `expires_at` and `deadline` accept an explicit `null` to clear them; attachments append |
 | `POST` | `/api/approvals/{id}/comments` | `{ body_md, agent_name?, session_id? }`: a non-decision thread message. An agent must own the ask; a human omits `agent_name`. `201` |
 | `POST` | `/api/approvals/{id}/decision` | **operator only**: `{ decision, note_md?, window? }` with `approve`, `decline`, `changes` or `info`. One-shot: only a `pending` ask can be decided, and a second decision is `409`. `info` closes the ask as `answered`; `changes` hides it from Needs you until the agent resubmits. A request that presents an agent identity is `403`, as is a human outside `approvals.operators` when that list is set. An optional `window` patch is validated before anything commits; approving also approves the window |
 | `POST` | `/api/approvals/{id}/withdraw` | `{ agent_name, session_id?, note? }`: the owning agent withdraws an open ask (`pending` or `changes`). The row stays as history. `403` for another agent, `409` once closed |
@@ -570,6 +570,15 @@ operator records a decision. `approvals.operators` in the config pins the
 allowed logins; an empty list means any authenticated human. A decision request
 that presents an agent identity is refused even when the agent is the ask's
 owner, and the MCP surface exposes no decision tool.
+
+**Identity boundary.** The web session and the MCP tools authenticate with the
+same Forgejo OAuth session or API token, and an agent process runs with a token
+its owner minted. `approvals.operators` is a login allowlist, not a separate
+credential. The server refuses any decision request that presents an agent
+identity, and the MCP surface exposes no decision tool, but an agent that
+deliberately calls REST without declaring itself holds the operator's own token
+and cannot be distinguished from that human. True separation of agent and
+operator credentials is tracked as BB-258.
 
 A decision is one-shot. Only `pending` can be decided, and two decisions race
 safely because the status update is conditional. `approve` and `decline` are

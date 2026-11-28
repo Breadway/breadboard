@@ -1299,6 +1299,21 @@ pub async fn revise_ask(
         )?;
     }
 
+    // An explicitly supplied null clears the value; an omitted field keeps it.
+    // Keeping that distinction here is what makes the MCP contract honest.
+    let expires_at = match revision.expires_at {
+        Some(value) => value.map(|t| t.to_rfc3339()),
+        None => current.expires_at.map(|t| t.to_rfc3339()),
+    };
+    let deadline = match &revision.deadline {
+        Some(value) => value
+            .as_deref()
+            .map(str::trim)
+            .filter(|d| !d.is_empty())
+            .map(str::to_string),
+        None => current.deadline.clone(),
+    };
+
     let now = now_rfc3339();
     let next_revision = current.revision + 1;
     let mut tx = crate::db::begin_write(&app.db).await?;
@@ -1327,23 +1342,9 @@ pub async fn revise_ask(
     .bind(revision.risk_md.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(revision.rollback_md.as_deref().map(str::trim).filter(|s| !s.is_empty()))
     .bind(revision.expires_at.is_some())
-    .bind(
-        revision
-            .expires_at
-            .flatten()
-            .map(|t| t.to_rfc3339())
-            .or_else(|| current.expires_at.map(|t| t.to_rfc3339())),
-    )
+    .bind(&expires_at)
     .bind(revision.deadline.is_some())
-    .bind(
-        revision
-            .deadline
-            .clone()
-            .flatten()
-            .map(|d| d.trim().to_string())
-            .filter(|d| !d.is_empty())
-            .or_else(|| current.deadline.clone()),
-    )
+    .bind(&deadline)
     .bind(next_revision)
     .bind(&now)
     .execute(&mut *tx)
