@@ -2,7 +2,7 @@
   import { store } from "./store.svelte";
   import Filters from "./Filters.svelte";
 
-  const titles = { board: "Board", backlog: "Backlog", roadmap: "Roadmap", agents: "Agents", chat: "Chat", inbox: "Inbox", settings: "Settings" };
+  const titles = { board: "Board", backlog: "Backlog", roadmap: "Roadmap", approvals: "Approvals", agents: "Agents", chat: "Chat", inbox: "Inbox", settings: "Settings" };
   const filterable = $derived(store.view === "board" || store.view === "backlog");
   const mine = $derived(!!store.me && store.isFiltered("assignees", store.me.id));
 </script>

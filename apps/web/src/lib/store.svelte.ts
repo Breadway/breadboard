@@ -29,7 +29,7 @@ import {
 export const api = new BreadboardClient();
 
 type AuthState = "loading" | "in" | "out" | "error";
-export type View = "board" | "backlog" | "roadmap" | "agents" | "chat" | "inbox" | "settings";
+export type View = "board" | "backlog" | "roadmap" | "approvals" | "agents" | "chat" | "inbox" | "settings";
 
 /** Multi-select filter facets. Facets combine with AND; values inside one
  *  facet combine with OR. An empty facet means "no constraint". */
@@ -175,6 +175,11 @@ class Store {
   repos = $state<RepoView[]>([]);
   notifications = $state<Notification[]>([]);
   unread = $state(0);
+
+  /** Approval asks the operator still has to act on, for the nav badge. */
+  approvalUnread = $state(0);
+  /** Bumped on every approval event so the open page can refetch. */
+  approvalTick = $state(0);
 
   agents = $state<AgentClaim[]>([]);
   /** Claim awaiting a handoff note before release. Set by releaseById when no
@@ -467,6 +472,7 @@ class Store {
     }
     this.auth = "in";
     await this.loadInbox();
+    void this.loadApprovalCounts();
     void this.initChatPushes();
     void this.loadAgents();
     if (!this.#clockTimer) {
@@ -952,6 +958,16 @@ class Store {
     }
   }
 
+  /** Refresh the approvals badge without opening the page. */
+  async loadApprovalCounts() {
+    try {
+      const counts = await api.approvalCounts();
+      this.approvalUnread = counts.needs;
+    } catch {
+      // The next approval event or reconnect retries.
+    }
+  }
+
   async loadSettings() {
     const [projects, repos, cycles] = await Promise.all([
       api.listProjects(),
@@ -1046,6 +1062,10 @@ class Store {
       }
       case "review.updated":
         this.reviewTick++;
+        break;
+      case "approval.updated":
+        this.approvalTick++;
+        void this.loadApprovalCounts();
         break;
       case "chat.message":
         this.chatRoom = ev.room_id;
