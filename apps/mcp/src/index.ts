@@ -1513,6 +1513,10 @@ const approvalWindow = z.object({
 
 const approvalWindowPatch = approvalWindow.partial();
 
+/** Agents match with spaces or hyphens, the same rule the server uses. */
+const sameAgent = (a: string, b: string) =>
+  a.trim().toLowerCase().replaceAll(" ", "-") === b.trim().toLowerCase().replaceAll(" ", "-");
+
 tool(
   "create_approval_ask",
   "Open an approval, info or maintenance ask for the operator. Include the markdown body, " +
@@ -1647,8 +1651,9 @@ tool(
 tool(
   "propose_maintenance_window",
   "Propose a maintenance window. Without ask_id this opens a maintenance ask (title, context " +
-    "and an optional linked issue); with ask_id it moves or edits that ask's still-proposed " +
-    "window. Conflicts with another window or a change freeze are shown but never block.",
+    "and an optional linked issue); with ask_id it reads that ask and moves or edits its own " +
+    "still-proposed window. An ask with no window, or an ask owned by another agent, is refused. " +
+    "Conflicts with another window or a change freeze are shown but never block.",
   {
     title: z.string().describe("ask and window title"),
     starts_at: z.string().describe("RFC3339 start instant"),
@@ -1661,7 +1666,11 @@ tool(
     runbook_md: z.string().optional(),
     project: z.string().optional(),
     issue: z.string().optional(),
-    ask_id: z.number().int().optional().describe("move this ask's existing proposal instead"),
+    ask_id: z
+      .number()
+      .int()
+      .optional()
+      .describe("ask id whose own proposed window to move; the server resolves its window id"),
     summary: z.string().optional(),
     body_md: z.string().optional(),
     agent_name: z.string().optional(),
@@ -1670,9 +1679,20 @@ tool(
     run(async () => {
       const name = chatAgent(agent_name);
       if (ask_id) {
+        const ask = await client.getApproval(ask_id, { agent: name });
+        if (!ask.window) {
+          throw new Error(
+            `ask ${ask_id} has no proposed maintenance window; open one with propose_maintenance_window`,
+          );
+        }
+        if (!sameAgent(ask.agent_name, name)) {
+          throw new Error(
+            `ask ${ask_id} belongs to ${ask.agent_name}; you can only move your own proposed window`,
+          );
+        }
         const { title, starts_at, ends_at, timezone, services, reason, risks, rollback, runbook_md } =
           args;
-        return client.updateMaintenanceWindow(ask_id, {
+        return client.updateMaintenanceWindow(ask.window.id, {
           agent_name: name,
           session_id: callSessionId(),
           title,

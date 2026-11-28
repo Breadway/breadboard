@@ -456,6 +456,84 @@ async fn one_shot_expiry_expires_a_lapsed_pending_ask() {
 }
 
 #[tokio::test]
+async fn a_revision_sets_and_explicitly_clears_expiry_and_deadline() {
+    let app = tu::spawn().await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    let expiry = Utc::now() + Duration::hours(3);
+    let mut body = ask_body(&f, "Expiry contract");
+    body["expires_at"] = json!(expiry.to_rfc3339());
+    body["deadline"] = json!("today 18:00");
+    let ask = create_ask(&c, &f, body).await;
+    let id = ask["id"].as_i64().unwrap();
+    assert!(ask["expires_at"].is_string());
+
+    // An explicit null clears both; this is what the MCP tool promises.
+    let cleared = c
+        .post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({
+            "agent_name": f.agent,
+            "expires_at": null,
+            "deadline": null,
+            "summary": "No deadline any more."
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), 200, "{}", cleared.text().await.unwrap());
+    let cleared: Value = cleared.json().await.unwrap();
+    assert!(cleared["expires_at"].is_null(), "a null expiry must clear it");
+    assert!(cleared["deadline"].is_null(), "a null deadline must clear it");
+    assert_eq!(cleared["revision"], 2);
+
+    // Omitted fields keep the cleared values.
+    let unchanged = c
+        .post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "Still no deadline." }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(unchanged["expires_at"].is_null());
+    assert!(unchanged["deadline"].is_null());
+
+    // Both can be set again on the next revision.
+    let later = Utc::now() + Duration::hours(5);
+    let reset: Value = c
+        .post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({
+            "agent_name": f.agent,
+            "expires_at": later.to_rfc3339(),
+            "deadline": "before the freeze",
+            "summary": "A new deadline."
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(reset["expires_at"].is_string());
+    assert_eq!(reset["deadline"], "before the freeze");
+    let stored: Value = c
+        .get(format!("{}/api/approvals/{id}", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(stored["deadline"], "before the freeze");
+    assert!(stored["expires_at"].is_string());
+}
+
+#[tokio::test]
 async fn screenshots_use_existing_artifacts_by_id_and_base64() {
     let app = tu::spawn().await;
     let f = fixture(&app).await;
