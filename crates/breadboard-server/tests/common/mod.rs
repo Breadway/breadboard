@@ -31,6 +31,11 @@ pub async fn spawn() -> TestApp {
 /// never reaches the log read this buffer.
 static LOGS: OnceLock<Mutex<String>> = OnceLock::new();
 
+/// Serialises tests that clear and assert on the shared log buffer. Acquire it
+/// before clearing and hold it until the assertion; otherwise two security
+/// tests can wipe each other's line.
+pub static LOG_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 struct LogBuffer;
 
 impl LogBuffer {

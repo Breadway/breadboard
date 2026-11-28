@@ -1301,6 +1301,7 @@ async fn a_lazy_read_expires_and_notifies_without_swallowing_the_ping() {
 
 #[tokio::test]
 async fn a_failed_gotify_send_never_logs_the_app_token() {
+    let _log_guard = tu::LOG_LOCK.lock().await;
     let fake = start_fake_gotify_with(500, r#"{"error":"nope"}"#).await;
     let url = fake.url.clone();
     let app = tu::spawn_with_config(move |cfg| {
@@ -1337,6 +1338,7 @@ async fn a_failed_gotify_send_never_logs_the_app_token() {
 
 #[tokio::test]
 async fn a_transport_failure_logs_only_a_classification() {
+    let _log_guard = tu::LOG_LOCK.lock().await;
     let app = tu::spawn_with_config(|cfg| {
         cfg.approvals.notifications.enabled = true;
         // Nothing listens here, so the request fails at connect.
@@ -1365,6 +1367,63 @@ async fn a_transport_failure_logs_only_a_classification() {
         !logs.contains("http://127.0.0.1:1"),
         "the URL is not logged either: {logs}"
     );
+}
+
+#[tokio::test]
+async fn withdrawing_a_lapsed_high_ask_still_sends_the_expiry_ping() {
+    let fake = start_fake_gotify().await;
+    let url = fake.url.clone();
+    let app = tu::spawn_with_config(move |cfg| {
+        cfg.approvals.notifications.enabled = true;
+        cfg.approvals.notifications.url = url;
+        cfg.approvals.notifications.token = "app-token".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+
+    let mut body = ask_body(&f, "Withdraw a lapsed high ask");
+    body["expires_at"] = json!((Utc::now() + Duration::hours(1)).to_rfc3339());
+    let ask = create_ask(&c, &f, body).await;
+    let id = ask["id"].as_i64().unwrap();
+    assert_eq!(gotify_count(&fake), 1, "creation pings");
+
+    sqlx::query("UPDATE approval_asks SET expires_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind((Utc::now() - Duration::minutes(1)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    // Withdraw is a lazy expiry path. The expired ask cannot be withdrawn, but
+    // the expiry ping must not be swallowed by the refusal.
+    let withdraw = c
+        .post(format!("{}/api/approvals/{id}/withdraw", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(withdraw.status(), 409, "an expired ask cannot be withdrawn");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 2, "created plus expired, exactly once each");
+    assert!(
+        fake.requests.lock().unwrap().last().unwrap()["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Expired")
+    );
+
+    // A second attempted withdraw and the sweep add nothing.
+    c.post(format!("{}/api/approvals/{id}/withdraw", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approvals::expire_due(&app.state).await.unwrap(), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 2);
 }
 
 #[tokio::test]

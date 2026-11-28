@@ -1717,7 +1717,7 @@ pub async fn withdraw_ask(
             "only the agent that opened this ask can withdraw it",
         ));
     }
-    expire_due_rows(&app.db, Utc::now()).await?;
+    expire_due(app).await?;
     let current = get_row(&app.db, id).await?;
     if !current.status.is_open_for_agent() {
         return Err(AppError::Conflict(format!(
