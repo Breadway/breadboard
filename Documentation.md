@@ -590,10 +590,12 @@ returns it to the agent, who resubmits the same row. A resubmission increments
 the full thread and the revision marker stay on one ask.
 
 A pending ask may carry `expires_at`. When it lapses it becomes `expired` with
-an audit event and can no longer be decided. Expiry is applied lazily on read
-and decision and by an hourly sweep (`approvals::expire_due`), so an ask that
-nobody opens still expires and emits `approval.updated` plus its `expired`
-event. Expired asks leave Needs you and stay visible under All with the
+an audit event (including the revision it lapsed at) and can no longer be
+decided. Every expiry path goes through `approvals::expire_due`: list, get,
+counts, revise and decide expire lazily through it, and an hourly sweep runs the
+same pass, so a page read cannot swallow a pending expiry notification. The
+`(ask_id, event_id)` delivery record makes a lazy read and a later sweep send at
+most once. Expired asks leave Needs you and stay visible under All with the
 `expired` status; they are not in the Answered count.
 
 ### Unread semantics
@@ -618,9 +620,13 @@ Two cursors track unread state, both keyed to the newest event id:
 
 Off unless `[approvals.notifications] enabled = true` and a `url` and `token`
 are configured. The token is the Gotify application token in that block; the
-server never reads the infra notification token. Messages are sent only for
-asks with `urgency = "high"` or an ask linked to an issue labelled `incident`,
-and only for the `created` and `expired` transitions. Decisions are the
+server never reads the infra notification token, and it travels in the
+`X-Gotify-Key` header rather than the URL, so a proxy log or an error line cannot
+capture it. Requests have a two second timeout; a failure logs only a status or
+a transport classification (`timeout`, `connect`, and so on), never the URL or
+the raw reqwest error. Messages are sent only for asks with
+`urgency = "high"` or an ask linked to an issue labelled `incident`, and only
+for the `created` and `expired` transitions. Decisions are the
 operator's own action and do not ping them again; revisions, comments and
 re-reads never send. Delivery is recorded in `approval_notifications` per
 `(ask_id, event_id)` before the request, so one transition produces at most one

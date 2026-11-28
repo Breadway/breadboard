@@ -1028,6 +1028,40 @@ async fn audit_feed_lists_every_transition_with_actor_and_time() {
     assert_eq!(events[2]["actor_name"], "tester");
     assert!(events.iter().all(|e| e["created_at"].is_string()));
     assert_eq!(events[2]["meta"]["decision"], "approve");
+
+    // Expire also carries the revision it lapsed at.
+    let mut expiring = ask_body(&f, "Audit expiry");
+    expiring["expires_at"] = json!((Utc::now() + Duration::hours(1)).to_rfc3339());
+    let expiring = create_ask(&c, &f, expiring).await;
+    let expiring_id = expiring["id"].as_i64().unwrap();
+    c.post(format!("{}/api/approvals/{expiring_id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "Revision two." }))
+        .send()
+        .await
+        .unwrap();
+    sqlx::query("UPDATE approval_asks SET expires_at = ?2 WHERE id = ?1")
+        .bind(expiring_id)
+        .bind((Utc::now() - Duration::minutes(1)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(approvals::expire_due(&app.state).await.unwrap(), 1);
+    let events: Vec<Value> = c
+        .get(format!("{}/api/approvals/{expiring_id}/events", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expired = events
+        .iter()
+        .find(|event| event["kind"] == "expired")
+        .expect("expired event");
+    assert_eq!(expired["meta"]["revision"], "2", "expire carries the revision");
+    assert!(expired["meta"]["expired_at"].is_string());
 }
 
 struct FakeGotify {
@@ -1036,6 +1070,10 @@ struct FakeGotify {
 }
 
 async fn start_fake_gotify() -> FakeGotify {
+    start_fake_gotify_with(200, r#"{"id":1}"#).await
+}
+
+async fn start_fake_gotify_with(status: u16, response_body: &'static str) -> FakeGotify {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -1075,16 +1113,19 @@ async fn start_fake_gotify() -> FakeGotify {
                             let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
                             sink.lock().unwrap().push(json!({
                                 "line": request_line,
+                                "head": head,
                                 "body": body,
                             }));
                             break;
                         }
                     }
                 }
+                let head = format!(
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    response_body.len()
+                );
                 let _ = socket
-                    .write_all(
-                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 10\r\nconnection: close\r\n\r\n{\"id\":1}  ",
-                    )
+                    .write_all(format!("{head}{response_body}").as_bytes())
                     .await;
             });
         }
@@ -1119,7 +1160,11 @@ async fn urgent_asks_send_one_gotify_message_per_created_transition() {
     {
         let requests = fake.requests.lock().unwrap();
         let request = &requests[0];
-        assert!(request["line"].as_str().unwrap().contains("token=app-token"));
+        let line = request["line"].as_str().unwrap();
+        let head = request["head"].as_str().unwrap();
+        assert_eq!(line, "POST /message HTTP/1.1");
+        assert!(!line.contains("token"), "the app token must not be in the URL");
+        assert!(head.to_ascii_lowercase().contains("x-gotify-key: app-token"));
         assert_eq!(request["body"]["priority"], 8);
         assert!(request["body"]["title"].as_str().unwrap().contains("bb-test"));
     }
@@ -1194,6 +1239,132 @@ async fn urgent_asks_send_one_gotify_message_per_created_transition() {
     create_ask(&c, &f, incident).await;
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert_eq!(gotify_count(&fake), 4, "an incident label pings at normal urgency");
+}
+
+#[tokio::test]
+async fn a_lazy_read_expires_and_notifies_without_swallowing_the_ping() {
+    let fake = start_fake_gotify().await;
+    let url = fake.url.clone();
+    let app = tu::spawn_with_config(move |cfg| {
+        cfg.approvals.notifications.enabled = true;
+        cfg.approvals.notifications.url = url;
+        cfg.approvals.notifications.token = "app-token".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+
+    let mut body = ask_body(&f, "Lazy expiry high ask");
+    body["expires_at"] = json!((Utc::now() + Duration::hours(1)).to_rfc3339());
+    let ask = create_ask(&c, &f, body).await;
+    let id = ask["id"].as_i64().unwrap();
+    assert_eq!(gotify_count(&fake), 1, "creation pings");
+
+    sqlx::query("UPDATE approval_asks SET expires_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind((Utc::now() - Duration::minutes(1)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    // A page read is the only thing that runs the expiry pass here.
+    let detail: Value = c
+        .get(format!("{}/api/approvals/{id}", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["status"], "expired");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 2, "the lazy read sends the expiry ping");
+    assert!(
+        fake.requests.lock().unwrap().last().unwrap()["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Expired"),
+        "the second message is the expiry"
+    );
+
+    // A second read, and the sweep afterwards, cannot send it again.
+    c.get(format!("{}/api/approvals/{id}", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(approvals::expire_due(&app.state).await.unwrap(), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 2, "created and expired, once each");
+}
+
+#[tokio::test]
+async fn a_failed_gotify_send_never_logs_the_app_token() {
+    let fake = start_fake_gotify_with(500, r#"{"error":"nope"}"#).await;
+    let url = fake.url.clone();
+    let app = tu::spawn_with_config(move |cfg| {
+        cfg.approvals.notifications.enabled = true;
+        cfg.approvals.notifications.url = url;
+        cfg.approvals.notifications.token = "super-secret-app-token".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    tu::clear_logs();
+
+    create_ask(&c, &f, ask_body(&f, "Failing Gotify send")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let logs = tu::log_text();
+    assert!(
+        logs.contains("approval Gotify send refused"),
+        "the refusal is logged: {logs}"
+    );
+    assert!(
+        !logs.contains("super-secret-app-token"),
+        "the token must never appear in a log line: {logs}"
+    );
+    assert!(
+        !logs.to_ascii_lowercase().contains("token="),
+        "no query token may appear in a log line: {logs}"
+    );
+    let requests = fake.requests.lock().unwrap();
+    let head = requests[0]["head"].as_str().unwrap().to_ascii_lowercase();
+    assert!(head.contains("x-gotify-key: super-secret-app-token"));
+    assert!(!requests[0]["line"].as_str().unwrap().contains("token"));
+}
+
+#[tokio::test]
+async fn a_transport_failure_logs_only_a_classification() {
+    let app = tu::spawn_with_config(|cfg| {
+        cfg.approvals.notifications.enabled = true;
+        // Nothing listens here, so the request fails at connect.
+        cfg.approvals.notifications.url = "http://127.0.0.1:1".into();
+        cfg.approvals.notifications.token = "transport-secret-token".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    tu::clear_logs();
+
+    create_ask(&c, &f, ask_body(&f, "Transport failure")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let logs = tu::log_text();
+    assert!(
+        logs.contains("approval Gotify send failed"),
+        "the transport failure is logged: {logs}"
+    );
+    assert!(
+        logs.contains("failure=\"connect\""),
+        "the log carries only a classification: {logs}"
+    );
+    assert!(!logs.contains("transport-secret-token"));
+    assert!(
+        !logs.contains("http://127.0.0.1:1"),
+        "the URL is not logged either: {logs}"
+    );
 }
 
 #[tokio::test]

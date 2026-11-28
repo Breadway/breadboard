@@ -839,14 +839,16 @@ async fn get_row(db: &SqlitePool, id: i64) -> AppResult<ApprovalAsk> {
 }
 
 pub async fn get_ask(
-    db: &SqlitePool,
+    app: &AppState,
     id: i64,
     viewer: Option<i64>,
     agent_viewer: Option<&str>,
 ) -> AppResult<ApprovalAsk> {
-    expire_due_rows(db, Utc::now()).await?;
-    let ask = get_row(db, id).await?;
-    let mut asks = hydrate(db, vec![ask], viewer, agent_viewer).await?;
+    // Every lazy read expires through the notifying path, so opening the page
+    // cannot swallow an expiry ping before the hourly sweep reaches it.
+    expire_due(app).await?;
+    let ask = get_row(&app.db, id).await?;
+    let mut asks = hydrate(&app.db, vec![ask], viewer, agent_viewer).await?;
     asks.pop().ok_or(AppError::NotFound)
 }
 
@@ -875,6 +877,14 @@ pub async fn expire_due_rows(db: &SqlitePool, now: DateTime<Utc>) -> AppResult<V
             tx.commit().await?;
             continue;
         }
+        let revision: i64 =
+            sqlx::query_scalar("SELECT revision FROM approval_asks WHERE id = ?1")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let mut meta = BTreeMap::new();
+        meta.insert("expired_at".into(), now.to_rfc3339());
+        meta.insert("revision".into(), revision.to_string());
         insert_event(
             &mut tx,
             *id,
@@ -882,7 +892,7 @@ pub async fn expire_due_rows(db: &SqlitePool, now: DateTime<Utc>) -> AppResult<V
             ApprovalActorKind::System,
             "system",
             "The one-shot approval expired before it was decided.",
-            &BTreeMap::from([("expired_at".into(), now.to_rfc3339())]),
+            &meta,
         )
         .await?;
         tx.commit().await?;
@@ -894,19 +904,23 @@ pub async fn expire_due(app: &AppState) -> AppResult<usize> {
     let expired = expire_due_rows(&app.db, Utc::now()).await?;
     for id in &expired {
         publish(app, *id, "expired");
-        if let Ok(Some(event_id)) = sqlx::query_scalar(
-            "SELECT id FROM approval_events
-              WHERE ask_id = ?1 AND kind = 'expired'
-              ORDER BY id DESC LIMIT 1",
-        )
-        .bind(id)
-        .fetch_optional(&app.db)
-        .await
-        {
-            notify_transition(app, *id, event_id, "expired").await;
-        }
+        notify_expired(app, *id).await;
     }
     Ok(expired.len())
+}
+
+async fn notify_expired(app: &AppState, ask_id: i64) {
+    if let Ok(Some(event_id)) = sqlx::query_scalar(
+        "SELECT id FROM approval_events
+          WHERE ask_id = ?1 AND kind = 'expired'
+          ORDER BY id DESC LIMIT 1",
+    )
+    .bind(ask_id)
+    .fetch_optional(&app.db)
+    .await
+    {
+        notify_transition(app, ask_id, event_id, "expired").await;
+    }
 }
 
 /// Hourly sweep so an expiry is recorded even when nobody opens the page.
@@ -1014,8 +1028,11 @@ async fn ask_notification_recipients(app: &AppState) -> bool {
     false
 }
 
-/// Post one message to the configured Gotify application. The token comes only
-/// from `approvals.notifications.token`; failures are logged and dropped.
+/// Post one message to the configured Gotify application. The token travels in
+/// the `X-Gotify-Key` header, never the URL, so a proxy or an error log cannot
+/// capture it. The bounded timeout keeps a dead Gotify from holding a request
+/// open, and every failure is logged with a classification, not the raw
+/// reqwest error (which embeds the URL).
 async fn send_gotify(app: &AppState, title: &str, message: &str) {
     let cfg = &app.config.approvals.notifications;
     let endpoint = format!("{}/message", cfg.url.trim_end_matches('/'));
@@ -1027,19 +1044,41 @@ async fn send_gotify(app: &AppState, title: &str, message: &str) {
     let sent = app
         .http
         .post(&endpoint)
-        .query(&[("token", cfg.token.trim())])
-        .timeout(std::time::Duration::from_secs(5))
+        .header("X-Gotify-Key", cfg.token.trim())
+        .timeout(std::time::Duration::from_secs(2))
         .json(&payload)
         .send()
         .await;
     match sent {
         Ok(response) if response.status().is_success() => {}
         Ok(response) => {
-            tracing::warn!(status = %response.status(), "approval Gotify send refused");
+            tracing::warn!(
+                status = response.status().as_u16(),
+                "approval Gotify send refused"
+            );
         }
         Err(error) => {
-            tracing::warn!(%error, "approval Gotify send failed");
+            tracing::warn!(
+                failure = gotify_error_class(&error),
+                "approval Gotify send failed"
+            );
         }
+    }
+}
+
+/// A short, non-sensitive classification. Never include the URL, the token or
+/// the raw error display: reqwest embeds the request URL in its message.
+fn gotify_error_class(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
     }
 }
 
@@ -1071,12 +1110,13 @@ pub struct ApprovalQuery {
 }
 
 pub async fn list_asks(
-    db: &SqlitePool,
+    app: &AppState,
     query: &ApprovalQuery,
     viewer: Option<i64>,
     agent_viewer: Option<&str>,
 ) -> AppResult<Vec<ApprovalAsk>> {
-    expire_due_rows(db, Utc::now()).await?;
+    let db = &app.db;
+    expire_due(app).await?;
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(SELECT);
     qb.push(" WHERE 1 = 1");
 
@@ -1179,8 +1219,9 @@ pub async fn list_asks(
     .await
 }
 
-pub async fn counts(db: &SqlitePool, viewer: Option<i64>) -> AppResult<ApprovalCounts> {
-    expire_due_rows(db, Utc::now()).await?;
+pub async fn counts(app: &AppState, viewer: Option<i64>) -> AppResult<ApprovalCounts> {
+    let db = &app.db;
+    expire_due(app).await?;
     let (needs, all, approval, maintenance, info, changes, answered) = sqlx::query_as(
         "SELECT
             SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END),
@@ -1251,7 +1292,7 @@ pub async fn mark_agent_read(db: &SqlitePool, ask_id: i64, agent_name: &str) -> 
             updated_at = excluded.updated_at",
     )
     .bind(ask_id)
-    .bind(agent_name.trim())
+    .bind(normalize_agent(agent_name))
     .bind(newest.unwrap_or(0))
     .bind(now_rfc3339())
     .execute(db)
@@ -1429,7 +1470,7 @@ pub async fn create_ask(
     let ask = get_row(&app.db, ask_id).await?;
     publish(app, ask.id, ask.status.as_str());
     notify_transition(app, ask_id, created_event, "created").await;
-    get_ask(&app.db, ask_id, None, None).await
+    get_ask(app, ask_id, None, None).await
 }
 
 pub async fn revise_ask(
@@ -1439,7 +1480,7 @@ pub async fn revise_ask(
     revision: &ApprovalRevision,
 ) -> AppResult<ApprovalAsk> {
     revision.validate().map_err(AppError::bad_request)?;
-    let current = get_ask(&app.db, id, None, None).await?;
+    let current = get_ask(app, id, None, None).await?;
     let (agent_name, session_id) =
         resolve_agent(app, user, &revision.agent_name, revision.session_id.as_deref()).await?;
     if !agent_matches(&current.agent_name, &agent_name) {
@@ -1447,8 +1488,8 @@ pub async fn revise_ask(
             "only the agent that opened this ask can revise it",
         ));
     }
-    expire_due_rows(&app.db, Utc::now()).await?;
-    let current = get_ask(&app.db, id, None, None).await?;
+    expire_due(app).await?;
+    let current = get_ask(app, id, None, None).await?;
     if !current.status.is_open_for_agent() {
         return Err(AppError::Conflict(format!(
             "this ask is {} and cannot be revised",
@@ -1606,7 +1647,7 @@ pub async fn revise_ask(
 
     let ask = get_row(&app.db, id).await?;
     publish(app, id, ask.status.as_str());
-    get_ask(&app.db, id, None, None).await
+    get_ask(app, id, None, None).await
 }
 
 pub async fn comment_on_ask(
@@ -1659,7 +1700,7 @@ pub async fn comment_on_ask(
         .await?;
     tx.commit().await?;
     publish(app, id, current.status.as_str());
-    get_ask(&app.db, id, None, None).await
+    get_ask(app, id, None, None).await
 }
 
 pub async fn withdraw_ask(
@@ -1704,7 +1745,7 @@ pub async fn withdraw_ask(
     .await?;
     tx.commit().await?;
     publish(app, id, "withdrawn");
-    get_ask(&app.db, id, None, None).await
+    get_ask(app, id, None, None).await
 }
 
 /// The operator's one-shot decision. Everything that can refuse does so before
@@ -1717,8 +1758,8 @@ pub async fn decide(
 ) -> AppResult<ApprovalAsk> {
     input.validate().map_err(AppError::bad_request)?;
     require_operator(app, user, input.agent_name.as_deref())?;
-    expire_due_rows(&app.db, Utc::now()).await?;
-    let current = get_ask(&app.db, id, None, None).await?;
+    expire_due(app).await?;
+    let current = get_ask(app, id, None, None).await?;
     if current.status != ApprovalStatus::Pending {
         return Err(AppError::Conflict(format!(
             "this ask is already {}; decisions are one-shot",
@@ -1829,7 +1870,7 @@ pub async fn decide(
     tx.commit().await?;
 
     publish(app, id, status.as_str());
-    get_ask(&app.db, id, None, None).await
+    get_ask(app, id, None, None).await
 }
 
 pub async fn update_window(
@@ -2049,7 +2090,7 @@ pub async fn list(
         }
     }
     Ok(Json(
-        list_asks(&app.db, &query, viewer, agent_view).await?,
+        list_asks(&app, &query, viewer, agent_view).await?,
     ))
 }
 
@@ -2077,7 +2118,7 @@ pub async fn counts_handler(
     State(app): State<AppState>,
     user: AuthUser,
 ) -> AppResult<Json<ApprovalCounts>> {
-    Ok(Json(counts(&app.db, Some(user.0.id)).await?))
+    Ok(Json(counts(&app, Some(user.0.id)).await?))
 }
 
 pub async fn get(
@@ -2101,7 +2142,7 @@ pub async fn get(
         }
     }
     let viewer = if agent_view.is_some() { None } else { Some(user.0.id) };
-    let ask = get_ask(&app.db, id, viewer, agent_view).await?;
+    let ask = get_ask(&app, id, viewer, agent_view).await?;
     match agent_view {
         Some(agent) => mark_agent_read(&app.db, id, agent).await?,
         None => mark_read(&app.db, id, user.0.id).await?,

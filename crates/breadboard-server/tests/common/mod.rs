@@ -3,6 +3,7 @@
 #![allow(dead_code)] // each test binary uses a different subset
 
 use std::net::SocketAddr;
+use std::sync::{Mutex, OnceLock};
 
 use breadboard_server::{
     auth::sha256_hex, config::Config, config::ForgejoConfig, config::UsageConfig, db, http, store,
@@ -23,10 +24,49 @@ pub struct TestApp {
 }
 
 pub async fn spawn() -> TestApp {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .try_init();
     spawn_full(None, None, |_| {}).await
+}
+
+/// Server logs captured by the test subscriber. Tests that must prove a secret
+/// never reaches the log read this buffer.
+static LOGS: OnceLock<Mutex<String>> = OnceLock::new();
+
+struct LogBuffer;
+
+impl LogBuffer {
+    fn buffer() -> &'static Mutex<String> {
+        LOGS.get_or_init(|| Mutex::new(String::new()))
+    }
+}
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self::LogBuffer::buffer()
+            .lock()
+            .expect("log buffer lock")
+            .push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = LogBuffer;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        LogBuffer
+    }
+}
+
+pub fn log_text() -> String {
+    LogBuffer::buffer().lock().expect("log buffer lock").clone()
+}
+
+pub fn clear_logs() {
+    LogBuffer::buffer().lock().expect("log buffer lock").clear();
 }
 
 /// Spawn with a caller-prepared config, e.g. a pinned approvals operator list.
@@ -62,6 +102,11 @@ async fn spawn_full_with(
     usage: impl FnOnce(&mut UsageConfig),
     config_mutate: impl FnOnce(&mut Config),
 ) -> TestApp {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new("breadboard_server=warn"))
+        .with_writer(LogBuffer)
+        .with_ansi(false)
+        .try_init();
     let tmp = tempfile::tempdir().unwrap();
     let mut config = Config {
         database_path: tmp.path().join("test.db"),
