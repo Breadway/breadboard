@@ -404,7 +404,8 @@ issues. Markdown imports use the same issue-creation rule.
 | `DELETE` | `/api/reviews/{id}` | requester withdraws an unresolved request: the record is removed so it no longer gates done. `204`. A non-requester is `403`; an approved request cannot be withdrawn (`409`). Emits `review.updated` with `state: "withdrawn"` |
 | `GET` | `/api/approvals` | approval inbox. Filters: `filter` (`needs`, `all`, `approval`, `maintenance`, `info`, `changes`, `answered`), `status`, `kind`, `project` (key or id), `issue`, `urgency`, `agent`, `unread`, `q` (title/summary/body substring), `limit` (default 200, max 500), `offset`. Pending asks sort first, then newest. Each ask carries its events, screenshot links and proposed window. Reading with no `?agent=` uses your operator read cursor for `unread` |
 | `GET` | `/api/approvals/counts` | `{ needs, unread, all, approval, maintenance, info, changes, answered }` for the navigation badge and filter chips |
-| `GET` | `/api/approvals/{id}` | one ask with thread, screenshots and window. An operator read advances the read cursor; `?agent=` reads as that agent without touching it |
+| `GET` | `/api/approvals/{id}` | one ask with thread, screenshots and window. An operator read advances the operator read cursor; `?agent=` reads as that agent, advances only the agent decision cursor, and leaves the operator cursor alone |
+| `GET` | `/api/approvals/{id}/events` | the audit trail for one ask: every `approval_events` row with `kind`, `actor_kind`, `actor_name`, `body_md`, `created_at` and `meta` (revision, decision, window). The page's Activity feed renders the same rows from the ask payload; this route serves clients that want the audit trail without the rest |
 | `POST` | `/api/approvals` | create as an agent: `{ agent_name, session_id?, project?, issue?, kind?, urgency?, title, summary?, body_md?, environment?, checklist?, risk_md?, rollback_md?, expires_at?, deadline?, attachments?, window? }`. `kind` is `approval`, `info` or `maintenance`; maintenance requires `window`. Attachments are `{ artifact_id, caption? }` or `{ filename, data_base64, mime?, caption? }` and reuse the screenshot artifact pipeline. `201` |
 | `POST` | `/api/approvals/{id}/revisions` | the owning agent resubmits: revision increments, status returns to `pending`, and a `revised` event is appended. Allowed only while `pending` or `changes`; anything else is `409`. Optional fields are unchanged when omitted; `expires_at` and `deadline` accept an explicit `null` to clear them; attachments append |
 | `POST` | `/api/approvals/{id}/comments` | `{ body_md, agent_name?, session_id? }`: a non-decision thread message. An agent must own the ask; a human omits `agent_name`. `201` |
@@ -590,7 +591,42 @@ the full thread and the revision marker stay on one ask.
 
 A pending ask may carry `expires_at`. When it lapses it becomes `expired` with
 an audit event and can no longer be decided. Expiry is applied lazily on read
-and decision and by an hourly sweep.
+and decision and by an hourly sweep (`approvals::expire_due`), so an ask that
+nobody opens still expires and emits `approval.updated` plus its `expired`
+event. Expired asks leave Needs you and stay visible under All with the
+`expired` status; they are not in the Answered count.
+
+### Unread semantics
+
+Two cursors track unread state, both keyed to the newest event id:
+
+- `approval_reads (ask_id, user_id)` is the operator cursor. An ask is unread
+  for the operator while it is `pending` and its newest event is newer than
+  the cursor. Opening the ask (`GET /api/approvals/{id}` without `?agent=`)
+  clears it. A decision removes the ask from `needs`; an agent revision is a
+  new event, so it clears to unread again while the ask returns to `pending`.
+  The navigation badge and page count use `needs` (pending asks), matching the
+  mockup; `unread` is the finer "you have not opened this" signal.
+- `approval_agent_reads (ask_id, agent_name)` is the agent cursor. An ask is
+  unread for its owning agent only when a decision event (`approved`,
+  `declined`, `changes`, `info` or `expired`) is newer than that cursor.
+  Comments and the agent's own revisions never mark it unread. Reading with
+  `?agent=` advances only this cursor, which is why an MCP `get_approval` or
+  `list_my_approvals` read does not clear the operator's badge.
+
+### Gotify approval notifications
+
+Off unless `[approvals.notifications] enabled = true` and a `url` and `token`
+are configured. The token is the Gotify application token in that block; the
+server never reads the infra notification token. Messages are sent only for
+asks with `urgency = "high"` or an ask linked to an issue labelled `incident`,
+and only for the `created` and `expired` transitions. Decisions are the
+operator's own action and do not ping them again; revisions, comments and
+re-reads never send. Delivery is recorded in `approval_notifications` per
+`(ask_id, event_id)` before the request, so one transition produces at most one
+message even under a race, and a failed send is logged rather than retried.
+The per-user `approvals` notification preference is the opt-out: with it off,
+Gotify is silent for that operator while the in-app badge is unchanged.
 
 Every transition appends an `approval_events` row (`created`, `revised`,
 `comment`, `approved`, `declined`, `changes`, `info`, `withdrawn`, `expired`)
@@ -621,7 +657,7 @@ override note.
 | `GET` | `/api/notifications` | `{ unread, notifications[] }`; `?unread=true` filters |
 | `POST` | `/api/notifications/{id}/read` | mark one read; `204` |
 | `POST` | `/api/notifications/read-all` | mark all read; `204` |
-| `GET`/`PUT` | `/api/notifications/prefs` | `{ assigned, mention, cycle, digest }` bools |
+| `GET`/`PUT` | `/api/notifications/prefs` | `{ assigned, mention, cycle, digest, approvals }` bools; `approvals` is the Gotify approval opt-out (default on) |
 
 Generated on: an issue assigned to you (not by you), an `@login` mention in a
 comment or description, a cycle you have assigned issues in starting/ending, and

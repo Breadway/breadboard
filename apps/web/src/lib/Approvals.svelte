@@ -293,7 +293,35 @@
   function kindLabel(kind: ApprovalKind) {
     return kind === "maintenance" ? "maintenance" : kind === "info" ? "info" : "approval";
   }
+
+  function eventLabel(kind: string) {
+    return kind === "created"
+      ? "opened"
+      : kind === "revised"
+        ? "resubmitted"
+        : kind === "comment"
+          ? "commented"
+          : kind === "approved"
+            ? "approved"
+            : kind === "declined"
+              ? "declined"
+              : kind === "changes"
+                ? "requested changes"
+                : kind === "info"
+                  ? "sent instructions"
+                  : kind === "withdrawn"
+                    ? "withdrawn"
+                    : kind === "expired"
+                      ? "expired"
+                      : kind;
+  }
 </script>
+
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && lightbox) lightbox = null;
+  }}
+/>
 
 <div class="page" data-approval-page>
   <header class="page-head">
@@ -662,6 +690,30 @@
               </div>
             {/if}
 
+            {#if ask.events.length}
+              <div class="md"><h3>Audit</h3></div>
+              <details class="audit" data-approval-audit>
+                <summary>
+                  Activity feed <span>{ask.events.length} transition{ask.events.length === 1 ? "" : "s"}</span>
+                </summary>
+                <ol>
+                  {#each ask.events as event (event.id)}
+                    <li data-audit-kind={event.kind}>
+                      <b>{eventLabel(event.kind)}</b>
+                      <span class="who">
+                        {event.actor_kind === "human" ? "Operator" : event.actor_kind === "system" ? "System" : "Agent"}
+                        · {event.actor_kind === "human" ? event.actor_name : event.actor_name}
+                      </span>
+                      <time datetime={event.created_at}>{new Date(event.created_at).toLocaleString("en-AU")}</time>
+                      {#if event.meta.revision}
+                        <span class="rev">rev {event.meta.revision}</span>
+                      {/if}
+                    </li>
+                  {/each}
+                </ol>
+              </details>
+            {/if}
+
             {#if isOpen(ask)}
               <div class="composer">
                 <textarea
@@ -802,7 +854,6 @@
     font-size: 12.5px;
   }
   .search:focus {
-    outline: none;
     border-color: color-mix(in srgb, var(--accent) 60%, transparent);
   }
   .selects {
@@ -1341,7 +1392,6 @@
     border-radius: 8px;
     padding: 10px 12px;
     color: var(--ink);
-    outline: none;
     font-size: 12.5px;
     line-height: 1.5;
   }
@@ -1438,6 +1488,72 @@
     display: grid;
     gap: 6px;
   }
+  .audit {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    margin: 8px 0 18px;
+  }
+  .audit summary {
+    cursor: pointer;
+    padding: 10px 13px;
+    font-size: 12px;
+    color: var(--ink-dim);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    list-style: none;
+  }
+  .audit summary::-webkit-details-marker {
+    display: none;
+  }
+  .audit summary::before {
+    content: "▸";
+    color: var(--accent);
+    font-size: 10px;
+  }
+  .audit[open] summary::before {
+    content: "▾";
+  }
+  .audit summary span {
+    color: var(--ink-3);
+    font-size: 10.5px;
+  }
+  .audit ol {
+    margin: 0;
+    padding: 2px 14px 12px 13px;
+    list-style: none;
+    display: grid;
+    gap: 7px;
+  }
+  .audit li {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr) auto auto;
+    gap: 8px;
+    align-items: baseline;
+    font-size: 11.5px;
+    color: var(--ink-dim);
+    border-top: 1px solid var(--line);
+    padding-top: 7px;
+  }
+  .audit li b {
+    color: var(--ink);
+    font-weight: 600;
+  }
+  .audit li .who {
+    color: var(--ink-3);
+    margin: 0;
+    font-size: 11px;
+  }
+  .audit li time {
+    font: 10.5px var(--font-mono);
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+  .audit li .rev {
+    font: 10px var(--font-mono);
+    color: var(--status-review);
+  }
   .lightbox {
     position: fixed;
     inset: 0;
@@ -1531,6 +1647,12 @@
     .gallery,
     .meta-strip {
       grid-template-columns: 1fr;
+    }
+    .audit li {
+      grid-template-columns: 1fr auto;
+    }
+    .audit li .who {
+      grid-column: 1 / -1;
     }
     .detail {
       padding: 20px 18px 140px;

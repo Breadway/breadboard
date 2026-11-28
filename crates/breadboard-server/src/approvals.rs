@@ -743,6 +743,7 @@ async fn hydrate(
     db: &SqlitePool,
     mut asks: Vec<ApprovalAsk>,
     viewer: Option<i64>,
+    agent_viewer: Option<&str>,
 ) -> AppResult<Vec<ApprovalAsk>> {
     if asks.is_empty() {
         return Ok(asks);
@@ -780,18 +781,53 @@ async fn hydrate(
         .await?;
         cursors.extend(rows);
     }
+    let mut agent_cursors: HashMap<i64, i64> = HashMap::new();
+    if let Some(agent) = agent_viewer {
+        let rows: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT ask_id, last_seen_event_id FROM approval_agent_reads
+              WHERE replace(lower(agent_name), ' ', '-') = ?1",
+        )
+        .bind(normalize_agent(agent))
+        .fetch_all(db)
+        .await?;
+        agent_cursors.extend(rows);
+    }
 
     for ask in &mut asks {
         ask.events = events_by.remove(&ask.id).unwrap_or_default();
         ask.attachments = attachments_by.remove(&ask.id).unwrap_or_default();
         ask.window = windows_by.remove(&ask.id);
-        if viewer.is_some() && ask.status == ApprovalStatus::Pending {
+        if agent_viewer.is_some() {
+            // The agent marker is about decisions: an approved/declined/
+            // changes/info/expired event newer than its cursor. Comments and
+            // its own revisions do not count as unread work.
+            let newest_decision = ask
+                .events
+                .iter()
+                .rev()
+                .find(|event| is_decision_event(event.kind))
+                .map(|event| event.id)
+                .unwrap_or(0);
+            let seen = agent_cursors.get(&ask.id).copied().unwrap_or(0);
+            ask.unread = newest_decision > seen;
+        } else if viewer.is_some() && ask.status == ApprovalStatus::Pending {
             let newest = ask.events.last().map(|e| e.id).unwrap_or(0);
             let seen = cursors.get(&ask.id).copied().unwrap_or(0);
             ask.unread = newest > seen;
         }
     }
     Ok(asks)
+}
+
+fn is_decision_event(kind: ApprovalEventKind) -> bool {
+    matches!(
+        kind,
+        ApprovalEventKind::Approved
+            | ApprovalEventKind::Declined
+            | ApprovalEventKind::Changes
+            | ApprovalEventKind::Info
+            | ApprovalEventKind::Expired
+    )
 }
 
 async fn get_row(db: &SqlitePool, id: i64) -> AppResult<ApprovalAsk> {
@@ -802,10 +838,15 @@ async fn get_row(db: &SqlitePool, id: i64) -> AppResult<ApprovalAsk> {
     row.map(AskRow::into_ask).ok_or(AppError::NotFound)
 }
 
-pub async fn get_ask(db: &SqlitePool, id: i64, viewer: Option<i64>) -> AppResult<ApprovalAsk> {
+pub async fn get_ask(
+    db: &SqlitePool,
+    id: i64,
+    viewer: Option<i64>,
+    agent_viewer: Option<&str>,
+) -> AppResult<ApprovalAsk> {
     expire_due_rows(db, Utc::now()).await?;
     let ask = get_row(db, id).await?;
-    let mut asks = hydrate(db, vec![ask], viewer).await?;
+    let mut asks = hydrate(db, vec![ask], viewer, agent_viewer).await?;
     asks.pop().ok_or(AppError::NotFound)
 }
 
@@ -853,6 +894,17 @@ pub async fn expire_due(app: &AppState) -> AppResult<usize> {
     let expired = expire_due_rows(&app.db, Utc::now()).await?;
     for id in &expired {
         publish(app, *id, "expired");
+        if let Ok(Some(event_id)) = sqlx::query_scalar(
+            "SELECT id FROM approval_events
+              WHERE ask_id = ?1 AND kind = 'expired'
+              ORDER BY id DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&app.db)
+        .await
+        {
+            notify_transition(app, *id, event_id, "expired").await;
+        }
     }
     Ok(expired.len())
 }
@@ -869,6 +921,126 @@ pub fn spawn_expiry_sweep(state: AppState) {
             }
         }
     });
+}
+
+/// Gotify delivery for an ask transition. Only high-urgency asks and asks on
+/// an issue labelled `incident` are sent. Delivery is recorded per
+/// (ask, event) before the request, so a transition is at-most-once. Revisions,
+/// comments and re-reads never call this.
+pub async fn notify_transition(app: &AppState, ask_id: i64, event_id: i64, kind: &str) {
+    let cfg = &app.config.approvals.notifications;
+    if !cfg.usable() {
+        return;
+    }
+    let Ok(ask) = get_row(&app.db, ask_id).await else {
+        return;
+    };
+    let issue = match ask.issue_id {
+        Some(issue_id) => store::get_issue(&app.db, issue_id).await.ok(),
+        None => None,
+    };
+    let incident = issue
+        .as_ref()
+        .map(|issue| issue.labels.iter().any(|label| label.eq_ignore_ascii_case("incident")))
+        .unwrap_or(false);
+    if ask.urgency != ApprovalUrgency::High && !incident {
+        return;
+    }
+    if !ask_notification_recipients(app).await {
+        return;
+    }
+
+    let inserted = sqlx::query(
+        "INSERT OR IGNORE INTO approval_notifications (ask_id, event_id, kind, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+    )
+    .bind(ask_id)
+    .bind(event_id)
+    .bind(kind)
+    .bind(now_rfc3339())
+    .execute(&app.db)
+    .await;
+    match inserted {
+        Ok(result) if result.rows_affected() > 0 => {}
+        _ => return,
+    }
+
+    let issue_label = ask
+        .issue_key
+        .clone()
+        .or_else(|| ask.project_key.clone())
+        .unwrap_or_else(|| "approvals".into());
+    let title = format!("[{}] {}", cfg.app.trim(), ask.title);
+    let message = if kind == "expired" {
+        format!(
+            "Expired without a decision: {issue_label}. {}. Open Approvals to open a new ask.",
+            ask.agent_name
+        )
+    } else {
+        format!(
+            "{} needs a decision on {issue_label}: {}. Open Approvals to approve, decline or send it back.",
+            ask.agent_name,
+            if incident { "incident" } else { "high urgency" }
+        )
+    };
+    send_gotify(app, &title, &message).await;
+}
+
+/// Whether at least one operator still wants approval pings. The opt-out is
+/// the `approvals` notification preference; the in-app badge is not affected.
+async fn ask_notification_recipients(app: &AppState) -> bool {
+    let mut users: Vec<i64> = Vec::new();
+    if app.config.approvals.operators.is_empty() {
+        if let Ok(ids) = sqlx::query_scalar::<_, i64>("SELECT id FROM users")
+            .fetch_all(&app.db)
+            .await
+        {
+            users.extend(ids);
+        }
+    } else {
+        for login in &app.config.approvals.operators {
+            if let Ok(Some(id)) = store::find_user_by_login(&app.db, login).await {
+                users.push(id);
+            }
+        }
+    }
+    for user_id in users {
+        if let Ok(prefs) = store::get_prefs(&app.db, user_id).await {
+            if prefs.approvals {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Post one message to the configured Gotify application. The token comes only
+/// from `approvals.notifications.token`; failures are logged and dropped.
+async fn send_gotify(app: &AppState, title: &str, message: &str) {
+    let cfg = &app.config.approvals.notifications;
+    let endpoint = format!("{}/message", cfg.url.trim_end_matches('/'));
+    let payload = serde_json::json!({
+        "title": title,
+        "message": message,
+        "priority": 8,
+    });
+    let sent = app
+        .http
+        .post(&endpoint)
+        .query(&[("token", cfg.token.trim())])
+        .timeout(std::time::Duration::from_secs(5))
+        .json(&payload)
+        .send()
+        .await;
+    match sent {
+        Ok(response) if response.status().is_success() => {}
+        Ok(response) => {
+            tracing::warn!(status = %response.status(), "approval Gotify send refused");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "approval Gotify send failed");
+        }
+    }
 }
 
 pub fn publish(app: &AppState, id: i64, status: &str) {
@@ -902,6 +1074,7 @@ pub async fn list_asks(
     db: &SqlitePool,
     query: &ApprovalQuery,
     viewer: Option<i64>,
+    agent_viewer: Option<&str>,
 ) -> AppResult<Vec<ApprovalAsk>> {
     expire_due_rows(db, Utc::now()).await?;
     let mut qb: QueryBuilder<Sqlite> = QueryBuilder::new(SELECT);
@@ -966,7 +1139,13 @@ pub async fn list_asks(
             qb.push(" ORDER BY a.created_at DESC, a.id DESC LIMIT ")
                 .push_bind(limit);
             let rows: Vec<AskRow> = qb.build_query_as().fetch_all(db).await?;
-            return hydrate(db, rows.into_iter().map(AskRow::into_ask).collect(), viewer).await;
+            return hydrate(
+                db,
+                rows.into_iter().map(AskRow::into_ask).collect(),
+                viewer,
+                agent_viewer,
+            )
+            .await;
         };
         qb.push(
             " AND a.status = 'pending' AND (
@@ -991,7 +1170,13 @@ pub async fn list_asks(
     qb.push(" OFFSET ").push_bind(offset);
 
     let rows: Vec<AskRow> = qb.build_query_as().fetch_all(db).await?;
-    hydrate(db, rows.into_iter().map(AskRow::into_ask).collect(), viewer).await
+    hydrate(
+        db,
+        rows.into_iter().map(AskRow::into_ask).collect(),
+        viewer,
+        agent_viewer,
+    )
+    .await
 }
 
 pub async fn counts(db: &SqlitePool, viewer: Option<i64>) -> AppResult<ApprovalCounts> {
@@ -1047,6 +1232,31 @@ pub async fn counts(db: &SqlitePool, viewer: Option<i64>) -> AppResult<ApprovalC
         changes,
         answered,
     })
+}
+
+/// Advance an agent's decision cursor to the newest event on the ask.
+pub async fn mark_agent_read(db: &SqlitePool, ask_id: i64, agent_name: &str) -> AppResult<()> {
+    let newest: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(id) FROM approval_events WHERE ask_id = ?1")
+            .bind(ask_id)
+            .fetch_one(db)
+            .await?;
+    sqlx::query(
+        "INSERT INTO approval_agent_reads
+            (ask_id, agent_name, last_seen_event_id, updated_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (ask_id, agent_name) DO UPDATE SET
+            last_seen_event_id =
+                MAX(approval_agent_reads.last_seen_event_id, excluded.last_seen_event_id),
+            updated_at = excluded.updated_at",
+    )
+    .bind(ask_id)
+    .bind(agent_name.trim())
+    .bind(newest.unwrap_or(0))
+    .bind(now_rfc3339())
+    .execute(db)
+    .await?;
+    Ok(())
 }
 
 /// Advance an operator's read cursor to the newest event on the ask.
@@ -1161,7 +1371,7 @@ pub async fn create_ask(
     let mut meta = BTreeMap::new();
     meta.insert("revision".into(), "1".into());
     meta.insert("kind".into(), kind.as_str().into());
-    insert_event(
+    let created_event = insert_event(
         &mut tx,
         ask_id,
         ApprovalEventKind::Created,
@@ -1218,7 +1428,8 @@ pub async fn create_ask(
 
     let ask = get_row(&app.db, ask_id).await?;
     publish(app, ask.id, ask.status.as_str());
-    get_ask(&app.db, ask_id, None).await
+    notify_transition(app, ask_id, created_event, "created").await;
+    get_ask(&app.db, ask_id, None, None).await
 }
 
 pub async fn revise_ask(
@@ -1228,7 +1439,7 @@ pub async fn revise_ask(
     revision: &ApprovalRevision,
 ) -> AppResult<ApprovalAsk> {
     revision.validate().map_err(AppError::bad_request)?;
-    let current = get_ask(&app.db, id, None).await?;
+    let current = get_ask(&app.db, id, None, None).await?;
     let (agent_name, session_id) =
         resolve_agent(app, user, &revision.agent_name, revision.session_id.as_deref()).await?;
     if !agent_matches(&current.agent_name, &agent_name) {
@@ -1237,7 +1448,7 @@ pub async fn revise_ask(
         ));
     }
     expire_due_rows(&app.db, Utc::now()).await?;
-    let current = get_ask(&app.db, id, None).await?;
+    let current = get_ask(&app.db, id, None, None).await?;
     if !current.status.is_open_for_agent() {
         return Err(AppError::Conflict(format!(
             "this ask is {} and cannot be revised",
@@ -1395,7 +1606,7 @@ pub async fn revise_ask(
 
     let ask = get_row(&app.db, id).await?;
     publish(app, id, ask.status.as_str());
-    get_ask(&app.db, id, None).await
+    get_ask(&app.db, id, None, None).await
 }
 
 pub async fn comment_on_ask(
@@ -1448,7 +1659,7 @@ pub async fn comment_on_ask(
         .await?;
     tx.commit().await?;
     publish(app, id, current.status.as_str());
-    get_ask(&app.db, id, None).await
+    get_ask(&app.db, id, None, None).await
 }
 
 pub async fn withdraw_ask(
@@ -1493,7 +1704,7 @@ pub async fn withdraw_ask(
     .await?;
     tx.commit().await?;
     publish(app, id, "withdrawn");
-    get_ask(&app.db, id, None).await
+    get_ask(&app.db, id, None, None).await
 }
 
 /// The operator's one-shot decision. Everything that can refuse does so before
@@ -1507,7 +1718,7 @@ pub async fn decide(
     input.validate().map_err(AppError::bad_request)?;
     require_operator(app, user, input.agent_name.as_deref())?;
     expire_due_rows(&app.db, Utc::now()).await?;
-    let current = get_ask(&app.db, id, None).await?;
+    let current = get_ask(&app.db, id, None, None).await?;
     if current.status != ApprovalStatus::Pending {
         return Err(AppError::Conflict(format!(
             "this ask is already {}; decisions are one-shot",
@@ -1618,7 +1829,7 @@ pub async fn decide(
     tx.commit().await?;
 
     publish(app, id, status.as_str());
-    get_ask(&app.db, id, None).await
+    get_ask(&app.db, id, None, None).await
 }
 
 pub async fn update_window(
@@ -1814,24 +2025,21 @@ pub async fn create_freeze(
 
 // --- REST handlers --------------------------------------------------------
 
-fn viewer_id(user: &User, query_agent: Option<&str>) -> Option<i64> {
-    // An agent reading its own asks does not advance the operator's cursor.
-    match query_agent.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(_) => None,
-        None => Some(user.id),
-    }
-}
-
 pub async fn list(
     State(app): State<AppState>,
     user: AuthUser,
     Query(query): Query<ApprovalQuery>,
 ) -> AppResult<Json<Vec<ApprovalAsk>>> {
-    let viewer = viewer_id(&user.0, query.agent.as_deref());
+    let agent_view = query
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let viewer = if agent_view.is_some() { None } else { Some(user.0.id) };
     // A list is a read: filter by a known agent only when the caller owns it.
     // Unknown names are allowed as a filter and simply match nothing, so a GET
     // never registers or claims an identity as a side effect.
-    if let Some(agent) = query.agent.as_deref() {
+    if let Some(agent) = agent_view {
         if let Some(owner) = agent_owner(&app.db, agent).await? {
             if owner != user.0.id {
                 return Err(AppError::forbidden_msg(
@@ -1840,7 +2048,9 @@ pub async fn list(
             }
         }
     }
-    Ok(Json(list_asks(&app.db, &query, viewer).await?))
+    Ok(Json(
+        list_asks(&app.db, &query, viewer, agent_view).await?,
+    ))
 }
 
 /// The user that owns an agent identity, if it is known at all.
@@ -1876,12 +2086,37 @@ pub async fn get(
     Path(id): Path<i64>,
     Query(query): Query<ApprovalQuery>,
 ) -> AppResult<Json<ApprovalAsk>> {
-    let viewer = viewer_id(&user.0, query.agent.as_deref());
-    let ask = get_ask(&app.db, id, viewer).await?;
-    if viewer.is_some() {
-        mark_read(&app.db, id, user.0.id).await?;
+    let agent_view = query
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(agent) = agent_view {
+        if let Some(owner) = agent_owner(&app.db, agent).await? {
+            if owner != user.0.id {
+                return Err(AppError::forbidden_msg(
+                    "agent_name does not belong to this user",
+                ));
+            }
+        }
+    }
+    let viewer = if agent_view.is_some() { None } else { Some(user.0.id) };
+    let ask = get_ask(&app.db, id, viewer, agent_view).await?;
+    match agent_view {
+        Some(agent) => mark_agent_read(&app.db, id, agent).await?,
+        None => mark_read(&app.db, id, user.0.id).await?,
     }
     Ok(Json(ask))
+}
+
+/// The audit trail for one ask: every transition with actor, kind and time.
+pub async fn audit(
+    State(app): State<AppState>,
+    _user: AuthUser,
+    Path(id): Path<i64>,
+) -> AppResult<Json<Vec<ApprovalEvent>>> {
+    get_row(&app.db, id).await?;
+    Ok(Json(events_for(&app.db, &[id]).await?))
 }
 
 pub async fn create(

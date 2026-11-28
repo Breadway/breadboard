@@ -5,10 +5,14 @@
 //! than trusting the web client.
 
 mod common;
+use std::sync::{Arc, Mutex};
+
+use breadboard_server::approvals;
 use breadboard_server::auth::sha256_hex;
 use chrono::{Duration, Utc};
 use common as tu;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 struct Fixture {
     base: String,
@@ -816,6 +820,441 @@ async fn a_revised_window_must_still_be_valid() {
     let revised_start: chrono::DateTime<Utc> =
         serde_json::from_value(revised["window"]["starts_at"].clone()).unwrap();
     assert_eq!(revised_start, start + Duration::hours(1));
+}
+
+
+#[tokio::test]
+async fn operator_counts_track_decisions_and_revisions() {
+    let app = tu::spawn().await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    let ask = create_ask(&c, &f, ask_body(&f, "Badge semantics")).await;
+    let id = ask["id"].as_i64().unwrap();
+
+    let counts = |c: reqwest::Client, base: String, auth: String| async move {
+        c.get(format!("{base}/api/approvals/counts"))
+            .header("authorization", auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap()
+    };
+    let before = counts(c.clone(), f.base.clone(), f.auth.clone()).await;
+    assert_eq!(before["needs"], 1);
+    assert_eq!(before["unread"], 1);
+
+    // Opening it clears unread but it is still waiting for a decision.
+    let _: Value = c
+        .get(format!("{}/api/approvals/{id}", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let read = counts(c.clone(), f.base.clone(), f.auth.clone()).await;
+    assert_eq!(read["needs"], 1);
+    assert_eq!(read["unread"], 0);
+
+    // A revision is new operator work: unread comes back.
+    c.post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "More evidence." }))
+        .send()
+        .await
+        .unwrap();
+    let revised = counts(c.clone(), f.base.clone(), f.auth.clone()).await;
+    assert_eq!(revised["needs"], 1);
+    assert_eq!(revised["unread"], 1);
+
+    // A decision removes it from Needs you and leaves nothing unread.
+    let decided = decide(&c, &f, id, json!({ "decision": "approve" })).await;
+    assert_eq!(decided.status(), 200);
+    let done = counts(c.clone(), f.base.clone(), f.auth.clone()).await;
+    assert_eq!(done["needs"], 0);
+    assert_eq!(done["unread"], 0);
+}
+
+#[tokio::test]
+async fn agent_unread_marks_new_decisions_and_clears_on_read() {
+    let app = tu::spawn().await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    let ask = create_ask(&c, &f, ask_body(&f, "Agent cursor")).await;
+    let id = ask["id"].as_i64().unwrap();
+
+    let agent_list = |c: reqwest::Client, base: String, auth: String, agent: String| async move {
+        c.get(format!("{base}/api/approvals?agent={agent}"))
+            .header("authorization", auth)
+            .send()
+            .await
+            .unwrap()
+            .json::<Vec<Value>>()
+            .await
+            .unwrap()
+    };
+
+    // No decision yet, so nothing is unread for the agent.
+    let mine = agent_list(c.clone(), f.base.clone(), f.auth.clone(), f.agent.clone()).await;
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0]["unread"], false);
+
+    // Request changes is a decision the agent has to see.
+    let changes = decide(
+        &c,
+        &f,
+        id,
+        json!({ "decision": "changes", "note_md": "Rework it." }),
+    )
+    .await;
+    assert_eq!(changes.status(), 200);
+    let mine = agent_list(c.clone(), f.base.clone(), f.auth.clone(), f.agent.clone()).await;
+    assert_eq!(mine[0]["unread"], true, "a decision marks the agent view unread");
+
+    // Reading as the agent advances only the agent cursor.
+    let detail: Value = c
+        .get(format!("{}/api/approvals/{id}?agent={}", f.base, f.agent))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(detail["unread"], true);
+    let mine = agent_list(c.clone(), f.base.clone(), f.auth.clone(), f.agent.clone()).await;
+    assert_eq!(mine[0]["unread"], false);
+
+    // Its own revision is not a decision to read.
+    c.post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "Reworked." }))
+        .send()
+        .await
+        .unwrap();
+    let mine = agent_list(c.clone(), f.base.clone(), f.auth.clone(), f.agent.clone()).await;
+    assert_eq!(mine[0]["unread"], false, "a revision does not mark the agent unread");
+
+    // The next decision does.
+    let approved = decide(&c, &f, id, json!({ "decision": "approve" })).await;
+    assert_eq!(approved.status(), 200);
+    let mine = agent_list(c.clone(), f.base.clone(), f.auth.clone(), f.agent.clone()).await;
+    assert_eq!(mine[0]["unread"], true);
+}
+
+#[tokio::test]
+async fn expiry_sweep_itself_expires_and_the_ask_leaves_needs_you() {
+    let app = tu::spawn().await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    let mut body = ask_body(&f, "Sweep expiry");
+    body["expires_at"] = json!((Utc::now() + Duration::hours(1)).to_rfc3339());
+    let ask = create_ask(&c, &f, body).await;
+    let id = ask["id"].as_i64().unwrap();
+
+    // Move the deadline into the past without a read, so only the pass can
+    // expire it.
+    sqlx::query("UPDATE approval_asks SET expires_at = ?2 WHERE id = ?1")
+        .bind(id)
+        .bind((Utc::now() - Duration::minutes(5)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let expired = approvals::expire_due(&app.state).await.unwrap();
+    assert_eq!(expired, 1, "the sweep itself expires the ask");
+    assert_eq!(approvals::expire_due(&app.state).await.unwrap(), 0, "a second pass is a no-op");
+
+    let needs: Vec<Value> = c
+        .get(format!("{}/api/approvals?filter=needs", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(needs.is_empty(), "an expired ask leaves Needs you");
+
+    let all: Vec<Value> = c
+        .get(format!("{}/api/approvals?filter=all", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let stored = all.iter().find(|row| row["id"] == json!(id)).expect("expired ask is visible");
+    assert_eq!(stored["status"], "expired");
+    let last = stored["events"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["kind"], "expired");
+    assert_eq!(last["actor_kind"], "system");
+}
+
+#[tokio::test]
+async fn audit_feed_lists_every_transition_with_actor_and_time() {
+    let app = tu::spawn().await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+    let ask = create_ask(&c, &f, ask_body(&f, "Audit me")).await;
+    let id = ask["id"].as_i64().unwrap();
+    c.post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "Revision one." }))
+        .send()
+        .await
+        .unwrap();
+    decide(&c, &f, id, json!({ "decision": "approve", "note_md": "Ship it." }))
+        .await;
+
+    let events: Vec<Value> = c
+        .get(format!("{}/api/approvals/{id}/events", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e["kind"].as_str().unwrap()).collect();
+    assert_eq!(kinds, vec!["created", "revised", "approved"]);
+    assert_eq!(events[0]["actor_kind"], "agent");
+    assert_eq!(events[0]["actor_name"], f.agent);
+    assert_eq!(events[2]["actor_kind"], "human");
+    assert_eq!(events[2]["actor_name"], "tester");
+    assert!(events.iter().all(|e| e["created_at"].is_string()));
+    assert_eq!(events[2]["meta"]["decision"], "approve");
+}
+
+struct FakeGotify {
+    url: String,
+    requests: Arc<Mutex<Vec<Value>>>,
+}
+
+async fn start_fake_gotify() -> FakeGotify {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let sink = requests.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let mut content_length = 0usize;
+                loop {
+                    let Ok(n) = socket.read(&mut chunk).await else {
+                        return;
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf);
+                    if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                        if content_length == 0 {
+                            content_length = head
+                                .lines()
+                                .find_map(|line| {
+                                    line.strip_prefix("content-length:")
+                                        .or_else(|| line.strip_prefix("Content-Length:"))
+                                })
+                                .and_then(|v| v.trim().parse().ok())
+                                .unwrap_or(0);
+                        }
+                        if body.len() >= content_length {
+                            let request_line = head.lines().next().unwrap_or_default().to_string();
+                            let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                            sink.lock().unwrap().push(json!({
+                                "line": request_line,
+                                "body": body,
+                            }));
+                            break;
+                        }
+                    }
+                }
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 10\r\nconnection: close\r\n\r\n{\"id\":1}  ",
+                    )
+                    .await;
+            });
+        }
+    });
+    FakeGotify {
+        url: format!("http://{addr}"),
+        requests,
+    }
+}
+
+fn gotify_count(fake: &FakeGotify) -> usize {
+    fake.requests.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn urgent_asks_send_one_gotify_message_per_created_transition() {
+    let fake = start_fake_gotify().await;
+    let url = fake.url.clone();
+    let app = tu::spawn_with_config(move |cfg| {
+        cfg.approvals.notifications.enabled = true;
+        cfg.approvals.notifications.url = url;
+        cfg.approvals.notifications.token = "app-token".into();
+        cfg.approvals.notifications.app = "bb-test".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+
+    let ask = create_ask(&c, &f, ask_body(&f, "Urgent runner rotation")).await;
+    let id = ask["id"].as_i64().unwrap();
+    assert_eq!(gotify_count(&fake), 1, "an urgent ask pings once");
+    {
+        let requests = fake.requests.lock().unwrap();
+        let request = &requests[0];
+        assert!(request["line"].as_str().unwrap().contains("token=app-token"));
+        assert_eq!(request["body"]["priority"], 8);
+        assert!(request["body"]["title"].as_str().unwrap().contains("bb-test"));
+    }
+
+    // A revision is not a new ping, and re-reads never ping.
+    c.post(format!("{}/api/approvals/{id}/revisions", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({ "agent_name": f.agent, "summary": "Reworked." }))
+        .send()
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        c.get(format!("{}/api/approvals/{id}", f.base))
+            .header("authorization", &f.auth)
+            .send()
+            .await
+            .unwrap();
+    }
+    assert_eq!(gotify_count(&fake), 1, "revisions and re-reads do not ping");
+
+    // A decision is the operator's own action, so it does not ping them again.
+    decide(&c, &f, id, json!({ "decision": "approve" })).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 1);
+
+    // A second transition (expiry) pings once for an urgent ask.
+    let mut expiring = ask_body(&f, "Expiring urgent ask");
+    expiring["expires_at"] = json!((Utc::now() + Duration::hours(1)).to_rfc3339());
+    let expiring = create_ask(&c, &f, expiring).await;
+    assert_eq!(gotify_count(&fake), 2, "creation of the expiring ask pings");
+    sqlx::query("UPDATE approval_asks SET expires_at = ?2 WHERE id = ?1")
+        .bind(expiring["id"].as_i64().unwrap())
+        .bind((Utc::now() - Duration::minutes(1)).to_rfc3339())
+        .execute(&app.db)
+        .await
+        .unwrap();
+    assert_eq!(approvals::expire_due(&app.state).await.unwrap(), 1);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 3, "expiry is its own transition");
+    assert!(
+        fake.requests.lock().unwrap().last().unwrap()["body"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Expired"),
+        "the expiry ping explains the lapse"
+    );
+
+    // Normal urgency is quiet; an incident-labelled issue pings even at normal.
+    let mut quiet = ask_body(&f, "Normal ask");
+    quiet["urgency"] = json!("normal");
+    create_ask(&c, &f, quiet).await;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(gotify_count(&fake), 3);
+
+    let incident_issue: Value = c
+        .post(format!("{}/api/issues", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({
+            "title": "incident host",
+            "project": "BREAD",
+            "labels": ["incident"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut incident = ask_body(&f, "Incident ask");
+    incident["issue"] = incident_issue["key"].clone();
+    incident["urgency"] = json!("normal");
+    create_ask(&c, &f, incident).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(gotify_count(&fake), 4, "an incident label pings at normal urgency");
+}
+
+#[tokio::test]
+async fn approval_notification_opt_out_is_respected() {
+    let fake = start_fake_gotify().await;
+    let url = fake.url.clone();
+    let app = tu::spawn_with_config(move |cfg| {
+        cfg.approvals.notifications.enabled = true;
+        cfg.approvals.notifications.url = url;
+        cfg.approvals.notifications.token = "app-token".into();
+    })
+    .await;
+    let f = fixture(&app).await;
+    let c = reqwest::Client::new();
+
+    let opted_out: Value = c
+        .put(format!("{}/api/notifications/prefs", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({
+            "assigned": true,
+            "mention": true,
+            "cycle": true,
+            "digest": false,
+            "approvals": false
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(opted_out["approvals"], false);
+
+    create_ask(&c, &f, ask_body(&f, "Opted out high ask")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(gotify_count(&fake), 0, "the opt-out silences Gotify");
+
+    // The in-app badge still counts the ask that needs a decision.
+    let counts: Value = c
+        .get(format!("{}/api/approvals/counts", f.base))
+        .header("authorization", &f.auth)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(counts["needs"], 1);
+
+    c.put(format!("{}/api/notifications/prefs", f.base))
+        .header("authorization", &f.auth)
+        .json(&json!({
+            "assigned": true, "mention": true, "cycle": true,
+            "digest": false, "approvals": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    create_ask(&c, &f, ask_body(&f, "Opted in high ask")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(gotify_count(&fake), 1, "re-enabling resumes pings");
 }
 
 #[tokio::test]

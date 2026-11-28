@@ -171,6 +171,9 @@ try {
   await page.getByRole("button", { name: /^Approvals/ }).first().click();
   await page.locator("[data-approval-page]").waitFor();
   await page.locator(`[data-approval-card="${fx.ids.approval}"]`).waitFor();
+  const badge = page.getByRole("button", { name: /^Approvals/ }).first().locator(".badge");
+  const badgeBefore = Number((await badge.textContent()).trim());
+  assert.ok(Number.isInteger(badgeBefore) && badgeBefore > 0, "the nav badge counts asks that need you");
   assert.equal(await page.locator("[data-approval-card]").count() >= 3, true);
   await page.locator(`[data-approval-card="${fx.ids.changes}"]`).count().then((n) => assert.equal(n, 0, "a changes-requested ask is hidden from Needs you"));
 
@@ -210,6 +213,11 @@ try {
   assert.match(lightboxSrc, /\/api\/artifacts\/\d+$/);
   await page.locator('[data-lightbox="screenshot"]').click();
   await page.locator('[data-lightbox="screenshot"]').waitFor({ state: "detached" });
+  // Escape closes it too, not only a click.
+  await page.locator("[data-screenshot]").click();
+  await page.locator('[data-lightbox="screenshot"]').waitFor();
+  await page.keyboard.press("Escape");
+  await page.locator('[data-lightbox="screenshot"]').waitFor({ state: "detached" });
 
   // --- approve -------------------------------------------------------------
   await page.locator("[data-decision-note]").fill("Go ahead, keep it short.");
@@ -219,6 +227,18 @@ try {
   assert.equal(await page.locator(".composer").count(), 0, "a decided ask has no composer");
   const approvedThread = await page.locator("[data-approval-thread] .bubble").last().textContent();
   assert.match(approvedThread, /Go ahead, keep it short/);
+
+  // The audit feed names every transition with its actor and time.
+  await page.locator("[data-approval-audit] summary").click();
+  await page.locator('[data-audit-kind="created"]').waitFor();
+  assert.equal(await page.locator("[data-approval-audit] [data-audit-kind]").count(), 2);
+  await page.locator('[data-audit-kind="approved"]').waitFor();
+  assert.match(await page.locator('[data-audit-kind="approved"]').textContent(), /Operator/);
+  assert.equal(await page.locator('[data-audit-kind="approved"] time').count(), 1);
+
+  // The badge drops by one once the ask is decided.
+  const badgeAfter = Number((await badge.textContent()).trim());
+  assert.equal(badgeAfter, badgeBefore - 1, "the nav badge follows decisions");
 
   // The ask leaves Needs you and appears under Answered.
   await page.locator('[data-filter="answered"]').click();
@@ -283,6 +303,26 @@ try {
     () => document.querySelector("[data-approval-status]")?.textContent === "changes requested",
   );
   await page.locator('[data-resolution="changes"]').waitFor();
+
+  // --- narrow width swaps the list for the detail --------------------------
+  await page.setViewportSize({ width: 900, height: 1000 });
+  // The previous selection left the detail open; return to the list first.
+  if (await page.locator("[data-approval-detail] .back").isVisible()) {
+    await page.locator("[data-approval-detail] .back").click();
+  }
+  await page.locator(`[data-approval-card="${fx.ids.window}"]`).click();
+  await page.locator("[data-approval-detail] .detail").waitFor();
+  assert.equal(await page.locator("[data-approval-detail] .back").isVisible(), true, "narrow detail has a back button");
+  await page.locator("[data-approval-detail] .back").click();
+  await page.setViewportSize({ width: 1440, height: 1000 });
+
+  // Reduced motion turns transitions off globally.
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  const transition = await page.evaluate(() =>
+    getComputedStyle(document.querySelector(".ask-card")).transitionDuration,
+  );
+  assert.match(transition, /0\.01ms|0s/, `reduced motion keeps transitions off (got ${transition})`);
+  await page.emulateMedia({ reducedMotion: "no-preference" });
 
   // --- maintenance ask editor ---------------------------------------------
   await page.locator(`[data-approval-card="${fx.ids.window}"]`).click();

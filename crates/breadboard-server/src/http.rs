@@ -69,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         .route("/approvals", get(approvals::list).post(approvals::create))
         .route("/approvals/counts", get(approvals::counts_handler))
         .route("/approvals/{id}", get(approvals::get))
+        .route("/approvals/{id}/events", get(approvals::audit))
         .route("/approvals/{id}/revisions", post(approvals::revise))
         .route("/approvals/{id}/comments", post(approvals::comment))
         .route("/approvals/{id}/decision", post(approvals::decide_handler))

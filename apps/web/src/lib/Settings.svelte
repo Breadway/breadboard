@@ -410,6 +410,11 @@
           <span class="track"><span class="thumb"></span></span>
           <span>When a cycle I have issues in starts or ends</span>
         </label>
+        <label class="toggle">
+          <input type="checkbox" bind:checked={prefs.approvals} onchange={savePrefs} />
+          <span class="track"><span class="thumb"></span></span>
+          <span>Gotify pings for urgent and incident approval asks</span>
+        </label>
         <p class="hint">
           Desktop pop-ups use your browser's notification permission. For pop-ups on the bread
           desktop, run <code>modules/breadboard.lua</code> in breadd.
