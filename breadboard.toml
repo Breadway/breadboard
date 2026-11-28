@@ -115,3 +115,10 @@ ephemeral_prune_after_hours = 2             # BREADBOARD_AGENTS_EPHEMERAL_PRUNE_
 # keeps a handoff row, an agent event and an audit entry naming the previous
 # owner. 0 disables reaping.
 claim_reap_after_hours = 72                 # BREADBOARD_AGENTS_CLAIM_REAP_AFTER_HOURS
+
+[approvals]
+# Approval decisions are the operator's. An empty list means any authenticated
+# human may decide; listing logins pins the decision to those accounts. A
+# decision request that presents an agent identity is always refused.
+# operators = ["Breadway"]                  # BREADBOARD_APPROVALS_OPERATORS
+operators = []

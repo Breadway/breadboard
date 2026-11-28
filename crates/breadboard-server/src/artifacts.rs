@@ -309,18 +309,20 @@ fn storage_ext(filename: &str, kind: ArtifactKind) -> String {
     .to_string()
 }
 
-struct UploadInput {
-    filename: String,
-    mime: Option<String>,
-    bytes: Vec<u8>,
-    kind: ArtifactKind,
-    comment_id: Option<i64>,
-    review_ref: Option<String>,
-    agent_name: Option<String>,
-    session_id: Option<String>,
+pub(crate) struct UploadInput {
+    // Shared with the approvals module, which stores screenshots through this
+    // exact pipeline instead of a parallel one.
+    pub filename: String,
+    pub mime: Option<String>,
+    pub bytes: Vec<u8>,
+    pub kind: ArtifactKind,
+    pub comment_id: Option<i64>,
+    pub review_ref: Option<String>,
+    pub agent_name: Option<String>,
+    pub session_id: Option<String>,
 }
 
-async fn save_artifact(
+pub(crate) async fn save_artifact(
     app: &AppState,
     user: &AuthUser,
     key: &str,

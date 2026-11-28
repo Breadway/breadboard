@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use anyhow::Context;
 use breadboard_server::{
-    agent_events, agent_prune, auth, config::Config, db, http, notify, reviews, store, sync, usage,
-    AppState,
+    agent_events, agent_prune, approvals, auth, config::Config, db, http, notify, reviews, store,
+    sync, usage, AppState,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -100,6 +100,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     reviews::spawn_escalation(state.clone());
+    approvals::spawn_expiry_sweep(state.clone());
     tracing::info!(
         threshold_mins = reviews::REVIEW_ESCALATION_SECS / 60,
         "review escalation loop started"

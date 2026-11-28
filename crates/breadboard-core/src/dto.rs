@@ -773,3 +773,421 @@ impl ReviewRequestPatch {
         Ok(())
     }
 }
+
+// --- approvals ------------------------------------------------------------
+
+/// Constant limits shared by the REST handlers and the MCP tool descriptions.
+pub const MAX_APPROVAL_ATTACHMENTS: usize = 8;
+pub const MAX_APPROVAL_CHECKLIST: usize = 20;
+pub const MAX_APPROVAL_BODY_CHARS: usize = 64_000;
+
+/// A screenshot to attach to an ask. Either point at an artifact already
+/// uploaded to the ask's issue (`artifact_id`) or upload base64 data; the
+/// server stores uploads in the existing artifact table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApprovalAttachmentSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_base64: Option<String>,
+}
+
+impl ApprovalAttachmentSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.artifact_id.is_some() == self.data_base64.is_some() {
+            return Err("an attachment needs exactly one of artifact_id or data_base64".into());
+        }
+        if let Some(caption) = &self.caption {
+            if caption.chars().count() > 300 {
+                return Err("an attachment caption must be 300 characters or fewer".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Proposed maintenance window supplied with a maintenance ask or as its own
+/// proposal. Times are RFC3339 instants; `timezone` is the IANA name used to
+/// render them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMaintenanceWindow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+    pub ends_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub services: Vec<String>,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub risks: String,
+    #[serde(default)]
+    pub rollback: String,
+    #[serde(default)]
+    pub runbook_md: String,
+}
+
+impl NewMaintenanceWindow {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_window(
+            self.starts_at,
+            self.ends_at,
+            &self.services,
+            &self.reason,
+            &self.risks,
+            &self.rollback,
+            &self.runbook_md,
+        )
+    }
+}
+
+/// Partial update of a proposed window, used by the agent's proposal endpoint
+/// and by an operator sending a revised slot back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MaintenanceWindowPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub starts_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ends_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub services: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risks: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runbook_md: Option<String>,
+}
+
+impl MaintenanceWindowPatch {
+    pub fn is_empty(&self) -> bool {
+        self.title.is_none()
+            && self.starts_at.is_none()
+            && self.ends_at.is_none()
+            && self.timezone.is_none()
+            && self.services.is_none()
+            && self.reason.is_none()
+            && self.risks.is_none()
+            && self.rollback.is_none()
+            && self.runbook_md.is_none()
+    }
+}
+
+fn validate_window(
+    starts_at: chrono::DateTime<chrono::Utc>,
+    ends_at: chrono::DateTime<chrono::Utc>,
+    services: &[String],
+    reason: &str,
+    risks: &str,
+    rollback: &str,
+    runbook_md: &str,
+) -> Result<(), String> {
+    if ends_at <= starts_at {
+        return Err("a maintenance window must end after it starts".into());
+    }
+    let minutes = (ends_at - starts_at).num_minutes();
+    if minutes < 15 {
+        return Err("a maintenance window must be at least 15 minutes".into());
+    }
+    if minutes > 24 * 60 {
+        return Err("a maintenance window must be 24 hours or less".into());
+    }
+    if services.len() > 50 {
+        return Err("a window may list at most 50 services".into());
+    }
+    if services.iter().any(|s| s.trim().is_empty() || s.chars().count() > 120) {
+        return Err("each service name must be 1 to 120 characters".into());
+    }
+    for (name, value) in [
+        ("reason", reason),
+        ("risks", risks),
+        ("rollback", rollback),
+        ("runbook_md", runbook_md),
+    ] {
+        if value.chars().count() > 20_000 {
+            return Err(format!("{name} must be 20000 characters or fewer"));
+        }
+    }
+    Ok(())
+}
+
+/// Create an ask as the owning agent. `project` and `issue` are a key/id; the
+/// issue wins for the project when both are supplied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewApprovalAsk {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<crate::ApprovalKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgency: Option<crate::ApprovalUrgency>,
+    pub title: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub body_md: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    #[serde(default)]
+    pub checklist: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<ApprovalAttachmentSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<NewMaintenanceWindow>,
+}
+
+impl NewApprovalAsk {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.agent_name)?;
+        non_empty(&self.title)?;
+        if self.title.chars().count() > 300 {
+            return Err("title must be 300 characters or fewer".into());
+        }
+        validate_ask_body(&self.summary, &self.body_md, &self.checklist)?;
+        if let Some(kind) = self.kind {
+            if kind == crate::ApprovalKind::Maintenance && self.window.is_none() {
+                return Err("a maintenance ask needs a proposed window".into());
+            }
+            if kind != crate::ApprovalKind::Maintenance && self.window.is_some() {
+                return Err("only a maintenance ask can carry a window".into());
+            }
+        }
+        if self.attachments.len() > MAX_APPROVAL_ATTACHMENTS {
+            return Err(format!(
+                "an ask may carry at most {MAX_APPROVAL_ATTACHMENTS} screenshots"
+            ));
+        }
+        for attachment in &self.attachments {
+            attachment.validate()?;
+        }
+        if let Some(window) = &self.window {
+            window.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Resubmit the same ask after a changes request. Omitted fields keep their
+/// current value; attachments append to the existing gallery.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApprovalRevision {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub urgency: Option<crate::ApprovalUrgency>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checklist: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_md: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollback_md: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expires_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(
+        default,
+        deserialize_with = "double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub deadline: Option<Option<String>>,
+    #[serde(default)]
+    pub attachments: Vec<ApprovalAttachmentSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<MaintenanceWindowPatch>,
+}
+
+impl ApprovalRevision {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.agent_name)?;
+        if let Some(title) = &self.title {
+            non_empty(title)?;
+        }
+        if let Some(checklist) = &self.checklist {
+            validate_checklist(checklist)?;
+        }
+        if self.attachments.len() > MAX_APPROVAL_ATTACHMENTS {
+            return Err(format!(
+                "a revision may carry at most {MAX_APPROVAL_ATTACHMENTS} screenshots"
+            ));
+        }
+        for attachment in &self.attachments {
+            attachment.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// A non-decision message in the ask thread. An agent supplies its identity;
+/// an operator omits `agent_name`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalComment {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub body_md: String,
+}
+
+impl ApprovalComment {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.body_md)?;
+        if self.body_md.chars().count() > MAX_APPROVAL_BODY_CHARS {
+            return Err(format!(
+                "a comment must be {MAX_APPROVAL_BODY_CHARS} characters or fewer"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Operator decision. `agent_name` is supplied by a caller acting as an agent
+/// so the server can refuse it explicitly instead of silently accepting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalDecisionInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    pub decision: crate::ApprovalDecision,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_md: Option<String>,
+    /// A revised slot to record with the decision. Approving uses it as the
+    /// approved window; any other decision leaves the window proposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<MaintenanceWindowPatch>,
+}
+
+impl ApprovalDecisionInput {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(note) = &self.note_md {
+            if note.chars().count() > MAX_APPROVAL_BODY_CHARS {
+                return Err(format!(
+                    "a decision note must be {MAX_APPROVAL_BODY_CHARS} characters or fewer"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Withdraw as the owning agent. `agent_name` is required.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalWithdrawal {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// A freeze period for the maintenance calendar. Created by an operator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewFreezePeriod {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    pub label: String,
+    pub starts_at: chrono::DateTime<chrono::Utc>,
+    pub ends_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl NewFreezePeriod {
+    pub fn validate(&self) -> Result<(), String> {
+        non_empty(&self.label)?;
+        if self.label.chars().count() > 200 {
+            return Err("a freeze label must be 200 characters or fewer".into());
+        }
+        if self.ends_at <= self.starts_at {
+            return Err("a freeze must end after it starts".into());
+        }
+        Ok(())
+    }
+}
+
+/// Define a maintenance window on its own (an ask may be created after it) or
+/// replace a proposal. Always creates/replaces the ask's window when `ask_id`
+/// is present; otherwise it creates a standalone window row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewMaintenanceProposal {
+    pub agent_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_id: Option<i64>,
+    #[serde(flatten)]
+    pub window: NewMaintenanceWindow,
+    /// Optional ask context when this proposal should create an ask too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ask_body_md: Option<String>,
+}
+
+fn validate_ask_body(
+    summary: &str,
+    body_md: &str,
+    checklist: &[String],
+) -> Result<(), String> {
+    if summary.chars().count() > 1000 {
+        return Err("summary must be 1000 characters or fewer".into());
+    }
+    if body_md.chars().count() > MAX_APPROVAL_BODY_CHARS {
+        return Err(format!(
+            "body_md must be {MAX_APPROVAL_BODY_CHARS} characters or fewer"
+        ));
+    }
+    validate_checklist(checklist)
+}
+
+fn validate_checklist(checklist: &[String]) -> Result<(), String> {
+    if checklist.len() > MAX_APPROVAL_CHECKLIST {
+        return Err(format!(
+            "a checklist may have at most {MAX_APPROVAL_CHECKLIST} items"
+        ));
+    }
+    if checklist
+        .iter()
+        .any(|item| item.trim().is_empty() || item.chars().count() > 500)
+    {
+        return Err("each checklist item must be 1 to 500 characters".into());
+    }
+    Ok(())
+}

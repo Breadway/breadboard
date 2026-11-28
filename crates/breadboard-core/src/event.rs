@@ -136,6 +136,10 @@ pub enum BoardEvent {
         state: String,
         escalated: bool,
     },
+    /// An approval ask was created, revised, commented on, decided, withdrawn
+    /// or expired. Clients refetch the inbox, counts and the open ask.
+    #[serde(rename = "approval.updated")]
+    ApprovalUpdated { id: i64, status: String },
 }
 
 impl BoardEvent {
@@ -163,6 +167,7 @@ impl BoardEvent {
             BoardEvent::ChatMessage { .. } => "bread.board.chat.message",
             BoardEvent::ChatRoomDeleted { .. } => "bread.board.chat.room.deleted",
             BoardEvent::ReviewUpdated { .. } => "bread.board.review.updated",
+            BoardEvent::ApprovalUpdated { .. } => "bread.board.approval.updated",
         }
     }
 }

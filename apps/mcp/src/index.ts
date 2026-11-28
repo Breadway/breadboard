@@ -1483,6 +1483,257 @@ tool(
   ({ project, markdown, dry_run, repair }) => run(() => client.importMarkdown({ project, markdown, dry_run, repair })),
 );
 
+
+// --- approvals -------------------------------------------------------------
+//
+// Agents open, revise, comment on and withdraw their own asks. There is
+// deliberately no decision tool: approval decisions are the operator's and the
+// server refuses any decision request that presents an agent identity.
+
+const approvalAttachment = z.object({
+  artifact_id: z.number().int().optional().describe("existing screenshot artifact on the ask's issue"),
+  caption: z.string().optional().describe("caption under the image"),
+  filename: z.string().optional().describe("display filename for a base64 upload"),
+  mime: z.string().optional().describe("e.g. image/png; screenshots must be png, jpeg, gif or webp"),
+  data_base64: z.string().optional().describe("base64 image data (raw or a data: URL)"),
+});
+
+const approvalWindow = z.object({
+  project: z.string().optional().describe("project key, defaults to the ask's project"),
+  title: z.string().optional().describe("window title, defaults to the ask title"),
+  starts_at: z.string().describe("RFC3339 start instant, e.g. 2026-11-29T02:00:00Z"),
+  ends_at: z.string().describe("RFC3339 end instant; at least 15 minutes and at most 24 hours later"),
+  timezone: z.string().optional().describe("IANA timezone for display, e.g. Australia/Perth"),
+  services: z.array(z.string()).optional().describe("services affected"),
+  reason: z.string().optional(),
+  risks: z.string().optional(),
+  rollback: z.string().optional(),
+  runbook_md: z.string().optional().describe("markdown runbook; numbered headings become steps"),
+});
+
+const approvalWindowPatch = approvalWindow.partial();
+
+/** Agents match with spaces or hyphens, the same rule the server uses. */
+const sameAgent = (a: string, b: string) =>
+  a.trim().toLowerCase().replaceAll(" ", "-") === b.trim().toLowerCase().replaceAll(" ", "-");
+
+tool(
+  "create_approval_ask",
+  "Open an approval, info or maintenance ask for the operator. Include the markdown body, " +
+    "what you need from the operator (checklist), risk and rollback, optional screenshots " +
+    "(artifact ids or base64) and, for a maintenance ask, the proposed window. One-shot " +
+    "approvals may carry expires_at. The ask appears in the operator's inbox; you cannot " +
+    "decide it yourself.",
+  {
+    title: z.string().describe("one-line ask title"),
+    summary: z.string().optional().describe("short inbox summary"),
+    body_md: z.string().optional().describe("full markdown context"),
+    kind: z.enum(["approval", "info", "maintenance"]).optional(),
+    urgency: z.enum(["low", "normal", "high"]).optional(),
+    project: z.string().optional().describe("project key"),
+    issue: z.string().optional().describe("linked issue key, e.g. BB-252"),
+    environment: z.string().optional().describe("where the change happens"),
+    checklist: z.array(z.string()).optional().describe("what the agent needs from the operator"),
+    risk_md: z.string().optional(),
+    rollback_md: z.string().optional(),
+    expires_at: z.string().optional().describe("RFC3339 instant after which a pending ask expires"),
+    deadline: z.string().optional().describe("human deadline, e.g. 'today 18:00'"),
+    attachments: z.array(approvalAttachment).optional(),
+    window: approvalWindow.optional().describe("required when kind is maintenance"),
+    agent_name: z.string().optional().describe("agent name; defaults to this MCP session"),
+  },
+  ({ agent_name, ...args }: any) =>
+    run(() =>
+      client.createApproval({
+        ...args,
+        agent_name: chatAgent(agent_name),
+        session_id: callSessionId(),
+      }),
+    ),
+);
+
+tool(
+  "revise_approval_ask",
+  "Resubmit your own ask after a changes request (or update it while pending). The same ask " +
+    "returns as a new revision and the full thread is kept. Approved, declined, answered, " +
+    "withdrawn and expired asks cannot be revised.",
+  {
+    id: z.number().int(),
+    title: z.string().optional(),
+    summary: z.string().optional(),
+    body_md: z.string().optional(),
+    urgency: z.enum(["low", "normal", "high"]).optional(),
+    checklist: z.array(z.string()).optional(),
+    risk_md: z.string().optional(),
+    rollback_md: z.string().optional(),
+    expires_at: z.string().nullable().optional().describe("null clears the expiry"),
+    deadline: z.string().nullable().optional(),
+    attachments: z.array(approvalAttachment).optional().describe("appended to the gallery"),
+    window: approvalWindowPatch.optional().describe("move or edit the proposed window"),
+    agent_name: z.string().optional(),
+  },
+  ({ id, agent_name, ...args }: any) =>
+    run(() =>
+      client.reviseApproval(id, {
+        ...args,
+        agent_name: chatAgent(agent_name),
+        session_id: callSessionId(),
+      }),
+    ),
+);
+
+tool(
+  "comment_on_approval",
+  "Add a non-decision message to an open ask thread as its owning agent.",
+  {
+    id: z.number().int(),
+    body_md: z.string(),
+    agent_name: z.string().optional(),
+  },
+  ({ id, body_md, agent_name }: any) =>
+    run(() =>
+      client.commentOnApproval(id, {
+        body_md,
+        agent_name: chatAgent(agent_name),
+        session_id: callSessionId(),
+      }),
+    ),
+);
+
+tool(
+  "withdraw_approval",
+  "Withdraw your own open ask. The operator can no longer decide it.",
+  {
+    id: z.number().int(),
+    note: z.string().optional().describe("why it is no longer needed"),
+    agent_name: z.string().optional(),
+  },
+  ({ id, note, agent_name }: any) =>
+    run(() =>
+      client.withdrawApproval(id, {
+        note,
+        agent_name: chatAgent(agent_name),
+        session_id: callSessionId(),
+      }),
+    ),
+);
+
+tool(
+  "get_approval",
+  "Read one ask with its thread, screenshots, proposed window, revision and the current " +
+    "decision and note, so you can act without another read.",
+  { id: z.number().int(), agent_name: z.string().optional() },
+  ({ id, agent_name }: any) => run(() => client.getApproval(id, { agent: chatAgent(agent_name) })),
+);
+
+tool(
+  "list_my_approvals",
+  "List the asks opened by this agent, newest first, including each decision and note.",
+  {
+    status: z
+      .enum(["pending", "approved", "declined", "changes", "answered", "withdrawn", "expired"])
+      .optional(),
+    kind: z.enum(["approval", "info", "maintenance"]).optional(),
+    limit: z.number().int().optional(),
+    agent_name: z.string().optional(),
+  },
+  ({ status, kind, limit, agent_name }: any) =>
+    run(() =>
+      client.listApprovals({
+        agent: chatAgent(agent_name),
+        status,
+        kind,
+        limit,
+      }),
+    ),
+);
+
+tool(
+  "propose_maintenance_window",
+  "Propose a maintenance window. Without ask_id this opens a maintenance ask (title, context " +
+    "and an optional linked issue); with ask_id it reads that ask and moves or edits its own " +
+    "still-proposed window. An ask with no window, or an ask owned by another agent, is refused. " +
+    "Conflicts with another window or a change freeze are shown but never block.",
+  {
+    title: z.string().describe("ask and window title"),
+    starts_at: z.string().describe("RFC3339 start instant"),
+    ends_at: z.string().describe("RFC3339 end instant"),
+    timezone: z.string().optional(),
+    services: z.array(z.string()).optional(),
+    reason: z.string().optional(),
+    risks: z.string().optional(),
+    rollback: z.string().optional(),
+    runbook_md: z.string().optional(),
+    project: z.string().optional(),
+    issue: z.string().optional(),
+    ask_id: z
+      .number()
+      .int()
+      .optional()
+      .describe("ask id whose own proposed window to move; the server resolves its window id"),
+    summary: z.string().optional(),
+    body_md: z.string().optional(),
+    agent_name: z.string().optional(),
+  },
+  ({ ask_id, agent_name, ...args }: any) =>
+    run(async () => {
+      const name = chatAgent(agent_name);
+      if (ask_id) {
+        const ask = await client.getApproval(ask_id, { agent: name });
+        if (!ask.window) {
+          throw new Error(
+            `ask ${ask_id} has no proposed maintenance window; open one with propose_maintenance_window`,
+          );
+        }
+        if (!sameAgent(ask.agent_name, name)) {
+          throw new Error(
+            `ask ${ask_id} belongs to ${ask.agent_name}; you can only move your own proposed window`,
+          );
+        }
+        const { title, starts_at, ends_at, timezone, services, reason, risks, rollback, runbook_md } =
+          args;
+        return client.updateMaintenanceWindow(ask.window.id, {
+          agent_name: name,
+          session_id: callSessionId(),
+          title,
+          starts_at,
+          ends_at,
+          timezone,
+          services,
+          reason,
+          risks,
+          rollback,
+          runbook_md,
+        });
+      }
+      const { summary, body_md, project, issue, ...window } = args;
+      return client.createApproval({
+        agent_name: name,
+        session_id: callSessionId(),
+        kind: "maintenance",
+        title: window.title,
+        summary,
+        body_md,
+        project,
+        issue,
+        window,
+      });
+    }),
+);
+
+tool(
+  "list_maintenance_windows",
+  "List maintenance windows in a time range with their status, services, risk, rollback and " +
+    "runbook. Use it to pick a slot that does not collide with another window or a freeze.",
+  {
+    from: z.string().optional().describe("RFC3339 range start"),
+    to: z.string().optional().describe("RFC3339 range end"),
+    status: z.enum(["proposed", "approved", "in_progress", "completed", "cancelled"]).optional(),
+    project: z.string().optional(),
+  },
+  (args: any) => run(() => client.listMaintenanceWindows(args)),
+);
+
 tool(
   "inbox",
   "List your notification inbox.",

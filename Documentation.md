@@ -402,6 +402,18 @@ issues. Markdown imports use the same issue-creation rule.
 | `GET` | `/api/reviews` | review queue. `?reviewer=` returns that human/agent reviewer's records, accepting either `scratch sentinel` or `scratch-sentinel`; `?outstanding=true` limits it to unresolved requests and composes with `?issue=`; `?issue=` returns one issue's requests; neither returns every outstanding request. `limit` caps the unfiltered list at 500 |
 | `PATCH` | `/api/reviews/{id}` | `{ state, note?, agent_name? }`: record `accepted`, `changes_requested` or `approved`. `agent_name` is the identity check for an agent reviewer using a shared human session. Only the named reviewer may record an outcome; the requester gets `403` and must withdraw instead. An approved request is terminal. Emits `review.updated`; an outcome notifies the requester |
 | `DELETE` | `/api/reviews/{id}` | requester withdraws an unresolved request: the record is removed so it no longer gates done. `204`. A non-requester is `403`; an approved request cannot be withdrawn (`409`). Emits `review.updated` with `state: "withdrawn"` |
+| `GET` | `/api/approvals` | approval inbox. Filters: `filter` (`needs`, `all`, `approval`, `maintenance`, `info`, `changes`, `answered`), `status`, `kind`, `project` (key or id), `issue`, `urgency`, `agent`, `unread`, `q` (title/summary/body substring), `limit` (default 200, max 500), `offset`. Pending asks sort first, then newest. Each ask carries its events, screenshot links and proposed window. Reading with no `?agent=` uses your operator read cursor for `unread` |
+| `GET` | `/api/approvals/counts` | `{ needs, unread, all, approval, maintenance, info, changes, answered }` for the navigation badge and filter chips |
+| `GET` | `/api/approvals/{id}` | one ask with thread, screenshots and window. An operator read advances the read cursor; `?agent=` reads as that agent without touching it |
+| `POST` | `/api/approvals` | create as an agent: `{ agent_name, session_id?, project?, issue?, kind?, urgency?, title, summary?, body_md?, environment?, checklist?, risk_md?, rollback_md?, expires_at?, deadline?, attachments?, window? }`. `kind` is `approval`, `info` or `maintenance`; maintenance requires `window`. Attachments are `{ artifact_id, caption? }` or `{ filename, data_base64, mime?, caption? }` and reuse the screenshot artifact pipeline. `201` |
+| `POST` | `/api/approvals/{id}/revisions` | the owning agent resubmits: revision increments, status returns to `pending`, and a `revised` event is appended. Allowed only while `pending` or `changes`; anything else is `409`. Optional fields are unchanged when omitted; `expires_at` and `deadline` accept an explicit `null` to clear them; attachments append |
+| `POST` | `/api/approvals/{id}/comments` | `{ body_md, agent_name?, session_id? }`: a non-decision thread message. An agent must own the ask; a human omits `agent_name`. `201` |
+| `POST` | `/api/approvals/{id}/decision` | **operator only**: `{ decision, note_md?, window? }` with `approve`, `decline`, `changes` or `info`. One-shot: only a `pending` ask can be decided, and a second decision is `409`. `info` closes the ask as `answered`; `changes` hides it from Needs you until the agent resubmits. A request that presents an agent identity is `403`, as is a human outside `approvals.operators` when that list is set. An optional `window` patch is validated before anything commits; approving also approves the window |
+| `POST` | `/api/approvals/{id}/withdraw` | `{ agent_name, session_id?, note? }`: the owning agent withdraws an open ask (`pending` or `changes`). The row stays as history. `403` for another agent, `409` once closed |
+| `GET` | `/api/maintenance/windows` | windows overlapping `from`/`to` (RFC3339), filtered by `status`, `project` and `agent`. Includes status, services, reason, risks, rollback and runbook |
+| `PATCH` | `/api/maintenance/windows/{id}` | `{ agent_name, session_id?, title?, starts_at?, ends_at?, timezone?, services?, reason?, risks?, rollback?, runbook_md? }`: the proposing agent moves or edits a still-`proposed` window. The merged window is validated as a whole (15 minutes to 24 hours). An approved window is `409` |
+| `GET` | `/api/maintenance/freezes` | freeze and blackout periods overlapping `from`/`to`, optional `project`. The calendar renders these; overlaps never block a proposal or a decision |
+| `POST` | `/api/maintenance/freezes` | **operator only**: `{ label, starts_at, ends_at, project? }`. `201` |
 | `PATCH` | `/api/issues/{key}` | partial update (see IssuePatch below); synced-field changes append `sync_log` rows. The response does not wait for Forgejo; `x-breadboard-writeback: pending` means the push runs in the background |
 | `DELETE` | `/api/issues/{key}` | `204`, emits `card.deleted` |
 | `PUT` | `/api/issues/{key}/project` | `{ project }` (key or id): moves the issue to a different project: re-keys it from the target project's counter and clears any Forgejo link (it belonged to the old project's repo). Best-effort closes the old linked Forgejo issue with a note, then re-creates it fresh on the new project's repo if one is mapped. Emits `card.updated` |
@@ -547,6 +559,52 @@ A request that has not changed state for 60 minutes is escalated once
 change clears the escalation so a new stall can escalate again. `review.updated`
 carries the change to connected clients.
 
+
+### Approvals and maintenance windows
+
+An approval ask is a durable record between one agent and the operator. Kinds
+are `approval`, `info` and `maintenance`; statuses are `pending`, `approved`,
+`declined`, `changes`, `answered`, `withdrawn` and `expired`. The agent owns
+the ask: it creates, revises, comments on and withdraws it, and only a human
+operator records a decision. `approvals.operators` in the config pins the
+allowed logins; an empty list means any authenticated human. A decision request
+that presents an agent identity is refused even when the agent is the ask's
+owner, and the MCP surface exposes no decision tool.
+
+**Identity boundary.** The web session and the MCP tools authenticate with the
+same Forgejo OAuth session or API token, and an agent process runs with a token
+its owner minted. `approvals.operators` is a login allowlist, not a separate
+credential. The server refuses any decision request that presents an agent
+identity, and the MCP surface exposes no decision tool, but an agent that
+deliberately calls REST without declaring itself holds the operator's own token
+and cannot be distinguished from that human. True separation of agent and
+operator credentials is tracked as BB-258.
+
+A decision is one-shot. Only `pending` can be decided, and two decisions race
+safely because the status update is conditional. `approve` and `decline` are
+terminal, `info` (send instructions) closes the ask as `answered`, and
+`changes` is deliberately not an outcome: it hides the ask from Needs you and
+returns it to the agent, who resubmits the same row. A resubmission increments
+`revision`, appends a `revised` event and sets the status back to `pending`, so
+the full thread and the revision marker stay on one ask.
+
+A pending ask may carry `expires_at`. When it lapses it becomes `expired` with
+an audit event and can no longer be decided. Expiry is applied lazily on read
+and decision and by an hourly sweep.
+
+Every transition appends an `approval_events` row (`created`, `revised`,
+`comment`, `approved`, `declined`, `changes`, `info`, `withdrawn`, `expired`)
+with the actor kind and name. Screenshots reuse `issue_artifacts`: an
+attachment points at a screenshot artifact on the ask's issue, so retention and
+the authenticated download route are unchanged.
+
+A `maintenance` ask owns one proposed `maintenance_windows` row. The agent may
+move or edit it while it is `proposed`; approving the ask approves the window.
+`maintenance_freezes` holds change freezes. Overlaps between windows, and
+between a window and a freeze, are computed by the calendar and shown as a
+visual conflict only. They never block a proposal or a decision and there is no
+override note.
+
 ### Device auth (CLI/TUI)
 
 | Method | Path | Notes |
@@ -611,6 +669,7 @@ after reconnecting to recover missed changes.
 | `sync.drift` | `bread.board.sync.drift` | `issue_id`, `key`, `field`, `breadboard_value`, `forgejo_value`, `winner` (`breadboard`/`forgejo`), `at` |
 | `notified` | `bread.board.notified` | `user_id` (clients filter by their own id) |
 | `review.updated` | `bread.board.review.updated` | `id`, `issue_id`, `key`, `reviewer`, `state`, `escalated` |
+| `approval.updated` | `bread.board.approval.updated` | `id`, `status` (refetch the inbox, counts and open ask) |
 
 ---
 

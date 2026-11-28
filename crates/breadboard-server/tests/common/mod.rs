@@ -23,7 +23,15 @@ pub struct TestApp {
 }
 
 pub async fn spawn() -> TestApp {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init();
     spawn_full(None, None, |_| {}).await
+}
+
+/// Spawn with a caller-prepared config, e.g. a pinned approvals operator list.
+pub async fn spawn_with_config(mutate: impl FnOnce(&mut Config)) -> TestApp {
+    spawn_full_with(None, None, |_| {}, mutate).await
 }
 
 pub async fn spawn_with_forgejo(fake: Option<(String, String)>) -> TestApp {
@@ -44,6 +52,15 @@ async fn spawn_full(
     fake: Option<(String, String)>,
     claim_limits: Option<(i64, i64)>,
     usage: impl FnOnce(&mut UsageConfig),
+) -> TestApp {
+    spawn_full_with(fake, claim_limits, usage, |_| {}).await
+}
+
+async fn spawn_full_with(
+    fake: Option<(String, String)>,
+    claim_limits: Option<(i64, i64)>,
+    usage: impl FnOnce(&mut UsageConfig),
+    config_mutate: impl FnOnce(&mut Config),
 ) -> TestApp {
     let tmp = tempfile::tempdir().unwrap();
     let mut config = Config {
@@ -66,6 +83,7 @@ async fn spawn_full(
         config.claims.max_exclusive_per_orchestrator = per_orchestrator;
     }
     usage(&mut config.usage);
+    config_mutate(&mut config);
 
     let db = db::connect(&config.database_url()).await.unwrap();
     store::ensure_seed(&db).await.unwrap();

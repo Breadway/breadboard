@@ -186,6 +186,260 @@ export interface ReviewRequestPatch {
   agent_name?: string;
 }
 
+
+// --- approvals (BB-252/BB-253) -------------------------------------------
+
+export type ApprovalKind = "approval" | "info" | "maintenance";
+export type ApprovalUrgency = "low" | "normal" | "high";
+export type ApprovalStatus =
+  | "pending"
+  | "approved"
+  | "declined"
+  | "changes"
+  | "answered"
+  | "withdrawn"
+  | "expired";
+export type ApprovalEventKind =
+  | "created"
+  | "revised"
+  | "comment"
+  | "approved"
+  | "declined"
+  | "changes"
+  | "info"
+  | "withdrawn"
+  | "expired";
+export type ApprovalActorKind = "agent" | "human" | "system";
+/** What the operator decides. `info` sends instructions and closes the ask. */
+export type ApprovalDecision = "approve" | "decline" | "changes" | "info";
+export type MaintenanceStatus =
+  | "proposed"
+  | "approved"
+  | "in_progress"
+  | "completed"
+  | "cancelled";
+
+export interface ApprovalEvent {
+  id: number;
+  ask_id: number;
+  kind: ApprovalEventKind;
+  actor_kind: ApprovalActorKind;
+  actor_name: string;
+  body_md: string;
+  created_at: string;
+  /** Revision number, decision, revised window and similar context. */
+  meta: Record<string, string>;
+}
+
+/** Screenshot linked to an ask. The file itself lives in the artifact store. */
+export interface ApprovalAttachment {
+  id: number;
+  ask_id: number;
+  artifact_id: number;
+  caption: string;
+  sort: number;
+  filename: string;
+  mime: string;
+  size: number;
+  created_at: string;
+}
+
+export interface MaintenanceWindow {
+  id: number;
+  ask_id: number | null;
+  project_id: number | null;
+  project_key: string | null;
+  agent_name: string;
+  title: string;
+  starts_at: string;
+  ends_at: string;
+  timezone: string;
+  services: string[];
+  reason: string;
+  risks: string;
+  rollback: string;
+  runbook_md: string;
+  status: MaintenanceStatus;
+  decided_by: number | null;
+  decided_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** A change freeze or blackout. Overlaps are shown, never blocking. */
+export interface FreezePeriod {
+  id: number;
+  project_id: number | null;
+  project_key: string | null;
+  label: string;
+  starts_at: string;
+  ends_at: string;
+  created_at: string;
+}
+
+export interface ApprovalAsk {
+  id: number;
+  project_id: number | null;
+  project_key: string | null;
+  project_name: string | null;
+  issue_id: number | null;
+  issue_key: string | null;
+  issue_title: string | null;
+  issue_status: Status | null;
+  agent_name: string;
+  session_id: string | null;
+  kind: ApprovalKind;
+  urgency: ApprovalUrgency;
+  title: string;
+  summary: string;
+  body_md: string;
+  environment: string | null;
+  status: ApprovalStatus;
+  revision: number;
+  checklist: string[];
+  risk_md: string | null;
+  rollback_md: string | null;
+  expires_at: string | null;
+  deadline: string | null;
+  /** True while the newest event is newer than your read cursor. */
+  unread: boolean;
+  decided_by: number | null;
+  decided_by_login: string | null;
+  decided_at: string | null;
+  decision_note_md: string | null;
+  created_at: string;
+  updated_at: string;
+  events: ApprovalEvent[];
+  attachments: ApprovalAttachment[];
+  window: MaintenanceWindow | null;
+}
+
+export interface ApprovalCounts {
+  needs: number;
+  unread: number;
+  all: number;
+  approval: number;
+  maintenance: number;
+  info: number;
+  changes: number;
+  answered: number;
+}
+
+/** Either an artifact already on the ask's issue, or an upload. */
+export interface ApprovalAttachmentSpec {
+  artifact_id?: number;
+  caption?: string;
+  filename?: string;
+  mime?: string;
+  data_base64?: string;
+}
+
+export interface NewApprovalAsk {
+  agent_name: string;
+  session_id?: string;
+  project?: string;
+  issue?: string;
+  kind?: ApprovalKind;
+  urgency?: ApprovalUrgency;
+  title: string;
+  summary?: string;
+  body_md?: string;
+  environment?: string;
+  checklist?: string[];
+  risk_md?: string;
+  rollback_md?: string;
+  expires_at?: string;
+  deadline?: string;
+  attachments?: ApprovalAttachmentSpec[];
+  window?: NewMaintenanceWindow;
+}
+
+export interface NewMaintenanceWindow {
+  project?: string;
+  title?: string;
+  starts_at: string;
+  ends_at: string;
+  timezone?: string;
+  services?: string[];
+  reason?: string;
+  risks?: string;
+  rollback?: string;
+  runbook_md?: string;
+}
+
+export interface MaintenanceWindowPatch {
+  title?: string;
+  starts_at?: string;
+  ends_at?: string;
+  timezone?: string;
+  services?: string[];
+  reason?: string;
+  risks?: string;
+  rollback?: string;
+  runbook_md?: string;
+}
+
+/** Identity for moving a proposed window from an agent. */
+export interface MaintenanceWindowUpdate extends MaintenanceWindowPatch {
+  agent_name: string;
+  session_id?: string;
+}
+
+export interface ApprovalRevision {
+  agent_name: string;
+  session_id?: string;
+  title?: string;
+  summary?: string;
+  body_md?: string;
+  urgency?: ApprovalUrgency;
+  checklist?: string[];
+  risk_md?: string;
+  rollback_md?: string;
+  expires_at?: string | null;
+  deadline?: string | null;
+  attachments?: ApprovalAttachmentSpec[];
+  window?: MaintenanceWindowPatch;
+}
+
+export interface ApprovalCommentInput {
+  body_md: string;
+  agent_name?: string;
+  session_id?: string;
+}
+
+export interface ApprovalDecisionInput {
+  decision: ApprovalDecision;
+  note_md?: string;
+  window?: MaintenanceWindowPatch;
+}
+
+export interface ApprovalWithdrawal {
+  agent_name: string;
+  session_id?: string;
+  note?: string;
+}
+
+export interface NewFreezePeriod {
+  project?: string;
+  label: string;
+  starts_at: string;
+  ends_at: string;
+}
+
+export interface ApprovalListOptions {
+  filter?: "needs" | "all" | "approval" | "maintenance" | "info" | "changes" | "answered";
+  status?: ApprovalStatus;
+  kind?: ApprovalKind;
+  project?: string;
+  issue?: string;
+  urgency?: ApprovalUrgency;
+  agent?: string;
+  unread?: boolean;
+  q?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export type NotificationKind =
   | "assigned"
   | "mention"
@@ -1015,6 +1269,59 @@ export class BreadboardClient {
     this.req<ReviewRequest>("PATCH", `/api/reviews/${id}`, patch);
   withdrawReview = (id: number) =>
     this.req<void>("DELETE", `/api/reviews/${id}`);
+
+  // --- approvals ----------------------------------------------------------
+  listApprovals = (opts: ApprovalListOptions = {}) => {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(opts)) {
+      if (value === undefined || value === null || value === "") continue;
+      q.set(key, String(value));
+    }
+    const qs = q.toString();
+    return this.req<ApprovalAsk[]>("GET", `/api/approvals${qs ? `?${qs}` : ""}`);
+  };
+  approvalCounts = () => this.req<ApprovalCounts>("GET", "/api/approvals/counts");
+  getApproval = (id: number, opts: { agent?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (opts.agent) q.set("agent", opts.agent);
+    const qs = q.toString();
+    return this.req<ApprovalAsk>("GET", `/api/approvals/${id}${qs ? `?${qs}` : ""}`);
+  };
+  createApproval = (ask: NewApprovalAsk) =>
+    this.req<ApprovalAsk>("POST", "/api/approvals", ask);
+  reviseApproval = (id: number, revision: ApprovalRevision) =>
+    this.req<ApprovalAsk>("POST", `/api/approvals/${id}/revisions`, revision);
+  commentOnApproval = (id: number, comment: ApprovalCommentInput) =>
+    this.req<ApprovalAsk>("POST", `/api/approvals/${id}/comments`, comment);
+  decideApproval = (id: number, decision: ApprovalDecisionInput) =>
+    this.req<ApprovalAsk>("POST", `/api/approvals/${id}/decision`, decision);
+  withdrawApproval = (id: number, withdrawal: ApprovalWithdrawal) =>
+    this.req<ApprovalAsk>("POST", `/api/approvals/${id}/withdraw`, withdrawal);
+  listMaintenanceWindows = (
+    opts: { from?: string; to?: string; status?: MaintenanceStatus; project?: string; agent?: string } = {},
+  ) => {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(opts)) {
+      if (value === undefined || value === null || value === "") continue;
+      q.set(key, String(value));
+    }
+    const qs = q.toString();
+    return this.req<MaintenanceWindow[]>("GET", `/api/maintenance/windows${qs ? `?${qs}` : ""}`);
+  };
+  updateMaintenanceWindow = (id: number, patch: MaintenanceWindowUpdate) =>
+    this.req<MaintenanceWindow>("PATCH", `/api/maintenance/windows/${id}`, patch);
+  listFreezes = (opts: { from?: string; to?: string; project?: string } = {}) => {
+    const q = new URLSearchParams();
+    for (const [key, value] of Object.entries(opts)) {
+      if (value === undefined || value === null || value === "") continue;
+      q.set(key, String(value));
+    }
+    const qs = q.toString();
+    return this.req<FreezePeriod[]>("GET", `/api/maintenance/freezes${qs ? `?${qs}` : ""}`);
+  };
+  createFreeze = (freeze: NewFreezePeriod) =>
+    this.req<FreezePeriod>("POST", "/api/maintenance/freezes", freeze);
+
   listIssueArtifacts = (key: string) =>
     this.req<IssueArtifact[]>("GET", `/api/issues/${key}/artifacts`);
   /** Multipart upload from the browser (session cookie). */

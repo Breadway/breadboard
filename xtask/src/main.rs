@@ -182,6 +182,10 @@ fn all_event_names() -> Vec<&'static str> {
             state: String::new(),
             escalated: false,
         },
+        ApprovalUpdated {
+            id: 0,
+            status: String::new(),
+        },
     ];
     samples.iter().map(|e| e.bread_event_name()).collect()
 }
